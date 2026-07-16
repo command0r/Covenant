@@ -65,6 +65,10 @@ dotnet user-secrets set "OpenAI:ModelId"  "llama3.1:8b"               --project 
 Scripted demo (server running in another terminal): `./demo.sh`, or `./demo.sh --tamper` to also
 prove the audit chain detects edits (destructive to the log).
 
+Dashboard (FinOps savings, budgets, denials, kill switch, routing policy):
+open **http://localhost:5000/admin/ui** and enter the admin token. Self-contained page — no CDN,
+no external assets; the appliance stays a single artifact with no egress.
+
 Governed request (routes to OpenAI, gets attributed and audited):
 ```
 curl -s localhost:5000/v1/chat/completions \
