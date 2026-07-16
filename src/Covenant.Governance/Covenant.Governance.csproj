@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Governance references Core ONLY. It must never reference Adapters (src/CLAUDE.md). -->
+  <ItemGroup>
+    <ProjectReference Include="..\Covenant.Core\Covenant.Core.csproj" />
+  </ItemGroup>
+
+</Project>

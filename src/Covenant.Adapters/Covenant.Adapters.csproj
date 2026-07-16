@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\Covenant.Core\Covenant.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
+  </ItemGroup>
+
+  <!-- Version pinned against nuget.org 2026-07-15 (root CLAUDE.md: every dependency is pinned and audited). -->
+
+</Project>

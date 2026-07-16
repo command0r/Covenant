@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <!-- The appliance: one self-contained artifact (deploy/CLAUDE.md). Publish with:
+         dotnet publish -c Release -r win-x64 (or linux-x64) /p:PublishAot=true
+         If the AOT spike from ADR-0001 finds gaps, fall back to:
+         /p:PublishSingleFile=true /p:SelfContained=true -->
+    <PublishAot>false</PublishAot>
+    <!-- RDG compiles MapPost endpoints at build time. Without it (and with PublishAot=false) the
+         AOT analyzers from Directory.Build.props flag MapPost(Delegate) as IL2026/IL3050, which
+         TreatWarningsAsErrors turns into build failures. Also keeps the AOT path honest (ADR-0001). -->
+    <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <RootNamespace>Covenant.Host</RootNamespace>
+    <!-- Dev-only credential store, kept OUTSIDE the repo (~/.microsoft/usersecrets/covenant-host/).
+         Production uses env vars / the customer's vault (deploy/CLAUDE.md). -->
+    <UserSecretsId>covenant-host</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Covenant.Core\Covenant.Core.csproj" />
+    <ProjectReference Include="..\Covenant.Adapters\Covenant.Adapters.csproj" />
+    <ProjectReference Include="..\Covenant.Governance\Covenant.Governance.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned against nuget.org 2026-07-15; audited per root CLAUDE.md, recorded in docs/PROVENANCE.md. -->
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.7.0" />
+    <PackageReference Include="OpenAI" Version="2.12.0" />
+  </ItemGroup>
+
+</Project>

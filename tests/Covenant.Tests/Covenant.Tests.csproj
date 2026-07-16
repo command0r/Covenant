@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <!-- Test assemblies are not the shipped appliance; AOT analysis off here. -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Covenant.Core\Covenant.Core.csproj" />
+    <ProjectReference Include="..\..\src\Covenant.Adapters\Covenant.Adapters.csproj" />
+    <ProjectReference Include="..\..\src\Covenant.Governance\Covenant.Governance.csproj" />
+    <!-- Host is referenced for the audit chain writer/verifier and evidence export (tamper tests). -->
+    <ProjectReference Include="..\..\src\Covenant.Host\Covenant.Host.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned against nuget.org 2026-07-15. xunit v2 (maintenance line) — deliberate; v3 changes
+         runner packaging and buys us nothing for this slice. Runner 3.x executes both v2 and v3. -->
+    <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5" PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>

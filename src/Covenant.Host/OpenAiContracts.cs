@@ -1,0 +1,66 @@
+using System.Text.Json.Serialization;
+
+namespace Covenant.Host;
+
+// Minimal subset of the OpenAI chat-completions wire shape for the first slice.
+
+public sealed class OpenAiChatRequest
+{
+    [JsonPropertyName("model")] public string? Model { get; set; }
+    [JsonPropertyName("messages")] public List<OpenAiMessage> Messages { get; set; } = [];
+}
+
+public sealed class OpenAiMessage
+{
+    [JsonPropertyName("role")] public string Role { get; set; } = "user";
+    [JsonPropertyName("content")] public string Content { get; set; } = "";
+}
+
+public sealed class OpenAiChatResponse
+{
+    [JsonPropertyName("model")] public string Model { get; set; } = "";
+    [JsonPropertyName("choices")] public List<OpenAiChoice> Choices { get; set; } = [];
+    [JsonPropertyName("usage")] public OpenAiUsage Usage { get; set; } = new();
+}
+
+public sealed class OpenAiChoice
+{
+    [JsonPropertyName("index")] public int Index { get; set; }
+    [JsonPropertyName("message")] public OpenAiMessage Message { get; set; } = new();
+}
+
+public sealed class OpenAiUsage
+{
+    [JsonPropertyName("prompt_tokens")] public long PromptTokens { get; set; }
+    [JsonPropertyName("completion_tokens")] public long CompletionTokens { get; set; }
+    [JsonPropertyName("total_tokens")] public long TotalTokens { get; set; }
+}
+
+public sealed class ErrorResponse
+{
+    [JsonPropertyName("error")] public string Error { get; set; } = "";
+    [JsonPropertyName("reason")] public string Reason { get; set; } = "";
+}
+
+// Admin surface: kill-switch control (see Program.cs /admin/kill-switch).
+
+public sealed class KillSwitchRequest
+{
+    [JsonPropertyName("engaged")] public bool Engaged { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+}
+
+public sealed class KillSwitchState
+{
+    [JsonPropertyName("engaged")] public bool Engaged { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+}
+
+[JsonSerializable(typeof(OpenAiChatRequest))]
+[JsonSerializable(typeof(OpenAiChatResponse))]
+[JsonSerializable(typeof(ErrorResponse))]
+[JsonSerializable(typeof(KillSwitchRequest))]
+[JsonSerializable(typeof(KillSwitchState))]
+[JsonSerializable(typeof(EvidenceReport))]
+[JsonSerializable(typeof(StatusReport))]
+public partial class CovenantJsonContext : JsonSerializerContext;

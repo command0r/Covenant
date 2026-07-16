@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Covenant.Core depends on nothing (src/CLAUDE.md). Keep it that way. -->
+
+</Project>

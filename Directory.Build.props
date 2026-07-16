@@ -1,0 +1,21 @@
+<Project>
+
+  <!--
+    Shared settings for every project. Conventions here are the ones mandated by src/CLAUDE.md,
+    kept in one place so they cannot drift per-project.
+    NOTE: adjust TargetFramework to match the SDK installed on the build machine.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- src/CLAUDE.md: Nullable + warnings-as-errors on -->
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- ADR-0001: keep the AOT path honest from day one; surfaces trim/AOT warnings as errors -->
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,37 @@
+# --- Build output ---
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+publish/
+*.user
+*.suo
+.vs/
+.idea/
+.vscode/
+
+# --- OS noise ---
+.DS_Store
+
+# --- Test / coverage ---
+TestResults/
+coverage*.json
+coverage*.xml
+*.trx
+
+# --- Covenant-specific: NEVER commit these ---
+# Audit logs contain prompt/response metadata and principals (root CLAUDE.md: the perimeter is sacred).
+*audit*.log
+covenant-audit.log
+
+# Local secrets. Secrets live in the customer's vault, never in the repo or image.
+# (Dev credentials use `dotnet user-secrets`, stored OUTSIDE the repo in ~/.microsoft/usersecrets/ —
+#  nothing to ignore. Properties/launchSettings.json is tracked deliberately: it holds no secrets,
+#  only the Development environment + port that make user-secrets load.)
+appsettings.Development.json
+appsettings.Local.json
+secrets.json
+.env
+*.pfx
+*.key
