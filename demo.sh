@@ -95,6 +95,8 @@ if [ "${1:-}" = "--tamper" ]; then
     note "re-running the evidence export:"
     show "$(evidence)"
     note "chain_valid=false, first_invalid_line=$mid — entries after the break are no longer trusted evidence."
+    note "NOTE: the appliance now refuses to RESTART on this log (fail-closed). Archive it and point"
+    note "Audit:Path at a fresh file — deleting evidence is what the chain exists to catch."
 else
     say "Done. Optional finale: ./demo.sh --tamper (destructive — proves the chain detects edits)"
 fi

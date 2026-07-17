@@ -1,0 +1,14 @@
+# Permanent in-perimeter OTel collector for Covenant (ADR-0003).
+# Start once:  docker compose up -d      (restarts with Docker; survives reboots)
+# Watch spans: docker compose logs -f
+#
+# Production note: pin the image to a security-reviewed digest, not a floating tag.
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318"   # OTLP over HTTP — what Covenant's exporter speaks

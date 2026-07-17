@@ -127,6 +127,21 @@ var prices = new PriceBook(new Dictionary<string, (decimal, decimal)>
 var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();
 var spendLedger = new InMemorySpendLedger();
+
+// Budgets survive restarts: replay the audit log (the event store) into the ledger (its projection).
+// A tampered chain at boot is a fail-closed condition — serving requests on top of corrupted
+// evidence is exactly what this appliance exists to prevent.
+var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath);
+if (!chainAtBoot.Valid)
+{
+    Console.Error.WriteLine(
+        $"covenant: audit chain INVALID at line {chainAtBoot.FirstInvalidLine} ({chainAtBoot.Failure}).");
+    Console.Error.WriteLine(
+        "Refusing to start (fail-closed). Archive the log for investigation — do not delete evidence. " +
+        "Point Audit:Path at a fresh file to resume serving.");
+    Environment.Exit(1);
+}
+LedgerReplay.Rebuild(priorEntries, spendLedger);
 var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamCapsUsd };
 
 // --- Pipeline assembly. Outermost first; audit wraps everything; order per src/CLAUDE.md. ---

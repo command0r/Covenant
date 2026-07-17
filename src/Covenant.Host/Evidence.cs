@@ -75,6 +75,21 @@ public sealed class EvidenceReport
     [JsonPropertyName("requests_by_classification")] public required Dictionary<string, int> RequestsByClassification { get; init; }
 }
 
+/// <summary>
+/// Durable budgets without new infrastructure: the audit log is the event store, the in-memory spend
+/// ledger is a projection of it, rebuilt at startup by replaying attributed costs. When spend volume
+/// or HA ever outgrows replay, that is the trigger for a real store (audit-store ADR) — not before.
+/// </summary>
+public static class LedgerReplay
+{
+    public static void Rebuild(IReadOnlyList<AuditEntry> entries, Covenant.Governance.ISpendLedger ledger)
+    {
+        foreach (var e in entries)
+            if (e.Usage.CostUsd > 0m)
+                ledger.Record(e.Tags.Team, e.Usage.CostUsd);
+    }
+}
+
 public static class EvidenceExport
 {
     public static EvidenceReport Build(string auditLogPath, TimeProvider clock)

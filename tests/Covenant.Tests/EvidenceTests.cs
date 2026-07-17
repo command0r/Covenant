@@ -122,6 +122,26 @@ public sealed class EvidenceTests : IDisposable
     }
 
     [Fact]
+    public async Task Ledger_rebuilt_from_the_audit_log_matches_original_spend()
+    {
+        await WriteThroughRealSink(
+            Entry("a", PolicyEffect.Allow, team: "payments", cost: 0.10m),
+            Entry("b", PolicyEffect.Allow, team: "payments", cost: 0.05m),
+            Entry("c", PolicyEffect.Allow, team: "platform", cost: 0.20m),
+            Entry("d", PolicyEffect.Deny,  team: "platform"));            // denials cost nothing
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_path);
+        Assert.True(verification.Valid);
+
+        var ledger = new Covenant.Governance.InMemorySpendLedger();       // "restarted" appliance
+        LedgerReplay.Rebuild(entries, ledger);
+
+        Assert.Equal(0.15m, ledger.TeamSpendUsd("payments"));
+        Assert.Equal(0.20m, ledger.TeamSpendUsd("platform"));
+        Assert.Equal(0.35m, ledger.GlobalSpendUsd);
+    }
+
+    [Fact]
     public async Task Missing_log_is_an_empty_but_valid_report()
     {
         var report = EvidenceExport.Build(_path, TimeProvider.System);

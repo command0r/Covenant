@@ -1,0 +1,24 @@
+# Minimal collector: receive OTLP/HTTP from Covenant, print span trees to the container log.
+# To forward to a real backend (Langfuse, Grafana, Datadog agent — all in-perimeter), add an
+# exporter below and list it in the pipeline. The appliance itself never knows the difference.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  debug:
+    verbosity: detailed
+
+  # Example — forward to self-hosted Langfuse (uncomment and add to the pipeline):
+  # otlphttp/langfuse:
+  #   endpoint: "http://langfuse-host:3000/api/public/otel"
+  #   headers:
+  #     Authorization: "Basic <base64 of pk:sk>"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
