@@ -28,6 +28,10 @@
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
     <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.7.0" />
     <PackageReference Include="OpenAI" Version="2.12.0" />
+    <!-- ADR-0003: OTel lives ONLY in the Host, activated only when Otel:Endpoint is configured.
+         Core instruments with BCL ActivitySource and takes no OTel dependency. -->
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" Version="1.17.0" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
   </ItemGroup>
 
 </Project>

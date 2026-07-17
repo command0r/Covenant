@@ -8,6 +8,9 @@ using Covenant.Governance;
 using Covenant.Host;
 using Microsoft.Extensions.AI;
 using OpenAI;
+using OpenTelemetry.Exporter;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 // Canonical types win the name collision with Microsoft.Extensions.AI (which stays imported
 // for IChatClient and the AsIChatClient extension). Provider shapes belong in adapters only.
 using ChatMessage = Covenant.Core.ChatMessage;
@@ -53,6 +56,25 @@ if (configErrors.Count > 0)
     Console.Error.WriteLine("      environment, which Properties/launchSettings.json sets for local runs)");
     Console.Error.WriteLine("prod: env vars (OpenAI__ApiKey, Admin__Token, Budget__GlobalCapUsd) or the customer vault.");
     Environment.Exit(1);
+}
+
+// --- Observability (ADR-0003): opt-in OTel export. No Otel:Endpoint → no SDK, no listeners, no
+//     exporters, and Core's ActivitySource no-ops. The endpoint is customer config and falls under
+//     the same egress discipline as model endpoints — in-perimeter only, never phone-home.
+//     Spans are diagnostics; the audit chain remains the only evidence of record. ---
+if (builder.Configuration["Otel:Endpoint"] is { Length: > 0 } otelEndpoint)
+{
+    builder.Services.AddOpenTelemetry()
+        .ConfigureResource(r => r.AddService(builder.Configuration["Otel:ServiceName"] ?? "covenant"))
+        .WithTracing(t => t
+            .AddSource(CovenantDiagnostics.SourceName)
+            .AddOtlpExporter(o =>
+            {
+                o.Endpoint = new Uri(otelEndpoint);
+                o.Protocol = OtlpExportProtocol.HttpProtobuf;
+                if (builder.Configuration["Otel:Headers"] is { Length: > 0 } otelHeaders)
+                    o.Headers = otelHeaders; // e.g. "Authorization=Basic <base64 pk:sk>" for Langfuse
+            }));
 }
 
 // Source-generated JSON for request binding + responses (AOT-safe).

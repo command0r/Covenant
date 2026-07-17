@@ -55,6 +55,13 @@ dotnet user-secrets set "Local:Endpoint" "http://localhost:11434/v1" --project s
 dotnet user-secrets set "Local:ModelId"  "llama3.1:8b"               --project src/Covenant.Host
 ```
 
+Optional tracing (ADR-0003 — off by default; endpoint must be in-perimeter). Works with any OTLP/HTTP
+backend: Langfuse (`https://<host>/api/public/otel/v1/traces` + `Otel:Headers`
+`"Authorization=Basic <base64 pk:sk>"`), an OTel collector, Grafana, etc.:
+```
+dotnet user-secrets set "Otel:Endpoint" "http://localhost:4318/v1/traces" --project src/Covenant.Host
+```
+
 Fully offline demo (no OpenAI account needed): point the "openai" adapter at the same local server —
 governance, budgets, and audit behave identically:
 ```
