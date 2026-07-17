@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Covenant.Adapters;
 using Covenant.Core;
 using Covenant.Governance;
@@ -17,8 +18,35 @@ public class PipelineSliceTests
                 Usage = new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 }
             });
 
-        public IAsyncEnumerable<MEAI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<MEAI.ChatMessage> messages, MEAI.ChatOptions? options = null, CancellationToken cancellationToken = default)
-            => throw new NotSupportedException();
+        // Streams the reply in two fragments, then the usage-bearing final update (like real providers).
+        public async IAsyncEnumerable<MEAI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<MEAI.ChatMessage> messages, MEAI.ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            var half = reply.Length / 2;
+            yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[..half]);
+            yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[half..]);
+            yield return new MEAI.ChatResponseUpdate
+            {
+                Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 })]
+            };
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+        public void Dispose() { }
+    }
+
+    // Streams one fragment, then fails — the mid-stream upstream failure case (ADR-0002).
+    private sealed class MidStreamFailingChatClient : MEAI.IChatClient
+    {
+        public Task<MEAI.ChatResponse> GetResponseAsync(IEnumerable<MEAI.ChatMessage> messages, MEAI.ChatOptions? options = null, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException("streaming-only stub");
+
+        public async IAsyncEnumerable<MEAI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<MEAI.ChatMessage> messages, MEAI.ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "partial ");
+            throw new HttpRequestException("connection reset mid-stream");
+        }
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
         public void Dispose() { }
@@ -103,9 +131,9 @@ public class PipelineSliceTests
         ]);
     }
 
-    private static InferenceContext Ctx(string content, string team = "unknown") =>
+    private static InferenceContext Ctx(string content, string team = "unknown", bool stream = false) =>
         new(new InferenceRequest("tester", [new ChatMessage(ChatRole.User, content)], RequestedModel: null,
-            new AttributionTags(team, "test-workflow", "test-case")));
+            new AttributionTags(team, "test-workflow", "test-case"), Stream: stream));
 
     [Fact]
     public async Task Internal_request_is_served_attributed_and_audited()
@@ -142,6 +170,65 @@ public class PipelineSliceTests
         Assert.Null(ctx.Response);
         Assert.Equal(DataClassification.Pii, ctx.Classification);
         Assert.Single(sink.Entries);                                     // denials are audited too
+        Assert.Equal(PolicyEffect.Deny, sink.Entries[0].Effect);
+    }
+
+    [Fact]
+    public async Task Streamed_request_emits_deltas_then_attributes_and_audits_like_buffered_mode()
+    {
+        var sink = new CollectingAuditSink();
+        var ledger = new InMemorySpendLedger();
+        var pipeline = BuildPipeline(sink, new StubChatClient("hello from the model"), ledger: ledger);
+        var ctx = Ctx("just a normal internal question", team: "platform", stream: true);
+        var deltas = new List<string>();
+        ctx.DeltaSink = (d, _) => { deltas.Add(d.Content); return ValueTask.CompletedTask; };
+
+        await pipeline.ExecuteAsync(ctx, default);
+
+        Assert.False(ctx.IsDenied);
+        Assert.Equal("hello from the model", string.Concat(deltas));   // streamed, in order
+        Assert.True(deltas.Count > 1);                                  // actually chunked, not buffered
+        Assert.Equal(15, ctx.Response!.Usage.TotalTokens);              // usage from the final update
+        Assert.True(ctx.Response.Usage.CostUsd > 0m);                   // attribution ran on the unwind
+        Assert.Equal(ctx.Response.Usage.CostUsd, ledger.TeamSpendUsd("platform")); // budget recorded
+        Assert.Single(sink.Entries);                                    // exactly one audit entry
+        Assert.Equal(PolicyEffect.Allow, sink.Entries[0].Effect);
+    }
+
+    [Fact]
+    public async Task Streamed_pii_request_is_denied_before_any_delta_is_emitted()
+    {
+        var sink = new CollectingAuditSink();
+        var pipeline = BuildPipeline(sink, new TripwireChatClient());
+        var ctx = Ctx("my SSN is 123-45-6789", team: "platform", stream: true);
+        var deltas = new List<string>();
+        ctx.DeltaSink = (d, _) => { deltas.Add(d.Content); return ValueTask.CompletedTask; };
+
+        await pipeline.ExecuteAsync(ctx, default);
+
+        Assert.True(ctx.IsDenied);
+        Assert.Equal(DenialKind.Governance, ctx.DenialKind);
+        Assert.Empty(deltas);                                           // no byte left the perimeter
+        Assert.Single(sink.Entries);
+    }
+
+    [Fact]
+    public async Task Mid_stream_provider_failure_is_a_governed_denial_with_partial_deltas()
+    {
+        var sink = new CollectingAuditSink();
+        var pipeline = BuildPipeline(sink, new MidStreamFailingChatClient());
+        var ctx = Ctx("just a normal internal question", team: "platform", stream: true);
+        var deltas = new List<string>();
+        ctx.DeltaSink = (d, _) => { deltas.Add(d.Content); return ValueTask.CompletedTask; };
+
+        await pipeline.ExecuteAsync(ctx, default);                      // must not throw
+
+        Assert.True(ctx.IsDenied);
+        Assert.Equal(DenialKind.UpstreamFailure, ctx.DenialKind);
+        Assert.Contains("stream failed", ctx.DenialReason!);
+        Assert.Single(deltas);                                          // the fragment that got out
+        Assert.Null(ctx.Response);
+        Assert.Single(sink.Entries);                                    // failure is audited
         Assert.Equal(PolicyEffect.Deny, sink.Entries[0].Effect);
     }
 

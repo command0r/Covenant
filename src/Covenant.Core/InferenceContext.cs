@@ -23,6 +23,13 @@ public sealed class InferenceContext(InferenceRequest request)
     /// <summary>Written by the provider-call stage on success.</summary>
     public InferenceResponse? Response { get; set; }
 
+    /// <summary>
+    /// Installed by the Host for streamed requests (ADR-0002). The provider-call stage forwards each
+    /// canonical delta here as it arrives; the sink is never invoked for a request denied pre-flight.
+    /// Null = buffered mode.
+    /// </summary>
+    public Func<ChatDelta, CancellationToken, ValueTask>? DeltaSink { get; set; }
+
     /// <summary>Written by the attribution stage.</summary>
     public AttributionRecord? Attribution { get; set; }
 

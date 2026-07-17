@@ -77,6 +77,14 @@ curl -s localhost:5000/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"say hello"}]}'
 ```
 
+Streamed (SSE; same governance, attribution and audit fire on stream completion — ADR-0002):
+```
+curl -sN localhost:5000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'X-Covenant-Team: platform' -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
+  -d '{"stream":true,"messages":[{"role":"user","content":"count from 1 to 5"}]}'
+```
+
 Fail-closed request (classifies PII → no permitted route → 403, never reaches a provider):
 ```
 curl -s localhost:5000/v1/chat/completions \

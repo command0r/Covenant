@@ -8,6 +8,7 @@ public sealed class OpenAiChatRequest
 {
     [JsonPropertyName("model")] public string? Model { get; set; }
     [JsonPropertyName("messages")] public List<OpenAiMessage> Messages { get; set; } = [];
+    [JsonPropertyName("stream")] public bool? Stream { get; set; }
 }
 
 public sealed class OpenAiMessage
@@ -36,6 +37,31 @@ public sealed class OpenAiUsage
     [JsonPropertyName("total_tokens")] public long TotalTokens { get; set; }
 }
 
+// SSE chunk shape (OpenAI "chat.completion.chunk"). Intermediate chunks carry delta content with
+// null finish_reason/usage; the final chunk carries finish_reason "stop" and the usage totals.
+
+public sealed class OpenAiChatChunk
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("object")] public string Object { get; set; } = "chat.completion.chunk";
+    [JsonPropertyName("model")] public string Model { get; set; } = "";
+    [JsonPropertyName("choices")] public List<OpenAiChunkChoice> Choices { get; set; } = [];
+    [JsonPropertyName("usage")] public OpenAiUsage? Usage { get; set; }
+}
+
+public sealed class OpenAiChunkChoice
+{
+    [JsonPropertyName("index")] public int Index { get; set; }
+    [JsonPropertyName("delta")] public OpenAiDelta Delta { get; set; } = new();
+    [JsonPropertyName("finish_reason")] public string? FinishReason { get; set; }
+}
+
+public sealed class OpenAiDelta
+{
+    [JsonPropertyName("role")] public string? Role { get; set; }
+    [JsonPropertyName("content")] public string? Content { get; set; }
+}
+
 public sealed class ErrorResponse
 {
     [JsonPropertyName("error")] public string Error { get; set; } = "";
@@ -58,6 +84,7 @@ public sealed class KillSwitchState
 
 [JsonSerializable(typeof(OpenAiChatRequest))]
 [JsonSerializable(typeof(OpenAiChatResponse))]
+[JsonSerializable(typeof(OpenAiChatChunk))]
 [JsonSerializable(typeof(ErrorResponse))]
 [JsonSerializable(typeof(KillSwitchRequest))]
 [JsonSerializable(typeof(KillSwitchState))]

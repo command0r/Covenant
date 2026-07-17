@@ -46,6 +46,14 @@ else
 fi
 show "$BODY"
 
+say "1b. Same request, streamed — SSE through the full governance pipeline (ADR-0002)"
+curl -sN "$BASE/v1/chat/completions" \
+    -H 'Content-Type: application/json' \
+    -H 'X-Covenant-Team: platform' -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: live-demo' \
+    -d '{"stream":true,"messages":[{"role":"user","content":"count from 1 to 5"}]}' \
+    | head -12 | sed 's/^/  /'
+note "attribution and audit still happen once, on stream completion — check the evidence export"
+
 say "2. PII request — the product moment"
 chat "my SSN is 123-45-6789, please summarize my account"
 if [ "$CODE" = "403" ]; then

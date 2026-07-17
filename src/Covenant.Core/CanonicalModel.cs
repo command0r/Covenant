@@ -9,6 +9,9 @@ public enum DataClassification { Public = 0, Internal = 1, Pii = 2, Phi = 3 }
 /// <summary>A single canonical chat message. No multimodal content in the first slice.</summary>
 public sealed record ChatMessage(ChatRole Role, string Content);
 
+/// <summary>One canonical streamed fragment of assistant output (ADR-0002).</summary>
+public sealed record ChatDelta(string Content);
+
 /// <summary>Cost-attribution tags supplied by the caller (e.g. via virtual-key metadata or request headers).</summary>
 public sealed record AttributionTags(string Team, string Workflow, string UseCase)
 {
@@ -20,7 +23,8 @@ public sealed record InferenceRequest(
     string Principal,
     IReadOnlyList<ChatMessage> Messages,
     string? RequestedModel,
-    AttributionTags Attribution);
+    AttributionTags Attribution,
+    bool Stream = false);
 
 /// <summary>Token and cost accounting for a single inference. Cost is filled by the attribution stage.</summary>
 public sealed record Usage(long InputTokens, long OutputTokens, decimal CostUsd)

@@ -136,9 +136,82 @@ app.MapPost("/v1/chat/completions",
         Principal: principal,
         Messages: body.Messages.Select(m => new ChatMessage(ParseRole(m.Role), m.Content)).ToList(),
         RequestedModel: body.Model,
-        Attribution: tags);
+        Attribution: tags,
+        Stream: body.Stream == true);
 
     var ctx = new InferenceContext(request);
+
+    // --- Streamed mode (ADR-0002): SSE headers are committed lazily on the FIRST delta, so a
+    //     pre-flight denial still returns a plain JSON error below. ---
+    if (request.Stream)
+    {
+        var resp = http.Response;
+        var chunkId = $"chatcmpl-{Guid.NewGuid():n}";
+        bool sseStarted = false;
+
+        async ValueTask WriteChunkAsync(OpenAiChatChunk chunk, CancellationToken token)
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(chunk, CovenantJsonContext.Default.OpenAiChatChunk);
+            await resp.WriteAsync($"data: {json}\n\n", token);
+            await resp.Body.FlushAsync(token);
+        }
+
+        OpenAiChatChunk Chunk(string? role, string? content, string? finish, OpenAiUsage? usage) => new()
+        {
+            Id = chunkId,
+            Model = ctx.Policy?.Route?.ModelId ?? "",
+            Choices = [new OpenAiChunkChoice { Index = 0, Delta = new OpenAiDelta { Role = role, Content = content }, FinishReason = finish }],
+            Usage = usage,
+        };
+
+        ctx.DeltaSink = async (delta, token) =>
+        {
+            if (!sseStarted)
+            {
+                sseStarted = true;
+                resp.StatusCode = StatusCodes.Status200OK;
+                resp.ContentType = "text/event-stream";
+                resp.Headers.CacheControl = "no-cache";
+                await WriteChunkAsync(Chunk("assistant", null, null, null), token);
+            }
+            await WriteChunkAsync(Chunk(null, delta.Content, null, null), token);
+        };
+
+        await pipe.ExecuteAsync(ctx, ct);
+
+        if (!sseStarted)
+        {
+            // Denied before the first byte — same JSON error contract as buffered mode.
+            bool up = ctx.DenialKind == DenialKind.UpstreamFailure;
+            return Results.Json(
+                new ErrorResponse { Error = up ? "upstream_error" : "denied", Reason = ctx.DenialReason ?? "no response" },
+                CovenantJsonContext.Default.ErrorResponse,
+                statusCode: up ? StatusCodes.Status502BadGateway : StatusCodes.Status403Forbidden);
+        }
+
+        if (ctx.IsDenied)
+        {
+            // Mid-stream failure after a committed 200: terminate with an error event (audited already).
+            var err = System.Text.Json.JsonSerializer.Serialize(
+                new ErrorResponse { Error = "upstream_error", Reason = ctx.DenialReason ?? "stream failed" },
+                CovenantJsonContext.Default.ErrorResponse);
+            await resp.WriteAsync($"data: {err}\n\n", ct);
+        }
+        else if (ctx.Response is { } finalResp)
+        {
+            await WriteChunkAsync(Chunk(null, null, "stop", new OpenAiUsage
+            {
+                PromptTokens = finalResp.Usage.InputTokens,
+                CompletionTokens = finalResp.Usage.OutputTokens,
+                TotalTokens = finalResp.Usage.TotalTokens,
+            }), ct);
+        }
+
+        await resp.WriteAsync("data: [DONE]\n\n", ct);
+        await resp.Body.FlushAsync(ct);
+        return Results.Empty;
+    }
+
     await pipe.ExecuteAsync(ctx, ct);
 
     if (ctx.IsDenied || ctx.Response is null)

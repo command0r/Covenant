@@ -1,3 +1,4 @@
+using System.Text;
 using Covenant.Core;
 using MEAI = Microsoft.Extensions.AI;
 
@@ -35,6 +36,48 @@ public sealed class ProviderCallStage(IChatClientRegistry registry) : IPipelineS
 
         var messages = ctx.Request.Messages.Select(ToMeai).ToList();
         var options = new MEAI.ChatOptions { ModelId = route.ModelId };
+
+        // ADR-0002: streaming is an emission mode of this stage, not a different pipeline. The stream
+        // is consumed HERE so that attribution, budget recording, and audit run on the normal unwind
+        // with real usage — identical for streamed and buffered requests.
+        if (ctx.Request.Stream && ctx.DeltaSink is { } sink)
+        {
+            var text = new StringBuilder();
+            MEAI.UsageDetails? usageDetails = null;
+            try
+            {
+                await foreach (var update in client.GetStreamingResponseAsync(messages, options, ct))
+                {
+                    foreach (var uc in update.Contents.OfType<MEAI.UsageContent>())
+                        usageDetails = uc.Details;
+
+                    if (update.Text is { Length: > 0 } fragment)
+                    {
+                        text.Append(fragment);
+                        await sink(new ChatDelta(fragment), ct);
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // caller cancelled — not a provider failure
+            }
+            catch (Exception ex)
+            {
+                // Mid-stream failure: same governed refusal as the buffered path. The Host decides
+                // how to terminate the already-started SSE stream; evidence records the denial.
+                ctx.Deny($"provider '{route.AdapterKey}' stream failed: {ex.Message}", DenialKind.UpstreamFailure);
+                return;
+            }
+
+            ctx.Response = new InferenceResponse(
+                Message: new ChatMessage(ChatRole.Assistant, text.ToString()),
+                Usage: new Usage(usageDetails?.InputTokenCount ?? 0, usageDetails?.OutputTokenCount ?? 0, 0m),
+                ServedByModel: route.ModelId);
+
+            await next(ctx, ct);
+            return;
+        }
 
         MEAI.ChatResponse response;
         try

@@ -1,6 +1,7 @@
 # ADR-0001 — Core engine and provider layer
 
-**Status:** Proposed (awaiting acceptance)
+**Status:** Accepted (2026-07-16 — implemented and verified: core pipeline, M.E.AI provider layer,
+OpenAI + in-perimeter adapters, 18 passing tests including fail-closed and tamper-evidence coverage)
 **Date:** 2026-06-26
 
 ## Context
