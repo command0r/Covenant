@@ -1,8 +1,9 @@
 namespace Covenant.Core;
 
-/// <summary>Why a request was refused: a governance decision, or an upstream failure handled fail-closed.
-/// Callers see different HTTP statuses (403 vs 502); the audit trail records both as denials.</summary>
-public enum DenialKind { None, Governance, UpstreamFailure }
+/// <summary>Why a request was refused: missing/invalid credentials, a governance decision, or an
+/// upstream failure handled fail-closed. Callers see different HTTP statuses (401 vs 403 vs 502);
+/// the audit trail records all of them as denials.</summary>
+public enum DenialKind { None, Governance, UpstreamFailure, Unauthenticated }
 
 /// <summary>
 /// Mutable state carried through the pipeline. Stages read the request and earlier decisions and write
@@ -13,6 +14,10 @@ public sealed class InferenceContext(InferenceRequest request)
 {
     public InferenceRequest Request { get; } = request;
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
+
+    /// <summary>Resolved caller identity. Starts as the request's self-declared values; the auth
+    /// stage overwrites it on a valid key. Downstream stages read this, never the raw request.</summary>
+    public CallerIdentity Identity { get; set; } = new(request.Principal, request.Attribution);
 
     /// <summary>Written by the classify stage. Defaults to the most restrictive class (fail-closed).</summary>
     public DataClassification Classification { get; set; } = DataClassification.Phi;

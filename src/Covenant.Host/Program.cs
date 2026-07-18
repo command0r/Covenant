@@ -46,6 +46,21 @@ foreach (var child in builder.Configuration.GetSection("Budget:TeamCapsUsd").Get
         configErrors.Add($"Budget:TeamCapsUsd:{child.Key} — not a number: '{child.Value}'");
 }
 
+// API keys (virtual keys). Anonymous serving is an explicit opt-in, never a default.
+bool allowAnonymous = string.Equals(builder.Configuration["Auth:AllowAnonymous"], "true", StringComparison.OrdinalIgnoreCase);
+var apiKeys = new List<ApiKeyRecord>();
+foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren())
+{
+    if (child["Key"] is { Length: > 0 } key
+        && child["Principal"] is { Length: > 0 } keyPrincipal
+        && child["Team"] is { Length: > 0 } keyTeam)
+        apiKeys.Add(new ApiKeyRecord(key, keyPrincipal, keyTeam));
+    else
+        configErrors.Add($"Auth:Keys:{child.Key} — requires Key, Principal, and Team");
+}
+if (apiKeys.Count == 0 && !allowAnonymous)
+    configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
+
 if (configErrors.Count > 0)
 {
     Console.Error.WriteLine("covenant: refusing to start (fail-closed). Missing or invalid configuration:");
@@ -148,6 +163,7 @@ var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamC
 var pipeline = new InferencePipeline(
 [
     new AuditStage(auditSink),                       // outermost: audits allow, deny, and error alike
+    new AuthStage(new AuthConfig { AllowAnonymous = allowAnonymous, Keys = apiKeys }), // auth first
     new ClassifyStage(new RegexDataClassifier()),    // classify
     new PolicyStage(new PolicyEngine(policy)),       // policy (routes by classification, fail-closed)
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
@@ -163,6 +179,13 @@ var app = builder.Build();
 app.MapPost("/v1/chat/completions",
     async (OpenAiChatRequest body, InferencePipeline pipe, HttpContext http, CancellationToken ct) =>
 {
+    // Bearer key for the auth stage. OpenAI SDK clients pointed at Covenant send their configured
+    // api-key here automatically — a virtual key drops into existing tooling unchanged.
+    string? credential = null;
+    if (http.Request.Headers.Authorization.FirstOrDefault() is { } authHeader
+        && authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        credential = authHeader["Bearer ".Length..].Trim();
+
     var principal = http.Request.Headers["X-Covenant-Principal"].FirstOrDefault() ?? "anonymous";
     var tags = new AttributionTags(
         Team: http.Request.Headers["X-Covenant-Team"].FirstOrDefault() ?? "unknown",
@@ -174,7 +197,8 @@ app.MapPost("/v1/chat/completions",
         Messages: body.Messages.Select(m => new ChatMessage(ParseRole(m.Role), m.Content)).ToList(),
         RequestedModel: body.Model,
         Attribution: tags,
-        Stream: body.Stream == true);
+        Stream: body.Stream == true,
+        Credential: credential);
 
     var ctx = new InferenceContext(request);
 
@@ -219,11 +243,7 @@ app.MapPost("/v1/chat/completions",
         if (!sseStarted)
         {
             // Denied before the first byte — same JSON error contract as buffered mode.
-            bool up = ctx.DenialKind == DenialKind.UpstreamFailure;
-            return Results.Json(
-                new ErrorResponse { Error = up ? "upstream_error" : "denied", Reason = ctx.DenialReason ?? "no response" },
-                CovenantJsonContext.Default.ErrorResponse,
-                statusCode: up ? StatusCodes.Status502BadGateway : StatusCodes.Status403Forbidden);
+            return DenialResult(ctx);
         }
 
         if (ctx.IsDenied)
@@ -252,18 +272,7 @@ app.MapPost("/v1/chat/completions",
     await pipe.ExecuteAsync(ctx, ct);
 
     if (ctx.IsDenied || ctx.Response is null)
-    {
-        // Governance said no → 403. Upstream broke and we refused fail-closed → 502.
-        bool upstream = ctx.DenialKind == DenialKind.UpstreamFailure;
-        return Results.Json(
-            new ErrorResponse
-            {
-                Error = upstream ? "upstream_error" : "denied",
-                Reason = ctx.DenialReason ?? "no response"
-            },
-            CovenantJsonContext.Default.ErrorResponse,
-            statusCode: upstream ? StatusCodes.Status502BadGateway : StatusCodes.Status403Forbidden);
-    }
+        return DenialResult(ctx);
 
     var r = ctx.Response;
     var dto = new OpenAiChatResponse
@@ -279,6 +288,20 @@ app.MapPost("/v1/chat/completions",
     };
     return Results.Json(dto, CovenantJsonContext.Default.OpenAiChatResponse);
 });
+
+// No credentials → 401. Governance said no → 403. Upstream broke, refused fail-closed → 502.
+static IResult DenialResult(InferenceContext ctx)
+{
+    var (error, status) = ctx.DenialKind switch
+    {
+        DenialKind.Unauthenticated => ("unauthenticated", StatusCodes.Status401Unauthorized),
+        DenialKind.UpstreamFailure => ("upstream_error", StatusCodes.Status502BadGateway),
+        _ => ("denied", StatusCodes.Status403Forbidden),
+    };
+    return Results.Json(
+        new ErrorResponse { Error = error, Reason = ctx.DenialReason ?? "no response" },
+        CovenantJsonContext.Default.ErrorResponse, statusCode: status);
+}
 
 bool Authorized(HttpContext http)
 {

@@ -111,7 +111,7 @@ public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, Bud
             return;
         }
 
-        var team = ctx.Request.Attribution.Team;
+        var team = ctx.Identity.Tags.Team;
         if (config.TeamCapsUsd.TryGetValue(team, out var teamCap) && ledger.TeamSpendUsd(team) >= teamCap)
         {
             ctx.Deny($"budget exhausted for team '{team}' (cap {teamCap} USD)");

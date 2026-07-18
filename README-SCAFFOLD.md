@@ -42,9 +42,15 @@ dotnet user-secrets init --project src/Covenant.Host
 dotnet user-secrets set "OpenAI:ApiKey"        "<key>"           --project src/Covenant.Host
 dotnet user-secrets set "Admin:Token"          "dev-admin-token" --project src/Covenant.Host
 dotnet user-secrets set "Budget:GlobalCapUsd"  "5.00"            --project src/Covenant.Host
+dotnet user-secrets set "Auth:Keys:0:Key"       "demo-key"       --project src/Covenant.Host
+dotnet user-secrets set "Auth:Keys:0:Principal" "demo-user"      --project src/Covenant.Host
+dotnet user-secrets set "Auth:Keys:0:Team"      "platform"       --project src/Covenant.Host
 dotnet run --project src/Covenant.Host
 ```
-All three are required — the appliance refuses to start without them (fail-closed). Optional per-team
+All of these are required — the appliance refuses to start without them (fail-closed). Callers present
+their key as a standard `Authorization: Bearer <key>` header (OpenAI SDK clients do this natively);
+the key decides principal and team — client headers can't impersonate. To serve without keys you must
+opt in explicitly: `Auth:AllowAnonymous` = `true`. Optional per-team
 caps: `dotnet user-secrets set "Budget:TeamCapsUsd:platform" "1.00" --project src/Covenant.Host`.
 
 Optional in-perimeter model (any OpenAI-compatible server — Ollama, vLLM, LM Studio). Without it,
@@ -82,25 +88,27 @@ no external assets; the appliance stays a single artifact with no egress.
 Governed request (routes to OpenAI, gets attributed and audited):
 ```
 curl -s localhost:5000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'X-Covenant-Team: platform' -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer demo-key' \
+  -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
   -d '{"messages":[{"role":"user","content":"say hello"}]}'
 ```
 
 Streamed (SSE; same governance, attribution and audit fire on stream completion — ADR-0002):
 ```
 curl -sN localhost:5000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'X-Covenant-Team: platform' -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer demo-key' \
+  -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
   -d '{"stream":true,"messages":[{"role":"user","content":"count from 1 to 5"}]}'
 ```
 
 Fail-closed request (classifies PII → no permitted route → 403, never reaches a provider):
 ```
 curl -s localhost:5000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/json' -H 'Authorization: Bearer demo-key' \
   -d '{"messages":[{"role":"user","content":"my SSN is 123-45-6789"}]}'
 ```
+(Without the `Authorization` header the same request is 401 — authentication is denied before
+classification even runs, and that refusal is audited too.)
 
 Kill switch (engage, watch requests 403, disengage):
 ```

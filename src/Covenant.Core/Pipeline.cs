@@ -76,9 +76,9 @@ public sealed class InferencePipeline
         activity.SetTag("covenant.classification", ctx.Classification.ToString());
         activity.SetTag("covenant.effect", ctx.IsDenied ? "deny" : "allow");
         activity.SetTag("covenant.stream", ctx.Request.Stream);
-        activity.SetTag("covenant.team", ctx.Request.Attribution.Team);
-        activity.SetTag("covenant.workflow", ctx.Request.Attribution.Workflow);
-        activity.SetTag("covenant.use_case", ctx.Request.Attribution.UseCase);
+        activity.SetTag("covenant.team", ctx.Identity.Tags.Team);
+        activity.SetTag("covenant.workflow", ctx.Identity.Tags.Workflow);
+        activity.SetTag("covenant.use_case", ctx.Identity.Tags.UseCase);
 
         if (ctx.Policy?.Route is { } route)
         {

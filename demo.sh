@@ -9,6 +9,7 @@ set -euo pipefail
 
 BASE="${COVENANT_URL:-http://localhost:5000}"
 TOKEN="${COVENANT_ADMIN_TOKEN:-dev-admin-token}"
+API_KEY="${COVENANT_API_KEY:-demo-key}"
 LOG="${COVENANT_AUDIT_LOG:-covenant-audit.log}"
 
 say()  { printf '\n\033[1;36m▶ %s\033[0m\n' "$1"; }
@@ -20,7 +21,8 @@ chat() {
     local resp
     resp="$(curl -s -w $'\n%{http_code}' "$BASE/v1/chat/completions" \
         -H 'Content-Type: application/json' \
-        -H 'X-Covenant-Team: platform' -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: live-demo' \
+        -H "Authorization: Bearer $API_KEY" \
+        -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: live-demo' \
         -d "{\"messages\":[{\"role\":\"user\",\"content\":\"$1\"}]}")"
     CODE="${resp##*$'\n'}"
     BODY="${resp%$'\n'*}"
@@ -49,7 +51,8 @@ show "$BODY"
 say "1b. Same request, streamed — SSE through the full governance pipeline (ADR-0002)"
 curl -sN "$BASE/v1/chat/completions" \
     -H 'Content-Type: application/json' \
-    -H 'X-Covenant-Team: platform' -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: live-demo' \
+    -H "Authorization: Bearer $API_KEY" \
+    -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: live-demo' \
     -d '{"stream":true,"messages":[{"role":"user","content":"count from 1 to 5"}]}' \
     | head -12 | sed 's/^/  /'
 note "attribution and audit still happen once, on stream completion — check the evidence export"
@@ -63,6 +66,11 @@ else
     note "HTTP $CODE — served by the LOCAL in-perimeter model. The prompt never left the boundary."
 fi
 show "$BODY"
+
+say "2b. No API key → 401 — anonymous serving is an explicit opt-in, and the refusal is audited"
+CODE_NOKEY=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+note "HTTP $CODE_NOKEY (expected 401)"
 
 say "3. Wrong admin token is rejected"
 CODE_401=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/admin/kill-switch" \

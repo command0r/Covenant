@@ -26,8 +26,8 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null) : IP
             var entry = new AuditEntry(
                 Id: Guid.NewGuid().ToString("n"),
                 TimestampUtc: _clock.GetUtcNow(),
-                Principal: ctx.Request.Principal,
-                Tags: ctx.Request.Attribution,
+                Principal: ctx.Identity.Principal,
+                Tags: ctx.Identity.Tags,
                 Classification: ctx.Classification,
                 Effect: served ? PolicyEffect.Allow : PolicyEffect.Deny,
                 Reason: ctx.DenialReason

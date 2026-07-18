@@ -31,7 +31,7 @@ public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
 
             var priced = resp.Usage with { CostUsd = cost };
             ctx.Response = resp with { Usage = priced };
-            ctx.Attribution = new AttributionRecord(ctx.Request.Attribution, route.ModelId, priced);
+            ctx.Attribution = new AttributionRecord(ctx.Identity.Tags, route.ModelId, priced);
         }
 
         await next(ctx, ct);

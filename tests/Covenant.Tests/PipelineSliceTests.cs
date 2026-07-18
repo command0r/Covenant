@@ -94,7 +94,8 @@ public class PipelineSliceTests
         IKillSwitch? killSwitch = null,
         ISpendLedger? ledger = null,
         BudgetConfig? budget = null,
-        MEAI.IChatClient? local = null)
+        MEAI.IChatClient? local = null,
+        AuthConfig? auth = null)
     {
         var clients = new Dictionary<string, MEAI.IChatClient>
         {
@@ -120,6 +121,7 @@ public class PipelineSliceTests
         return new InferencePipeline(
         [
             new AuditStage(sink),
+            new AuthStage(auth ?? new AuthConfig { AllowAnonymous = true, Keys = [] }),
             new ClassifyStage(new RegexDataClassifier()),
             new PolicyStage(new PolicyEngine(policy)),
             new BudgetStage(
@@ -131,9 +133,9 @@ public class PipelineSliceTests
         ]);
     }
 
-    private static InferenceContext Ctx(string content, string team = "unknown", bool stream = false) =>
+    private static InferenceContext Ctx(string content, string team = "unknown", bool stream = false, string? credential = null) =>
         new(new InferenceRequest("tester", [new ChatMessage(ChatRole.User, content)], RequestedModel: null,
-            new AttributionTags(team, "test-workflow", "test-case"), Stream: stream));
+            new AttributionTags(team, "test-workflow", "test-case"), Stream: stream, Credential: credential));
 
     [Fact]
     public async Task Internal_request_is_served_attributed_and_audited()
@@ -171,6 +173,57 @@ public class PipelineSliceTests
         Assert.Equal(DataClassification.Pii, ctx.Classification);
         Assert.Single(sink.Entries);                                     // denials are audited too
         Assert.Equal(PolicyEffect.Deny, sink.Entries[0].Effect);
+    }
+
+    [Fact]
+    public async Task No_key_is_denied_when_anonymous_is_not_explicitly_allowed()
+    {
+        var sink = new CollectingAuditSink();
+        var auth = new AuthConfig { AllowAnonymous = false, Keys = [new("secret-key-1", "alice", "payments")] };
+        var pipeline = BuildPipeline(sink, new TripwireChatClient(), auth: auth);  // must never be reached
+        var ctx = Ctx("just a normal internal question");                          // no credential
+
+        await pipeline.ExecuteAsync(ctx, default);
+
+        Assert.True(ctx.IsDenied);
+        Assert.Equal(DenialKind.Unauthenticated, ctx.DenialKind);
+        Assert.Single(sink.Entries);                                               // auth denials are audited
+        Assert.Equal(PolicyEffect.Deny, sink.Entries[0].Effect);
+    }
+
+    [Fact]
+    public async Task Valid_key_overrides_self_declared_identity_and_charges_the_key_team()
+    {
+        var sink = new CollectingAuditSink();
+        var ledger = new InMemorySpendLedger();
+        var auth = new AuthConfig { AllowAnonymous = false, Keys = [new("secret-key-1", "alice", "payments")] };
+        var pipeline = BuildPipeline(sink, new StubChatClient("hi"), ledger: ledger, auth: auth);
+        // Caller CLAIMS team "platform" in headers but presents alice's payments key:
+        var ctx = Ctx("just a normal internal question", team: "platform", credential: "secret-key-1");
+
+        await pipeline.ExecuteAsync(ctx, default);
+
+        Assert.False(ctx.IsDenied);
+        Assert.Equal("alice", sink.Entries[0].Principal);                          // key wins over headers
+        Assert.Equal("payments", sink.Entries[0].Tags.Team);
+        Assert.True(ledger.TeamSpendUsd("payments") > 0m);                         // spend follows the key
+        Assert.Equal(0m, ledger.TeamSpendUsd("platform"));                         // not the claimed team
+    }
+
+    [Fact]
+    public async Task Wrong_key_is_denied_even_when_anonymous_is_allowed()
+    {
+        var sink = new CollectingAuditSink();
+        var auth = new AuthConfig { AllowAnonymous = true, Keys = [new("secret-key-1", "alice", "payments")] };
+        var pipeline = BuildPipeline(sink, new TripwireChatClient(), auth: auth);
+        var ctx = Ctx("just a normal internal question", credential: "stolen-or-mistyped");
+
+        await pipeline.ExecuteAsync(ctx, default);
+
+        Assert.True(ctx.IsDenied);                                                 // bad credential ≠ anonymous
+        Assert.Equal(DenialKind.Unauthenticated, ctx.DenialKind);
+        Assert.Contains("unknown API key", ctx.DenialReason!);
+        Assert.Single(sink.Entries);
     }
 
     [Fact]
