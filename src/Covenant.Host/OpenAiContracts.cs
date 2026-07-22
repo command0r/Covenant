@@ -68,6 +68,22 @@ public sealed class ErrorResponse
     [JsonPropertyName("reason")] public string Reason { get; set; } = "";
 }
 
+// Model listing (GET /v1/models) — real OpenAI-compatible clients call this to populate their model
+// picker before chatting. Covenant lists only policy-permitted models: discovery is governed too.
+
+public sealed class OpenAiModelList
+{
+    [JsonPropertyName("object")] public string Object { get; set; } = "list";
+    [JsonPropertyName("data")] public List<OpenAiModel> Data { get; set; } = [];
+}
+
+public sealed class OpenAiModel
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("object")] public string Object { get; set; } = "model";
+    [JsonPropertyName("owned_by")] public string OwnedBy { get; set; } = "covenant";
+}
+
 // Admin surface: kill-switch control (see Program.cs /admin/kill-switch).
 
 public sealed class KillSwitchRequest
@@ -82,12 +98,20 @@ public sealed class KillSwitchState
     [JsonPropertyName("reason")] public string? Reason { get; set; }
 }
 
+public sealed class ResetResponse
+{
+    /// <summary>Where the previous audit log was archived; null if there was nothing to archive.</summary>
+    [JsonPropertyName("archived_to")] public string? ArchivedTo { get; set; }
+}
+
 [JsonSerializable(typeof(OpenAiChatRequest))]
 [JsonSerializable(typeof(OpenAiChatResponse))]
 [JsonSerializable(typeof(OpenAiChatChunk))]
+[JsonSerializable(typeof(OpenAiModelList))]
 [JsonSerializable(typeof(ErrorResponse))]
 [JsonSerializable(typeof(KillSwitchRequest))]
 [JsonSerializable(typeof(KillSwitchState))]
+[JsonSerializable(typeof(ResetResponse))]
 [JsonSerializable(typeof(EvidenceReport))]
 [JsonSerializable(typeof(StatusReport))]
 public partial class CovenantJsonContext : JsonSerializerContext;

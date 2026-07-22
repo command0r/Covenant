@@ -77,8 +77,10 @@ if (configErrors.Count > 0)
 //     exporters, and Core's ActivitySource no-ops. The endpoint is customer config and falls under
 //     the same egress discipline as model endpoints — in-perimeter only, never phone-home.
 //     Spans are diagnostics; the audit chain remains the only evidence of record. ---
+bool otelEnabled = false;
 if (builder.Configuration["Otel:Endpoint"] is { Length: > 0 } otelEndpoint)
 {
+    otelEnabled = true;
     builder.Services.AddOpenTelemetry()
         .ConfigureResource(r => r.AddService(builder.Configuration["Otel:ServiceName"] ?? "covenant"))
         .WithTracing(t => t
@@ -97,21 +99,29 @@ builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.TypeInfoResolverChain.Insert(0, CovenantJsonContext.Default));
 
 // --- Provider layer (ADR-0001: adapters over Microsoft.Extensions.AI) ---
-// OpenAI:Endpoint / OpenAI:ModelId are optional overrides: point the "openai" adapter at any
-// OpenAI-compatible server (e.g. Ollama) for a fully offline demo. Governance doesn't change.
+// OpenAI:Endpoint / OpenAI:ModelId / OpenAI:StrongModelId are optional overrides: point the "openai"
+// adapter at any OpenAI-compatible server (e.g. Ollama) for a fully offline demo. Clients are
+// registered per exact "adapter:model" key — a policy route to an unregistered model fails closed
+// rather than silently serving a different model.
 string publicModelId = builder.Configuration["OpenAI:ModelId"] ?? "gpt-4o-mini";
-IChatClient openAi = (builder.Configuration["OpenAI:Endpoint"] is { Length: > 0 } openAiEndpoint
-        ? new OpenAIClient(new ApiKeyCredential(openAiKey!), new OpenAIClientOptions { Endpoint = new Uri(openAiEndpoint) })
-        : new OpenAIClient(openAiKey!))
-    .GetChatClient(publicModelId).AsIChatClient();
-var clients = new Dictionary<string, IChatClient> { ["openai"] = openAi };
+string strongModelId = builder.Configuration["OpenAI:StrongModelId"] ?? "gpt-4o";
+
+var openAiRoot = builder.Configuration["OpenAI:Endpoint"] is { Length: > 0 } openAiEndpoint
+    ? new OpenAIClient(new ApiKeyCredential(openAiKey!), new OpenAIClientOptions { Endpoint = new Uri(openAiEndpoint) })
+    : new OpenAIClient(openAiKey!);
+
+var clients = new Dictionary<string, IChatClient>
+{
+    [$"openai:{publicModelId}"] = openAiRoot.GetChatClient(publicModelId).AsIChatClient(),
+};
+clients[$"openai:{strongModelId}"] = openAiRoot.GetChatClient(strongModelId).AsIChatClient();
 
 // Optional in-perimeter target (vLLM, Ollama — any OpenAI-compatible endpoint). Not configured →
 // "local" stays unregistered and PII/PHI keep failing closed at the provider stage.
 string localModelId = builder.Configuration["Local:ModelId"] ?? "llama-3.1-8b-instruct";
 if (builder.Configuration["Local:Endpoint"] is { Length: > 0 } localEndpoint)
 {
-    clients["local"] = new OpenAIClient(
+    clients[$"local:{localModelId}"] = new OpenAIClient(
             new ApiKeyCredential(builder.Configuration["Local:ApiKey"] ?? "not-needed"),
             new OpenAIClientOptions { Endpoint = new Uri(localEndpoint) })
         .GetChatClient(localModelId)
@@ -125,19 +135,35 @@ var policy = new PolicyConfig
 {
     AllowedRoutes = new Dictionary<DataClassification, IReadOnlyList<RouteTarget>>
     {
-        [DataClassification.Public]   = [new("openai", publicModelId)],
-        [DataClassification.Internal] = [new("openai", publicModelId)],
+        // Ordered cheapest → strongest: the policy engine complexity-routes within this set.
+        [DataClassification.Public]   = [new("openai", publicModelId), new("openai", strongModelId)],
+        [DataClassification.Internal] = [new("openai", publicModelId), new("openai", strongModelId)],
         [DataClassification.Pii]      = [new("local", localModelId)],
         [DataClassification.Phi]      = [new("local", localModelId)],
     }
 };
 
-var publicPrice = (InPer1K: 0.15m, OutPer1K: 0.60m);  // illustrative USD per 1K tokens
-var prices = new PriceBook(new Dictionary<string, (decimal, decimal)>
+// Real per-token prices (defaults reflect OpenAI's published per-1M rates, converted to per-1K —
+// the scaffold's earlier placeholders were 1000× off). Override per model via config:
+//   Pricing:<model>:InPer1M / Pricing:<model>:OutPer1M   (USD per million tokens)
+var priceMap = new Dictionary<string, (decimal, decimal)>
 {
-    [publicModelId] = publicPrice,
+    [publicModelId] = (0.00015m, 0.0006m),     // gpt-4o-mini: $0.15 / $0.60 per 1M
+    [strongModelId] = (0.0025m, 0.01m),        // gpt-4o:      $2.50 / $10.00 per 1M
     [localModelId] = (0m, 0m),                 // in-perimeter compute: no per-token provider cost
-});
+};
+foreach (var child in builder.Configuration.GetSection("Pricing").GetChildren())
+{
+    if (decimal.TryParse(child["InPer1M"], NumberStyles.Number, CultureInfo.InvariantCulture, out var inPer1M)
+        && decimal.TryParse(child["OutPer1M"], NumberStyles.Number, CultureInfo.InvariantCulture, out var outPer1M))
+        priceMap[child.Key] = (inPer1M / 1000m, outPer1M / 1000m);
+    else
+        configErrors.Add($"Pricing:{child.Key} — requires numeric InPer1M and OutPer1M");
+}
+var prices = new PriceBook(priceMap);
+
+long complexityThreshold =
+    long.TryParse(builder.Configuration["Routing:ComplexityTokenThreshold"], out var thr) ? thr : 400;
 
 var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();
@@ -162,10 +188,14 @@ var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamC
 // --- Pipeline assembly. Outermost first; audit wraps everything; order per src/CLAUDE.md. ---
 var pipeline = new InferencePipeline(
 [
-    new AuditStage(auditSink),                       // outermost: audits allow, deny, and error alike
+    new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
+        int.TryParse(builder.Configuration["Audit:PromptPreviewChars"], out var ppc) ? ppc : 0),
     new AuthStage(new AuthConfig { AllowAnonymous = allowAnonymous, Keys = apiKeys }), // auth first
     new ClassifyStage(new RegexDataClassifier()),    // classify
-    new PolicyStage(new PolicyEngine(policy)),       // policy (routes by classification, fail-closed)
+    new PolicyStage(new PolicyEngine(policy, new RoutingOptions
+    {
+        ComplexityTokenThreshold = complexityThreshold,
+    })),                                             // policy + complexity routing, fail-closed
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
     new ProviderCallStage(registry),                 // route + provider call
     new AttributionStage(prices),                    // attribute cost
@@ -175,6 +205,32 @@ builder.Services.AddSingleton(pipeline);
 builder.Services.AddHostedService(_ => auditSink);   // drains the audit channel in the background
 
 var app = builder.Build();
+
+// Model discovery for OpenAI-compatible clients (Open WebUI, SDKs). Same auth semantics as chat:
+// a valid API key, or anonymous only if explicitly allowed. Only policy-permitted models are listed.
+app.MapGet("/v1/models", (HttpContext http) =>
+{
+    string? cred = null;
+    if (http.Request.Headers.Authorization.FirstOrDefault() is { } auth
+        && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        cred = auth["Bearer ".Length..].Trim();
+
+    bool authorized = cred is { Length: > 0 }
+        ? apiKeys.Any(k => string.Equals(k.Key, cred, StringComparison.Ordinal))
+        : allowAnonymous;
+    if (!authorized)
+        return Results.Json(
+            new ErrorResponse { Error = "unauthenticated", Reason = "valid API key required" },
+            CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status401Unauthorized);
+
+    var models = policy.AllowedRoutes.Values
+        .SelectMany(routes => routes)
+        .Select(r => r.ModelId)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Select(m => new OpenAiModel { Id = m })
+        .ToList();
+    return Results.Json(new OpenAiModelList { Data = models }, CovenantJsonContext.Default.OpenAiModelList);
+});
 
 app.MapPost("/v1/chat/completions",
     async (OpenAiChatRequest body, InferencePipeline pipe, HttpContext http, CancellationToken ct) =>
@@ -340,10 +396,9 @@ app.MapGet("/admin/evidence", (HttpContext http) =>
 // Dashboard data: config + live ledger + audit aggregates. Read-only — the dashboard is a view,
 // never a second source of truth.
 var startedUtc = DateTimeOffset.UtcNow;
-app.MapGet("/admin/status", (HttpContext http) =>
-{
-    if (!Authorized(http)) return Unauthorized();
 
+StatusReport BuildStatus()
+{
     var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath);
     var teamSpend = spendLedger.SnapshotByTeam();
 
@@ -359,7 +414,7 @@ app.MapGet("/admin/status", (HttpContext http) =>
         foreach (var t in targets)
             routes.Add(new RouteView { Classification = cls.ToString(), Adapter = t.AdapterKey, Model = t.ModelId });
 
-    var report = new StatusReport
+    return new StatusReport
     {
         GeneratedUtc = DateTimeOffset.UtcNow,
         StartedUtc = startedUtc,
@@ -371,16 +426,67 @@ app.MapGet("/admin/status", (HttpContext http) =>
             Teams = teams,
         },
         Routes = routes,
-        FinOps = FinOps.Build(entries, localModelId, publicPrice),
+        FinOps = FinOps.Build(entries, localModelId, strongModelId, priceMap),
         ChainValid = verification.Valid,
         AuditEntries = verification.EntryCount,
+        Auth = new AuthStatus { AllowAnonymous = allowAnonymous, KeyCount = apiKeys.Count },
+        OtelEnabled = otelEnabled,
+        RoutingThresholdTokens = complexityThreshold,
     };
-    return Results.Json(report, CovenantJsonContext.Default.StatusReport);
+}
+
+app.MapGet("/admin/status", (HttpContext http) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+    http.Response.Headers.CacheControl = "no-store";
+    return Results.Json(BuildStatus(), CovenantJsonContext.Default.StatusReport);
+});
+
+// Live stream: pushes a status snapshot every 2s over SSE so the dashboard updates without polling.
+// fetch()-based consumption on the page keeps the admin token in a header (EventSource can't).
+app.MapGet("/admin/status/stream", async (HttpContext http, CancellationToken ct) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+
+    var resp = http.Response;
+    resp.ContentType = "text/event-stream";
+    resp.Headers.CacheControl = "no-store";
+    try
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(BuildStatus(), CovenantJsonContext.Default.StatusReport);
+            await resp.WriteAsync($"data: {json}\n\n", ct);
+            await resp.Body.FlushAsync(ct);
+            await Task.Delay(2000, ct);
+        }
+    }
+    catch (OperationCanceledException) { /* client disconnected — normal */ }
+    return Results.Empty;
+});
+
+// Demo/ops reset: ARCHIVES the audit log (rename with timestamp — evidence is never deleted) and
+// clears the in-memory ledger so budgets reopen. Ledger and evidence stay consistent because both
+// reset together; the archived chain remains independently verifiable.
+app.MapPost("/admin/reset", async (HttpContext http) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+
+    var archived = await auditSink.RotateAsync();
+    spendLedger.Reset();
+    return Results.Json(
+        new ResetResponse { ArchivedTo = archived },
+        CovenantJsonContext.Default.ResetResponse);
 });
 
 // The dashboard itself: one self-contained embedded page, no CDN, no external assets — the
 // appliance stays a single artifact with no egress (root CLAUDE.md #4). Data calls need the token.
-app.MapGet("/admin/ui", () => Results.Content(AdminUi.Html, "text/html"));
+// no-store: a stale cached page against a newer endpoint is how dashboards die silently.
+app.MapGet("/admin/ui", (HttpContext http) =>
+{
+    http.Response.Headers.CacheControl = "no-store";
+    return Results.Content(AdminUi.Html, "text/html");
+});
 
 app.Run();
 
