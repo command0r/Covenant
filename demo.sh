@@ -2,12 +2,17 @@
 # Covenant live demo — runs the full P0 arc against a running Host.
 #
 #   terminal 1:  dotnet run --project src/Covenant.Host
-#   terminal 2:  ./demo.sh            (add --tamper for the destructive tamper-evidence finale)
+#   terminal 2:  ./demo.sh                       the scripted walk-through
+#                ./demo.sh --traffic [N] [MIN]   randomized traffic: N requests (default 40)
+#                                                spread over MIN minutes (default 5) — fills the
+#                                                activity chart with a diverse allow/deny mix
+#                ./demo.sh --tamper              destructive tamper-evidence finale
 #
-# Overrides: COVENANT_URL, COVENANT_ADMIN_TOKEN, COVENANT_AUDIT_LOG
+# Overrides: COVENANT_URL, COVENANT_ADMIN_TOKEN, COVENANT_API_KEY, COVENANT_AUDIT_LOG
 set -euo pipefail
 
-BASE="${COVENANT_URL:-http://localhost:5000}"
+# 5100, not 5000: macOS AirPlay Receiver occupies 5000 on the IPv6 loopback and answers 403s.
+BASE="${COVENANT_URL:-http://localhost:5100}"
 TOKEN="${COVENANT_ADMIN_TOKEN:-dev-admin-token}"
 API_KEY="${COVENANT_API_KEY:-demo-key}"
 LOG="${COVENANT_AUDIT_LOG:-covenant-audit.log}"
@@ -38,6 +43,51 @@ evidence() {
     curl -s "$BASE/admin/evidence" -H "X-Covenant-Admin-Token: $TOKEN"
 }
 
+# --- Traffic generator: randomized mix so the dashboard shows realistic, diverse data ---
+if [ "${1:-}" = "--traffic" ]; then
+    N="${2:-40}"
+    MINUTES="${3:-5}"
+    PAUSE=$(python3 -c "print(max(0.2, ($MINUTES*60)/$N))" 2>/dev/null || echo 2)
+    say "Traffic: $N randomized requests over ~$MINUTES minute(s) (pause ${PAUSE}s)"
+    note "Mix: short/long prompts (router), PII/PHI (fail-closed), missing/wrong keys (401s), bad model asks (403s)"
+
+    SHORT=("say hello" "what is 2 plus 2" "name three colors" "give me a haiku about audits" "what day is it" "summarize: cash is king")
+    for i in $(seq 1 "$N"); do
+        roll=$((RANDOM % 100))
+        if   [ $roll -lt 45 ]; then    # plain internal → allowed, cheap model
+            chat "${SHORT[$((RANDOM % ${#SHORT[@]}))]}"
+            tag="allow/cheap"
+        elif [ $roll -lt 60 ]; then    # long prompt → complexity router escalates
+            chat "analyze thoroughly: $(printf 'lorem ipsum dolor sit amet %.0s' $(seq 1 80))"
+            tag="allow/strong"
+        elif [ $roll -lt 72 ]; then    # PII → fail-closed (or local if configured)
+            chat "customer SSN is 123-45-6789, check the account"
+            tag="pii"
+        elif [ $roll -lt 80 ]; then    # PHI → fail-closed (or local if configured)
+            chat "patient id 1023, MRN 55-70, diagnosis summary please"
+            tag="phi"
+        elif [ $roll -lt 88 ]; then    # no key → 401
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/chat/completions" \
+                -H 'Content-Type: application/json' -d '{"messages":[{"role":"user","content":"hi"}]}')
+            tag="no-key"
+        elif [ $roll -lt 94 ]; then    # wrong key → 401
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/chat/completions" \
+                -H 'Content-Type: application/json' -H 'Authorization: Bearer wrong-key-123' \
+                -d '{"messages":[{"role":"user","content":"hi"}]}')
+            tag="bad-key"
+        else                           # not-permitted model → policy 403
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/v1/chat/completions" \
+                -H 'Content-Type: application/json' -H "Authorization: Bearer $API_KEY" \
+                -d '{"model":"claude-3-opus","messages":[{"role":"user","content":"hi"}]}')
+            tag="bad-model"
+        fi
+        printf '  %2d/%d  HTTP %s  %s\n' "$i" "$N" "$CODE" "$tag"
+        sleep "$PAUSE"
+    done
+    say "Done — watch the chart and request history fill in."
+    exit 0
+fi
+
 say "1. Governed request (Internal classification → public route, attributed to team 'platform')"
 chat "say hello in five words"
 if [ "$CODE" = "502" ]; then
@@ -54,8 +104,12 @@ curl -sN "$BASE/v1/chat/completions" \
     -H "Authorization: Bearer $API_KEY" \
     -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: live-demo' \
     -d '{"stream":true,"messages":[{"role":"user","content":"count from 1 to 5"}]}' \
-    | head -12 | sed 's/^/  /'
+    | head -12 | sed 's/^/  /' || true   # head closing early SIGPIPEs curl; must not abort the script
 note "attribution and audit still happen once, on stream completion — check the evidence export"
+
+say "1c. Long prompt — the complexity router escalates to the strong model"
+chat "analyze this in depth: $(printf 'lorem ipsum dolor sit amet consectetur adipiscing %.0s' $(seq 1 60))"
+note "HTTP $CODE — check the live feed: served by the STRONG model, reason 'complexity-routed'"
 
 say "2. PII request — the product moment"
 chat "my SSN is 123-45-6789, please summarize my account"
@@ -65,6 +119,11 @@ if [ "$CODE" = "403" ]; then
 else
     note "HTTP $CODE — served by the LOCAL in-perimeter model. The prompt never left the boundary."
 fi
+show "$BODY"
+
+say "2c. PHI request (MRN / patient id) — same fail-closed guarantee, distinct classification"
+chat "patient id 8842, MRN 129-44: summarize the diagnosis history"
+note "HTTP $CODE — classified PHI; check the feed: red PHI pill, denied or served locally"
 show "$BODY"
 
 say "2b. No API key → 401 — anonymous serving is an explicit opt-in, and the refusal is audited"

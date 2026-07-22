@@ -61,6 +61,19 @@ dotnet user-secrets set "Local:Endpoint" "http://localhost:11434/v1" --project s
 dotnet user-secrets set "Local:ModelId"  "llama3.1:8b"               --project src/Covenant.Host
 ```
 
+Pricing: defaults are real per-1M rates (gpt-4o-mini $0.15/$0.60, gpt-4o $2.50/$10.00) converted
+internally to per-1K. Override per model when providers change prices:
+`dotnet user-secrets set "Pricing:gpt-4o-mini:InPer1M" "0.15" ...` (+ `OutPer1M`).
+
+Reset between demo runs: **Settings → Archive log & reset counters** in the dashboard (or
+`curl -X POST localhost:5100/admin/reset -H 'X-Covenant-Admin-Token: dev-admin-token'`). The audit
+log is archived with a timestamp, never deleted; budgets reopen.
+
+Complexity routing: Public/Internal route lists are ordered cheapest → strongest
+(`gpt-4o-mini` → `gpt-4o` by default; override via `OpenAI:ModelId` / `OpenAI:StrongModelId`).
+Prompts estimated above `Routing:ComplexityTokenThreshold` tokens (default 400, chars÷4 heuristic)
+escalate to the strong model; an explicitly requested model wins if policy permits it.
+
 Optional tracing (ADR-0003 — off by default; endpoint must be in-perimeter). A permanent local
 collector ships in the repo:
 ```
@@ -79,15 +92,21 @@ dotnet user-secrets set "OpenAI:ModelId"  "llama3.1:8b"               --project 
 ```
 
 Scripted demo (server running in another terminal): `./demo.sh`, or `./demo.sh --tamper` to also
-prove the audit chain detects edits (destructive to the log).
+prove the audit chain detects edits (destructive to the log). For realistic dashboard data use the
+traffic generator: `./demo.sh --traffic 60 10` sends 60 randomized requests over ~10 minutes
+(short/long prompts, PII/PHI, missing and wrong keys, disallowed model asks).
+
+Input previews in request details are OFF by default — audit evidence is metadata plus a SHA-256
+content fingerprint. To capture a truncated input preview (your perimeter, your call):
+`dotnet user-secrets set "Audit:PromptPreviewChars" "120" --project src/Covenant.Host` and restart.
 
 Dashboard (FinOps savings, budgets, denials, kill switch, routing policy):
-open **http://localhost:5000/admin/ui** and enter the admin token. Self-contained page — no CDN,
+open **http://localhost:5100/admin/ui** and enter the admin token. Self-contained page — no CDN,
 no external assets; the appliance stays a single artifact with no egress.
 
 Governed request (routes to OpenAI, gets attributed and audited):
 ```
-curl -s localhost:5000/v1/chat/completions \
+curl -s localhost:5100/v1/chat/completions \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer demo-key' \
   -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
   -d '{"messages":[{"role":"user","content":"say hello"}]}'
@@ -95,7 +114,7 @@ curl -s localhost:5000/v1/chat/completions \
 
 Streamed (SSE; same governance, attribution and audit fire on stream completion — ADR-0002):
 ```
-curl -sN localhost:5000/v1/chat/completions \
+curl -sN localhost:5100/v1/chat/completions \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer demo-key' \
   -H 'X-Covenant-Workflow: demo' -H 'X-Covenant-UseCase: smoke-test' \
   -d '{"stream":true,"messages":[{"role":"user","content":"count from 1 to 5"}]}'
@@ -103,7 +122,7 @@ curl -sN localhost:5000/v1/chat/completions \
 
 Fail-closed request (classifies PII → no permitted route → 403, never reaches a provider):
 ```
-curl -s localhost:5000/v1/chat/completions \
+curl -s localhost:5100/v1/chat/completions \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer demo-key' \
   -d '{"messages":[{"role":"user","content":"my SSN is 123-45-6789"}]}'
 ```
@@ -112,11 +131,11 @@ classification even runs, and that refusal is audited too.)
 
 Kill switch (engage, watch requests 403, disengage):
 ```
-curl -s -X POST localhost:5000/admin/kill-switch \
+curl -s -X POST localhost:5100/admin/kill-switch \
   -H 'Content-Type: application/json' -H 'X-Covenant-Admin-Token: dev-admin-token' \
   -d '{"engaged":true,"reason":"incident drill"}'
 
-curl -s -X POST localhost:5000/admin/kill-switch \
+curl -s -X POST localhost:5100/admin/kill-switch \
   -H 'Content-Type: application/json' -H 'X-Covenant-Admin-Token: dev-admin-token' \
   -d '{"engaged":false}'
 ```
@@ -124,14 +143,34 @@ curl -s -X POST localhost:5000/admin/kill-switch \
 Compliance-evidence export (verifies the hash chain, then summarizes allow/deny counts, spend by team,
 requests by classification):
 ```
-curl -s localhost:5000/admin/evidence -H 'X-Covenant-Admin-Token: dev-admin-token'
+curl -s localhost:5100/admin/evidence -H 'X-Covenant-Admin-Token: dev-admin-token'
 ```
 To see tamper-evidence work, edit any middle line of `covenant-audit.log` and re-run the export —
 `chain_valid` flips to false with the first broken line number.
 
 Then inspect `covenant-audit.log` — one hash-chained line per request, **including every denial**.
 
-## 5. Next
+## 5. Real traffic through the proxy
+Covenant is OpenAI-wire-compatible, so any OpenAI-compatible client can use it as its backend —
+every chat then flows through governance and shows up on the dashboard. A ChatGPT-style UI
+(Open WebUI) pointed at Covenant:
+```
+docker run -d --name open-webui -p 3000:8080 \
+  -e OPENAI_API_BASE_URL=http://host.docker.internal:5100/v1 \
+  -e OPENAI_API_KEY=demo-key \
+  ghcr.io/open-webui/open-webui:main
+```
+Open http://localhost:3000 — the model picker lists only policy-permitted models (`/v1/models` is
+governed too). Or from code:
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:5100/v1", api_key="demo-key")
+client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
+```
+First slice speaks plain-text chat (buffered + SSE). Multimodal content and tool calls are not yet
+part of the wire surface.
+
+## 6. Next
 - Run the **NativeAOT spike** from ADR-0001 (`PublishAot=true` in `Covenant.Host.csproj`) and record the
   result. It decides the `deploy/` story.
 - ADR: durable audit store + chain-head anchoring (truncation-from-the-end is not detectable from the
