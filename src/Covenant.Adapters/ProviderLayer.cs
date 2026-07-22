@@ -4,16 +4,22 @@ using MEAI = Microsoft.Extensions.AI;
 
 namespace Covenant.Adapters;
 
-/// <summary>Resolves a route's AdapterKey to a Microsoft.Extensions.AI IChatClient.</summary>
+/// <summary>Resolves a route (adapter + model) to a Microsoft.Extensions.AI IChatClient.</summary>
 public interface IChatClientRegistry
 {
-    bool TryResolve(string adapterKey, out MEAI.IChatClient client);
+    bool TryResolve(string adapterKey, string modelId, out MEAI.IChatClient client);
 }
 
+/// <summary>
+/// Registration keys are either "adapter:model" (exact — how the Host registers, so a policy route to
+/// an unregistered model fails closed) or a bare "adapter" wildcard serving any model on that adapter
+/// (test doubles). Exact match wins.
+/// </summary>
 public sealed class ChatClientRegistry(IReadOnlyDictionary<string, MEAI.IChatClient> clients) : IChatClientRegistry
 {
-    public bool TryResolve(string adapterKey, out MEAI.IChatClient client)
-        => clients.TryGetValue(adapterKey, out client!);
+    public bool TryResolve(string adapterKey, string modelId, out MEAI.IChatClient client)
+        => clients.TryGetValue($"{adapterKey}:{modelId}", out client!)
+        || clients.TryGetValue(adapterKey, out client!);
 }
 
 /// <summary>
@@ -28,9 +34,9 @@ public sealed class ProviderCallStage(IChatClientRegistry registry) : IPipelineS
         var route = ctx.Policy?.Route;
         if (route is null) { ctx.Deny("no route resolved before provider call"); return; }
 
-        if (!registry.TryResolve(route.AdapterKey, out var client))
+        if (!registry.TryResolve(route.AdapterKey, route.ModelId, out var client))
         {
-            ctx.Deny($"no adapter registered for key '{route.AdapterKey}'"); // fail-closed
+            ctx.Deny($"no adapter registered for '{route.AdapterKey}:{route.ModelId}'"); // fail-closed
             return;
         }
 
