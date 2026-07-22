@@ -10,6 +10,7 @@ public sealed record PolicyOutcome(PolicyEffect Effect, string Reason, RouteTarg
 {
     public static PolicyOutcome Deny(string reason) => new(PolicyEffect.Deny, reason, null);
     public static PolicyOutcome Allow(RouteTarget route) => new(PolicyEffect.Allow, "allowed", route);
+    public static PolicyOutcome Allow(RouteTarget route, string reason) => new(PolicyEffect.Allow, reason, route);
 }
 
 /// <summary>Cost attributed to a caller's tags for one inference.</summary>
@@ -30,4 +31,9 @@ public sealed record AuditEntry(
     PolicyEffect Effect,
     string Reason,
     string? ServedByModel,
-    Usage Usage);
+    Usage Usage,
+    double DurationMs = 0,
+    int PromptChars = 0,
+    string? PromptSha256 = null,
+    string? Signal = null,
+    string? PromptPreview = null);

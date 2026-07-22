@@ -168,11 +168,33 @@ public class PipelineSliceTests
         // Must be the governance denial — if the tripwire had fired, the reason would be the
         // swallowed provider failure instead, and this assertion would catch it.
         Assert.Equal(DenialKind.Governance, ctx.DenialKind);
-        Assert.Contains("no adapter registered for key 'local'", ctx.DenialReason!);
+        Assert.Contains("no adapter registered for 'local:", ctx.DenialReason!);
         Assert.Null(ctx.Response);
         Assert.Equal(DataClassification.Pii, ctx.Classification);
+        Assert.Contains("SSN", ctx.ClassificationSignal);                // WHAT triggered is evidence
         Assert.Single(sink.Entries);                                     // denials are audited too
         Assert.Equal(PolicyEffect.Deny, sink.Entries[0].Effect);
+        Assert.NotNull(sink.Entries[0].PromptSha256);                    // fingerprint, not content
+        Assert.True(sink.Entries[0].PromptChars > 0);
+        Assert.Null(sink.Entries[0].PromptPreview);                      // content capture is OFF by default
+    }
+
+    [Fact]
+    public async Task Prompt_preview_is_captured_only_when_explicitly_enabled_and_is_truncated()
+    {
+        var sink = new CollectingAuditSink();
+        var pipeline = new InferencePipeline(
+        [
+            new AuditStage(sink, promptPreviewChars: 16),               // explicit operator opt-in
+            new ClassifyStage(new RegexDataClassifier()),
+        ]);
+        var ctx = Ctx("this prompt is much longer than sixteen characters");
+
+        await pipeline.ExecuteAsync(ctx, default);
+
+        var preview = sink.Entries[0].PromptPreview;
+        Assert.NotNull(preview);
+        Assert.Equal("this prompt is m…", preview);                     // 16 chars + ellipsis, no more
     }
 
     [Fact]
@@ -390,6 +412,20 @@ public class PipelineSliceTests
         Assert.True(ctx.Attribution!.Usage.CostUsd > 0m);
         Assert.Equal(ctx.Attribution.Usage.CostUsd, ledger.TeamSpendUsd("platform"));
         Assert.Equal(ctx.Attribution.Usage.CostUsd, ledger.GlobalSpendUsd);
+    }
+
+    [Fact]
+    public void Ledger_reset_clears_all_spend()
+    {
+        var ledger = new InMemorySpendLedger();
+        ledger.Record("payments", 1.25m);
+        ledger.Record("platform", 0.50m);
+
+        ledger.Reset();
+
+        Assert.Equal(0m, ledger.GlobalSpendUsd);
+        Assert.Equal(0m, ledger.TeamSpendUsd("payments"));
+        Assert.Empty(ledger.SnapshotByTeam());
     }
 
     [Fact]

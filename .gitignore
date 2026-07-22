@@ -22,7 +22,10 @@ coverage*.xml
 
 # --- Covenant-specific: NEVER commit these ---
 # Audit logs contain prompt/response metadata and principals (root CLAUDE.md: the perimeter is sacred).
+# Archived rotations (covenant-audit.log.<timestamp>.archived) are evidence too — never in git.
 *audit*.log
+*audit*.log.*
+*.archived
 covenant-audit.log
 
 # Local secrets. Secrets live in the customer's vault, never in the repo or image.

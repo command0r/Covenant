@@ -4,12 +4,20 @@ using Xunit;
 
 namespace Covenant.Tests;
 
-/// <summary>Attribution math for the dashboard: the savings estimate and denial grouping must be
-/// computed from audit evidence, and the numbers must be exact (decimal, no float drift).</summary>
+/// <summary>Savings math for the dashboard. Baseline is stated, not implied: every allowed request
+/// priced as if it had run on the STRONG model; savings split between in-perimeter serving and the
+/// complexity router. Exact decimal, never invented — all-strong traffic must claim zero.</summary>
 public class FinOpsTests
 {
-    private static readonly (decimal InPer1K, decimal OutPer1K) PublicPrice = (0.15m, 0.60m);
     private const string LocalModel = "llama-3.1-8b-instruct";
+    private const string StrongModel = "gpt-4o";
+
+    private static readonly Dictionary<string, (decimal, decimal)> Prices = new()
+    {
+        ["gpt-4o-mini"] = (0.15m, 0.60m),
+        [StrongModel] = (2.50m, 10.00m),
+        [LocalModel] = (0m, 0m),
+    };
 
     private static AuditEntry Entry(
         PolicyEffect effect, string? model, long inTok, long outTok, decimal cost,
@@ -26,35 +34,37 @@ public class FinOpsTests
             Usage: new Usage(inTok, outTok, cost));
 
     [Fact]
-    public void Local_served_tokens_are_priced_at_public_rates_as_estimated_savings()
+    public void Savings_are_measured_against_the_all_strong_baseline_and_split_by_cause()
     {
         var entries = new[]
         {
-            Entry(PolicyEffect.Allow, LocalModel, 1_000, 1_000, 0m),          // in-perimeter, cost 0
-            Entry(PolicyEffect.Allow, "gpt-4o-mini", 100, 100, 0.075m),       // public route
+            Entry(PolicyEffect.Allow, LocalModel, 1_000, 1_000, 0m),        // in-perimeter, free
+            Entry(PolicyEffect.Allow, "gpt-4o-mini", 100, 100, 0.075m),     // router kept it cheap
+            Entry(PolicyEffect.Allow, StrongModel, 100, 100, 1.25m),        // ran strong: no savings
         };
 
-        var f = FinOps.Build(entries, LocalModel, PublicPrice);
+        var f = FinOps.Build(entries, LocalModel, StrongModel, Prices);
 
-        // 1000/1000*0.15 + 1000/1000*0.60 = 0.75 — exactly, in decimal
-        Assert.Equal(0.75m, f.EstimatedSavingsUsd);
+        // local: 1000/1000 tokens at full strong delta → 1×2.50 + 1×10.00 = 12.50
+        Assert.Equal(12.50m, f.SavingsLocalUsd);
+        // router: 100/1000×(2.50−0.15) + 100/1000×(10.00−0.60) = 0.235 + 0.940 = 1.175
+        Assert.Equal(1.175m, f.SavingsRouterUsd);
+        Assert.Equal(13.675m, f.EstimatedSavingsUsd);
         Assert.Equal(1, f.LocalRequests);
         Assert.Equal(2_000, f.LocalTokens);
-        Assert.Equal(0.075m, f.TotalCostUsd);
-        Assert.Equal(2, f.Allowed);
-        Assert.Equal(0, f.Denied);
+        Assert.Equal(1, f.RequestsByModel[StrongModel]);
     }
 
     [Fact]
-    public void Removing_the_savings_rule_would_zero_this_out()
+    public void All_strong_traffic_claims_zero_savings()
     {
-        // No local-served entries → no claimed savings. The estimate must never be invented.
-        var entries = new[] { Entry(PolicyEffect.Allow, "gpt-4o-mini", 500, 500, 0.375m) };
+        var entries = new[] { Entry(PolicyEffect.Allow, StrongModel, 500, 500, 6.25m) };
 
-        var f = FinOps.Build(entries, LocalModel, PublicPrice);
+        var f = FinOps.Build(entries, LocalModel, StrongModel, Prices);
 
         Assert.Equal(0m, f.EstimatedSavingsUsd);
-        Assert.Equal(0, f.LocalRequests);
+        Assert.Equal(0m, f.SavingsLocalUsd);
+        Assert.Equal(0m, f.SavingsRouterUsd);
     }
 
     [Fact]
@@ -64,15 +74,15 @@ public class FinOpsTests
         {
             Entry(PolicyEffect.Deny, null, 0, 0, 0m, team: "payments", reason: "kill switch engaged: drill"),
             Entry(PolicyEffect.Deny, null, 0, 0, 0m, team: "payments", reason: "kill switch engaged: drill"),
-            Entry(PolicyEffect.Deny, null, 0, 0, 0m, team: "risk", reason: "no adapter registered for key 'local'"),
+            Entry(PolicyEffect.Deny, null, 0, 0, 0m, team: "risk", reason: "no adapter registered for 'local:x'"),
             Entry(PolicyEffect.Allow, "gpt-4o-mini", 100, 100, 0.075m, team: "payments"),
         };
 
-        var f = FinOps.Build(entries, LocalModel, PublicPrice);
+        var f = FinOps.Build(entries, LocalModel, StrongModel, Prices);
 
         Assert.Equal(3, f.Denied);
         Assert.Equal(2, f.DenialsByReason["kill switch engaged: drill"]);
-        Assert.Equal(1, f.DenialsByReason["no adapter registered for key 'local'"]);
+        Assert.Equal(1, f.DenialsByReason["no adapter registered for 'local:x'"]);
         Assert.Equal(0.075m, f.CostByTeamUsd["payments"]);
         Assert.Equal(0m, f.CostByTeamUsd["risk"]);
     }

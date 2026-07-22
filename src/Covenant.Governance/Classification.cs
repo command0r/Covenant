@@ -3,10 +3,13 @@ using Covenant.Core;
 
 namespace Covenant.Governance;
 
+/// <summary>Classification plus WHAT triggered it (a rule name, never content) — the signal goes into evidence.</summary>
+public sealed record ClassificationResult(DataClassification Classification, string? Signal);
+
 /// <summary>Derives a data classification from request content. Implementations must fail closed (escalate when unsure).</summary>
 public interface IDataClassifier
 {
-    DataClassification Classify(InferenceRequest request);
+    ClassificationResult Classify(InferenceRequest request);
 }
 
 /// <summary>
@@ -16,12 +19,12 @@ public interface IDataClassifier
 /// </summary>
 public sealed partial class RegexDataClassifier : IDataClassifier
 {
-    public DataClassification Classify(InferenceRequest request)
+    public ClassificationResult Classify(InferenceRequest request)
     {
         var text = string.Join('\n', request.Messages.Select(m => m.Content));
-        if (PhiPattern().IsMatch(text)) return DataClassification.Phi;
-        if (PiiPattern().IsMatch(text)) return DataClassification.Pii;
-        return DataClassification.Internal;
+        if (PhiPattern().IsMatch(text)) return new(DataClassification.Phi, "PHI keyword (MRN / diagnosis / patient id)");
+        if (PiiPattern().IsMatch(text)) return new(DataClassification.Pii, "US SSN pattern");
+        return new(DataClassification.Internal, null);
     }
 
     // US SSN — illustrative only.
@@ -38,7 +41,9 @@ public sealed class ClassifyStage(IDataClassifier classifier) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
-        ctx.Classification = classifier.Classify(ctx.Request);
+        var result = classifier.Classify(ctx.Request);
+        ctx.Classification = result.Classification;
+        ctx.ClassificationSignal = result.Signal;
         await next(ctx, ct);
     }
 }

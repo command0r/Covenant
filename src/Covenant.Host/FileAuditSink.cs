@@ -19,6 +19,7 @@ public sealed class FileAuditSink(string path) : IAuditSink, IHostedService
     private readonly Channel<AuditEntry> _channel =
         Channel.CreateUnbounded<AuditEntry>(new UnboundedChannelOptions { SingleReader = true });
 
+    private readonly SemaphoreSlim _fileLock = new(1, 1);
     private Task? _drain;
     private string _previousHash = AuditChain.GenesisHash;
 
@@ -49,11 +50,40 @@ public sealed class FileAuditSink(string path) : IAuditSink, IHostedService
     {
         await foreach (var entry in _channel.Reader.ReadAllAsync())
         {
-            var content = JsonSerializer.Serialize(entry, AuditJsonContext.Default.AuditEntry);
-            var entryHash = AuditChain.Hash(_previousHash, content);
-            await File.AppendAllTextAsync(path,
-                $"{_previousHash}{AuditChain.Separator}{entryHash}{AuditChain.Separator}{content}{Environment.NewLine}");
-            _previousHash = entryHash;
+            await _fileLock.WaitAsync();
+            try
+            {
+                var content = JsonSerializer.Serialize(entry, AuditJsonContext.Default.AuditEntry);
+                var entryHash = AuditChain.Hash(_previousHash, content);
+                await File.AppendAllTextAsync(path,
+                    $"{_previousHash}{AuditChain.Separator}{entryHash}{AuditChain.Separator}{content}{Environment.NewLine}");
+                _previousHash = entryHash;
+            }
+            finally
+            {
+                _fileLock.Release();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Archives the current log (rename, never delete — evidence retires, it doesn't die) and starts
+    /// a fresh chain at genesis. Returns the archive path, or null if there was nothing to archive.
+    /// </summary>
+    public async Task<string?> RotateAsync()
+    {
+        await _fileLock.WaitAsync();
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var archive = $"{path}.{DateTime.UtcNow:yyyyMMdd-HHmmss}.archived";
+            File.Move(path, archive);
+            _previousHash = AuditChain.GenesisHash;
+            return archive;
+        }
+        finally
+        {
+            _fileLock.Release();
         }
     }
 }

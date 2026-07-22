@@ -52,6 +52,9 @@ public interface ISpendLedger
     decimal TeamSpendUsd(string team);
     void Record(string team, decimal usd);
     IReadOnlyDictionary<string, decimal> SnapshotByTeam();
+    /// <summary>Clears all recorded spend (used with an audit-log rotation — never on its own,
+    /// or ledger and evidence would disagree).</summary>
+    void Reset();
 }
 
 public sealed class InMemorySpendLedger : ISpendLedger
@@ -82,6 +85,15 @@ public sealed class InMemorySpendLedger : ISpendLedger
     public IReadOnlyDictionary<string, decimal> SnapshotByTeam()
     {
         lock (_gate) return new Dictionary<string, decimal>(_byTeam, StringComparer.OrdinalIgnoreCase);
+    }
+
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _global = 0m;
+            _byTeam.Clear();
+        }
     }
 }
 

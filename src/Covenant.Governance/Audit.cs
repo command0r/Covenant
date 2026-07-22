@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Covenant.Core;
 
 namespace Covenant.Governance;
@@ -8,7 +10,10 @@ namespace Covenant.Governance;
 /// (rather than a final linear stage) precisely so denials and exceptions are still recorded.
 /// Entries are handed to the sink off the hot path; this stage never blocks on durable persistence.
 /// </summary>
-public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null) : IPipelineStage
+/// <param name="promptPreviewChars">0 (default) = no input content in evidence — the shipping
+/// posture. A positive value is an EXPLICIT operator opt-in (Audit:PromptPreviewChars) to capture a
+/// truncated input preview in audit entries; the tradeoff is the operator's to make.</param>
+public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int promptPreviewChars = 0) : IPipelineStage
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
 
@@ -33,9 +38,22 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null) : IP
                 Reason: ctx.DenialReason
                     ?? (served ? ctx.Policy?.Reason ?? "allowed" : "no response produced (errored or incomplete)"),
                 ServedByModel: ctx.Response?.ServedByModel,
-                Usage: ctx.Response?.Usage ?? Usage.Empty);
+                Usage: ctx.Response?.Usage ?? Usage.Empty,
+                DurationMs: (_clock.GetUtcNow() - ctx.StartedUtc).TotalMilliseconds,
+                // Size + fingerprint, never content: the SHA-256 proves WHICH prompt this entry is
+                // about (holder of the text can verify), while the text itself stays in the data plane.
+                PromptChars: ctx.Request.Messages.Sum(m => m.Content.Length),
+                PromptSha256: Convert.ToHexString(SHA256.HashData(
+                    Encoding.UTF8.GetBytes(string.Join('\n', ctx.Request.Messages.Select(m => m.Content))))).ToLowerInvariant(),
+                Signal: ctx.ClassificationSignal,
+                PromptPreview: promptPreviewChars > 0
+                    ? Truncate(string.Join(" ⏎ ", ctx.Request.Messages.Select(m => m.Content)), promptPreviewChars)
+                    : null);
 
             await sink.EnqueueAsync(entry, ct);
         }
     }
+
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s[..max] + "…";
 }

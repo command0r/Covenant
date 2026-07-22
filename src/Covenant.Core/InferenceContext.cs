@@ -22,6 +22,9 @@ public sealed class InferenceContext(InferenceRequest request)
     /// <summary>Written by the classify stage. Defaults to the most restrictive class (fail-closed).</summary>
     public DataClassification Classification { get; set; } = DataClassification.Phi;
 
+    /// <summary>What the classifier matched (e.g. "US SSN pattern") — metadata for evidence, never content.</summary>
+    public string? ClassificationSignal { get; set; }
+
     /// <summary>Written by the policy stage.</summary>
     public PolicyOutcome? Policy { get; set; }
 
