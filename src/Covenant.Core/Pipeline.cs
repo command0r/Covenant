@@ -5,33 +5,23 @@ namespace Covenant.Core;
 /// <summary>Continuation delegate that invokes the next stage in the chain.</summary>
 public delegate Task PipelineDelegate(InferenceContext context, CancellationToken cancellationToken);
 
-/// <summary>
-/// One ordered stage of the inference pipeline. A stage may inspect or mutate the context, call
-/// <paramref name="next"/> to continue, or short-circuit by returning without calling it (e.g. on a denial).
-/// </summary>
+/// <summary>One ordered pipeline stage: mutate the context, call next to continue, or short-circuit
+/// by returning without calling it (e.g. on a denial).</summary>
 public interface IPipelineStage
 {
     Task InvokeAsync(InferenceContext context, PipelineDelegate next, CancellationToken cancellationToken);
 }
 
-/// <summary>
-/// Diagnostics source for the pipeline (ADR-0003). BCL-only — Core takes no OpenTelemetry dependency;
-/// the Host decides whether anything listens. With no listener, StartActivity returns null and the
-/// instrumentation is effectively free (src/CLAUDE.md hot-path rule). Spans carry governance METADATA
-/// only — never prompt or response content.
-/// </summary>
+/// <summary>Pipeline diagnostics source (ADR-0003). BCL-only — no OTel dependency in Core; with no
+/// listener the instrumentation is free. Spans carry governance METADATA only, never content.</summary>
 public static class CovenantDiagnostics
 {
     public const string SourceName = "Covenant.Pipeline";
     public static readonly ActivitySource Source = new(SourceName);
 }
 
-/// <summary>
-/// Composes stages into a single execution chain, in registration order. The chain is built once at
-/// construction (hot-path friendly). Once a context is denied, no further stage runs — fail-closed.
-/// Each stage runs inside its own activity span (nested, middleware-onion shape); the request span is
-/// enriched with the governance outcome on completion.
-/// </summary>
+/// <summary>Composes stages into one chain, built once at construction (hot-path friendly). Once a
+/// context is denied, no further stage runs — fail-closed. Each stage gets a nested activity span.</summary>
 public sealed class InferencePipeline
 {
     private readonly PipelineDelegate _entry;

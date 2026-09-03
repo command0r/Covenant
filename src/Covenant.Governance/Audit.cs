@@ -4,15 +4,8 @@ using Covenant.Core;
 
 namespace Covenant.Governance;
 
-/// <summary>
-/// The outermost stage. It wraps the entire pipeline in a try/finally so that EVERY request —
-/// allowed, denied, or errored — produces exactly one audit entry. Implemented as an enclosing stage
-/// (rather than a final linear stage) precisely so denials and exceptions are still recorded.
-/// Entries are handed to the sink off the hot path; this stage never blocks on durable persistence.
-/// </summary>
-/// <param name="promptPreviewChars">0 (default) = no input content in evidence — the shipping
-/// posture. A positive value is an EXPLICIT operator opt-in (Audit:PromptPreviewChars) to capture a
-/// truncated input preview in audit entries; the tradeoff is the operator's to make.</param>
+/// <summary>Outermost stage: try/finally so EVERY request — allowed, denied, or errored — yields exactly one audit entry, handed to the sink off the hot path.</summary>
+/// <param name="promptPreviewChars">0 (default) = no input content in evidence; a positive value is an EXPLICIT operator opt-in (Audit:PromptPreviewChars) to a truncated preview.</param>
 public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int promptPreviewChars = 0) : IPipelineStage
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;

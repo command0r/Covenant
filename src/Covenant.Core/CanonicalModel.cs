@@ -18,9 +18,8 @@ public sealed record AttributionTags(string Team, string Workflow, string UseCas
     public static readonly AttributionTags Unattributed = new("unknown", "unknown", "unknown");
 }
 
-/// <summary>The canonical inference request. Everything past ingress speaks this shape, never a provider shape.
-/// Credential is the raw presented API key: consumed by the auth stage only, and must never reach
-/// audit entries, spans, or logs.</summary>
+/// <summary>The canonical inference request — everything past ingress speaks this shape, never a provider
+/// shape. Credential is the raw API key: consumed by the auth stage only, never in audit, spans, or logs.</summary>
 public sealed record InferenceRequest(
     string Principal,
     IReadOnlyList<ChatMessage> Messages,
@@ -29,9 +28,8 @@ public sealed record InferenceRequest(
     bool Stream = false,
     string? Credential = null);
 
-/// <summary>Who the pipeline decided the caller is. Defaults to the request's self-declared identity;
-/// overwritten by the auth stage when a valid API key resolves. Everything downstream (budget,
-/// attribution, audit, telemetry) reads THIS, never the raw request headers.</summary>
+/// <summary>Who the pipeline decided the caller is: self-declared until the auth stage overwrites it
+/// on a valid key. Everything downstream reads THIS, never the raw request headers.</summary>
 public sealed record CallerIdentity(string Principal, AttributionTags Tags);
 
 /// <summary>Token and cost accounting for a single inference. Cost is filled by the attribution stage.</summary>

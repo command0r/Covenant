@@ -4,9 +4,7 @@ using Xunit;
 
 namespace Covenant.Tests;
 
-/// <summary>Complexity routing: the policy engine selects within the ordered permitted set —
-/// cheapest for simple prompts, strongest past the token threshold. Remove the threshold logic and
-/// the escalation test fails.</summary>
+/// <summary>Complexity routing within the ordered permitted set: cheapest for simple prompts, strongest past the token threshold.</summary>
 public class RoutingTests
 {
     private static readonly RouteTarget Cheap = new("openai", "gpt-4o-mini");

@@ -2,11 +2,8 @@ using Covenant.Core;
 
 namespace Covenant.Governance;
 
-/// <summary>
-/// For each classification, the ordered list of routes a request may use. A missing or empty list
-/// means "no permitted route" → deny. This is how PII/PHI is kept off public providers: simply do not
-/// list a public route under those classifications.
-/// </summary>
+/// <summary>Ordered permitted routes per classification. Missing or empty list → deny — this is how
+/// PII/PHI stays off public providers: no public route listed under those classifications.</summary>
 public sealed class PolicyConfig
 {
     public required IReadOnlyDictionary<DataClassification, IReadOnlyList<RouteTarget>> AllowedRoutes { get; init; }
@@ -17,22 +14,15 @@ public interface IPolicyEngine
     PolicyOutcome Evaluate(InferenceContext context);
 }
 
-/// <summary>Route-selection knobs. Routes per classification are ORDERED cheapest → strongest;
-/// prompts estimated above the threshold take the strongest permitted route, everything else takes
-/// the cheapest. Token estimate is chars/4 — a deliberate, documented heuristic (a real tokenizer is
-/// a swap behind this seam, not a redesign).</summary>
+/// <summary>Route-selection knobs: routes are ORDERED cheapest → strongest; above-threshold prompts take
+/// the strongest permitted route. Token estimate is chars/4 — deliberate heuristic behind a swap seam.</summary>
 public sealed class RoutingOptions
 {
     public long ComplexityTokenThreshold { get; init; } = 400;
 }
 
-/// <summary>
-/// Policy + FinOps-aware route selection, fail-closed throughout:
-///  - no permitted route for the classification → deny;
-///  - caller-requested model must be within the permitted set, else deny;
-///  - otherwise complexity-route among the permitted set (cheapest for simple prompts, strongest
-///    for complex ones). One permitted route degenerates to the old first-route behavior.
-/// </summary>
+/// <summary>Policy + FinOps route selection, fail-closed: no permitted route → deny; a requested model
+/// must be within the permitted set, else deny; otherwise complexity-route (cheapest vs strongest).</summary>
 public sealed class PolicyEngine(PolicyConfig config, RoutingOptions? routing = null) : IPolicyEngine
 {
     private readonly RoutingOptions _routing = routing ?? new RoutingOptions();

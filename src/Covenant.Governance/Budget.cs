@@ -32,11 +32,8 @@ public sealed class KillSwitch : IKillSwitch
     }
 }
 
-/// <summary>
-/// Spend caps in USD. The global cap is required: every dollar the appliance can spend is bounded,
-/// including spend from teams with no cap of their own (fail-closed FinOps — nothing is unlimited).
-/// Team caps are optional refinements inside the global ceiling, keyed by the attribution Team tag.
-/// </summary>
+/// <summary>Spend caps in USD. The global cap is required — nothing is unlimited (fail-closed FinOps);
+/// team caps are optional refinements inside the global ceiling, keyed by the attribution Team tag.</summary>
 public sealed class BudgetConfig
 {
     public required decimal GlobalCapUsd { get; init; }
@@ -97,16 +94,8 @@ public sealed class InMemorySpendLedger : ISpendLedger
     }
 }
 
-/// <summary>
-/// Pipeline stage: kill switch and budget enforcement. Sits after policy (a denied request must not
-/// consume budget checks' complexity) and before the provider call (nothing that costs money runs
-/// past an exhausted cap). On the unwind after the inner stages complete, records the actual
-/// attributed cost against the ledger.
-///
-/// Enforcement is check-then-spend: a request is admitted while spend is strictly under the cap, so
-/// the final admitted request may overshoot by its own cost. Pre-call cost estimation would need a
-/// token estimator; deliberate first-slice trade-off.
-/// </summary>
+/// <summary>Kill switch + budget enforcement, after policy and before the provider call (nothing that costs money runs past an exhausted cap); records actual attributed cost on the unwind.
+/// Check-then-spend: the last admitted request may overshoot by its own cost — deliberate first-slice trade-off (pre-call estimation needs a tokenizer).</summary>
 public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, BudgetConfig config) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)

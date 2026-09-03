@@ -4,11 +4,7 @@ using Xunit;
 
 namespace Covenant.Tests;
 
-/// <summary>
-/// Tamper-evidence tests: each one removes a guarantee (edit an entry, delete an entry) and asserts
-/// the verifier notices. Written through the real FileAuditSink so the writer and verifier are tested
-/// against each other, not against a shared assumption.
-/// </summary>
+/// <summary>Tamper-evidence tests: remove a guarantee, assert the verifier notices. Written through the real FileAuditSink so writer and verifier are tested against each other, not a shared assumption.</summary>
 public sealed class EvidenceTests : IDisposable
 {
     private readonly string _path = Path.Combine(Path.GetTempPath(), $"covenant-audit-test-{Guid.NewGuid():n}.log");

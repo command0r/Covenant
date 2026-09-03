@@ -16,8 +16,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Pinned against nuget.org 2026-07-15. xunit v2 (maintenance line) — deliberate; v3 changes
-         runner packaging and buys us nothing for this slice. Runner 3.x executes both v2 and v3. -->
+    <!-- Pinned against nuget.org 2026-07-15. xunit v2 deliberate — v3 changes runner packaging, buys nothing for this slice. -->
     <PackageReference Include="Microsoft.Extensions.AI" Version="10.8.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.7.0" />
     <PackageReference Include="xunit" Version="2.9.3" />

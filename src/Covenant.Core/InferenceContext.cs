@@ -1,15 +1,11 @@
 namespace Covenant.Core;
 
-/// <summary>Why a request was refused: missing/invalid credentials, a governance decision, or an
-/// upstream failure handled fail-closed. Callers see different HTTP statuses (401 vs 403 vs 502);
+/// <summary>Why a request was refused. Callers see different HTTP statuses (401 vs 403 vs 502);
 /// the audit trail records all of them as denials.</summary>
 public enum DenialKind { None, Governance, UpstreamFailure, Unauthenticated }
 
-/// <summary>
-/// Mutable state carried through the pipeline. Stages read the request and earlier decisions and write
-/// their own. Exactly one terminal outcome is produced: a Response (served) or a DenialReason (refused).
-/// Default Classification is the most restrictive value — fail-closed until the classify stage runs.
-/// </summary>
+/// <summary>Mutable pipeline state; exactly one terminal outcome: Response (served) or DenialReason
+/// (refused). Default Classification is the most restrictive — fail-closed until classify runs.</summary>
 public sealed class InferenceContext(InferenceRequest request)
 {
     public InferenceRequest Request { get; } = request;
@@ -31,11 +27,8 @@ public sealed class InferenceContext(InferenceRequest request)
     /// <summary>Written by the provider-call stage on success.</summary>
     public InferenceResponse? Response { get; set; }
 
-    /// <summary>
-    /// Installed by the Host for streamed requests (ADR-0002). The provider-call stage forwards each
-    /// canonical delta here as it arrives; the sink is never invoked for a request denied pre-flight.
-    /// Null = buffered mode.
-    /// </summary>
+    /// <summary>Installed by the Host for streamed requests (ADR-0002): the provider stage forwards
+    /// deltas here; never invoked for a request denied pre-flight. Null = buffered mode.</summary>
     public Func<ChatDelta, CancellationToken, ValueTask>? DeltaSink { get; set; }
 
     /// <summary>Written by the attribution stage.</summary>

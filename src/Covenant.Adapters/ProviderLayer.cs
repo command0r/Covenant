@@ -10,11 +10,8 @@ public interface IChatClientRegistry
     bool TryResolve(string adapterKey, string modelId, out MEAI.IChatClient client);
 }
 
-/// <summary>
-/// Registration keys are either "adapter:model" (exact — how the Host registers, so a policy route to
-/// an unregistered model fails closed) or a bare "adapter" wildcard serving any model on that adapter
-/// (test doubles). Exact match wins.
-/// </summary>
+/// <summary>Keys: exact "adapter:model" (how the Host registers — a route to an unregistered model
+/// fails closed) or a bare "adapter" wildcard for test doubles. Exact match wins.</summary>
 public sealed class ChatClientRegistry(IReadOnlyDictionary<string, MEAI.IChatClient> clients) : IChatClientRegistry
 {
     public bool TryResolve(string adapterKey, string modelId, out MEAI.IChatClient client)
@@ -22,11 +19,8 @@ public sealed class ChatClientRegistry(IReadOnlyDictionary<string, MEAI.IChatCli
         || clients.TryGetValue(adapterKey, out client!);
 }
 
-/// <summary>
-/// The one place provider concepts exist (ADR-0001). Maps canonical → Microsoft.Extensions.AI, calls
-/// the resolved IChatClient, and maps the response back to canonical. No governance logic lives here;
-/// no provider concept escapes this class.
-/// </summary>
+/// <summary>The one place provider concepts exist (ADR-0001): canonical ↔ Microsoft.Extensions.AI
+/// mapping around the resolved IChatClient. No governance here; no provider concept escapes.</summary>
 public sealed class ProviderCallStage(IChatClientRegistry registry) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
@@ -43,9 +37,8 @@ public sealed class ProviderCallStage(IChatClientRegistry registry) : IPipelineS
         var messages = ctx.Request.Messages.Select(ToMeai).ToList();
         var options = new MEAI.ChatOptions { ModelId = route.ModelId };
 
-        // ADR-0002: streaming is an emission mode of this stage, not a different pipeline. The stream
-        // is consumed HERE so that attribution, budget recording, and audit run on the normal unwind
-        // with real usage — identical for streamed and buffered requests.
+        // ADR-0002: streaming is an emission mode, not a different pipeline. The stream is consumed
+        // HERE so attribution, budget, and audit run on the normal unwind with real usage.
         if (ctx.Request.Stream && ctx.DeltaSink is { } sink)
         {
             var text = new StringBuilder();

@@ -4,11 +4,7 @@ using Xunit;
 
 namespace Covenant.Tests;
 
-/// <summary>
-/// ADR-0003 guarantees: spans carry the governance outcome as metadata, and prompt/response content
-/// never enters a span. Uses a raw ActivityListener — no OpenTelemetry dependency — because that is
-/// exactly the seam the Host wires the SDK to.
-/// </summary>
+/// <summary>ADR-0003 guarantees: spans carry the governance outcome as metadata, never content. Raw ActivityListener — exactly the seam the Host wires the SDK to.</summary>
 public sealed class TelemetryTests : IDisposable
 {
     private readonly List<Activity> _activities = [];

@@ -1,10 +1,7 @@
 namespace Covenant.Host;
 
-/// <summary>
-/// The governance + FinOps dashboard, embedded as one self-contained page: no CDN, no external
-/// assets, no build step — the appliance ships one artifact and makes no egress (root CLAUDE.md).
-/// The page shell is public; every data call requires the admin token, kept in the browser only.
-/// </summary>
+/// <summary>Governance + FinOps dashboard, one self-contained embedded page — no CDN, no build step,
+/// no egress (root CLAUDE.md). Shell is public; every data call requires the admin token.</summary>
 public static class AdminUi
 {
     public const string Html = """

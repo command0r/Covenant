@@ -12,11 +12,8 @@ public interface IDataClassifier
     ClassificationResult Classify(InferenceRequest request);
 }
 
-/// <summary>
-/// First-slice classifier: pattern-based detection of obvious PII/PHI, defaulting to Internal.
-/// Deliberately conservative. This is NOT a substitute for a real DLP classifier — it exists to make
-/// the classification → policy seam real and testable. Swap behind <see cref="IDataClassifier"/> later.
-/// </summary>
+/// <summary>First-slice pattern classifier, deliberately conservative — NOT a real DLP; it makes the
+/// classification → policy seam real and testable. Swap behind <see cref="IDataClassifier"/> later.</summary>
 public sealed partial class RegexDataClassifier : IDataClassifier
 {
     public ClassificationResult Classify(InferenceRequest request)

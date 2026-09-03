@@ -1,0 +1,22 @@
+# In-perimeter Neo4j for the evidence graph (ADR-0006). Optional — Covenant runs fine without it.
+# Start:   docker compose up -d
+# Browser: http://localhost:7474  (neo4j / covenant-graph)
+# Enable projection in Covenant:
+#   dotnet user-secrets set "Neo4j:Uri"      "bolt://localhost:7687" --project src/Covenant.Host
+#   dotnet user-secrets set "Neo4j:Password" "covenant-graph"        --project src/Covenant.Host
+#
+# Production note: pin the image to a security-reviewed digest; set a real password from the vault.
+services:
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=neo4j/covenant-graph
+    ports:
+      - "7474:7474"   # browser UI
+      - "7687:7687"   # bolt — what the projector speaks
+    volumes:
+      - neo4j-data:/data
+
+volumes:
+  neo4j-data:

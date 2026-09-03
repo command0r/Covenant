@@ -11,11 +11,8 @@ public sealed record ChainVerification(bool Valid, int EntryCount, int? FirstInv
     public static ChainVerification Broken(int count, int line, string failure) => new(false, count, line, failure);
 }
 
-/// <summary>
-/// Re-walks the audit log and recomputes every hash (see AuditChain for the format). Detects edited
-/// content, forged hashes, removed or reordered lines, and mid-file chain restarts. Parsed entries are
-/// returned only up to the first invalid line — nothing after a break is trustworthy evidence.
-/// </summary>
+/// <summary>Re-walks the log recomputing every hash (format in AuditChain): detects edits, forged hashes,
+/// removed/reordered lines, mid-file restarts. Entries return only up to the first invalid line.</summary>
 public static class AuditChainVerifier
 {
     public static (ChainVerification Verification, IReadOnlyList<AuditEntry> Entries) VerifyAndRead(string path)
@@ -75,11 +72,8 @@ public sealed class EvidenceReport
     [JsonPropertyName("requests_by_classification")] public required Dictionary<string, int> RequestsByClassification { get; init; }
 }
 
-/// <summary>
-/// Durable budgets without new infrastructure: the audit log is the event store, the in-memory spend
-/// ledger is a projection of it, rebuilt at startup by replaying attributed costs. When spend volume
-/// or HA ever outgrows replay, that is the trigger for a real store (audit-store ADR) — not before.
-/// </summary>
+/// <summary>Durable budgets without new infrastructure: the audit log is the event store, the ledger its
+/// projection rebuilt by replay at boot. Outgrowing replay is the trigger for the audit-store ADR — not before.</summary>
 public static class LedgerReplay
 {
     public static void Rebuild(IReadOnlyList<AuditEntry> entries, Covenant.Governance.ISpendLedger ledger)

@@ -20,5 +20,6 @@ No third-party source code has been copied into this repository. Everything belo
 - `OpenAI` (.NET SDK) 2.12.0 — MIT.
 - Test-only: `xunit` 2.9.3 (Apache-2.0), `xunit.runner.visualstudio` 3.1.5 (Apache-2.0), `Microsoft.NET.Test.Sdk` 18.7.0 (MIT). Never shipped in the appliance.
 - `OpenTelemetry.Extensions.Hosting` / `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.17.0 — Apache-2.0. Host-only, activated only when `Otel:Endpoint` is configured (ADR-0003). Core instruments via BCL `ActivitySource` and takes no OTel dependency.
+- `Neo4j.Driver` 6.2.1 — Apache-2.0, official Bolt driver. Host-only, activated only when `Neo4j:Uri` is configured (ADR-0006 evidence graph projection).
 
 _Update this file in the same change as any code that introduces a new influence or dependency._

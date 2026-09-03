@@ -14,11 +14,8 @@ public sealed class PriceBook(IReadOnlyDictionary<string, (decimal InputPer1K, d
         => prices.TryGetValue(modelId, out price);
 }
 
-/// <summary>
-/// Runs after the provider call (it sits after the provider stage in the chain, so the response is
-/// already on the context). Computes cost from usage + price book, finalizes the response Usage with
-/// that cost, and records attribution against the caller's tags.
-/// </summary>
+/// <summary>Runs after the provider call: computes cost from usage + price book, finalizes the
+/// response Usage, and records attribution against the caller's tags.</summary>
 public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)

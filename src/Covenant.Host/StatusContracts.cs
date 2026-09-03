@@ -58,9 +58,8 @@ public sealed class FinOpsSummary
     [JsonPropertyName("total_cost_usd")] public required decimal TotalCostUsd { get; init; }
     [JsonPropertyName("local_requests")] public required int LocalRequests { get; init; }
     [JsonPropertyName("local_tokens")] public required long LocalTokens { get; init; }
-    /// <summary>Savings measured against a stated baseline: every allowed request priced as if it had
-    /// run on the STRONG model. Split into what in-perimeter serving avoided and what the complexity
-    /// router avoided. An estimate, labeled as such — never invented when traffic ran strong anyway.</summary>
+    /// <summary>Savings vs a stated baseline (every allowed request priced on the STRONG model), split
+    /// into in-perimeter vs router avoidance. An estimate, labeled as such — never invented.</summary>
     [JsonPropertyName("estimated_savings_usd")] public required decimal EstimatedSavingsUsd { get; init; }
     [JsonPropertyName("savings_local_usd")] public required decimal SavingsLocalUsd { get; init; }
     [JsonPropertyName("savings_router_usd")] public required decimal SavingsRouterUsd { get; init; }

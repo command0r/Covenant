@@ -18,8 +18,7 @@ using ChatRole = Covenant.Core.ChatRole;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --- Configuration (fail-closed: missing or invalid required values → refuse to start, with every
-//     problem reported at once and no stack trace — a refusal is a diagnostic, not a crash) ---
+// --- Configuration (fail-closed: missing/invalid required values → refuse to start; a refusal is a diagnostic, not a crash) ---
 string auditPath = builder.Configuration["Audit:Path"] ?? "covenant-audit.log";
 
 string? openAiKey = builder.Configuration["OpenAI:ApiKey"];
@@ -73,10 +72,7 @@ if (configErrors.Count > 0)
     Environment.Exit(1);
 }
 
-// --- Observability (ADR-0003): opt-in OTel export. No Otel:Endpoint → no SDK, no listeners, no
-//     exporters, and Core's ActivitySource no-ops. The endpoint is customer config and falls under
-//     the same egress discipline as model endpoints — in-perimeter only, never phone-home.
-//     Spans are diagnostics; the audit chain remains the only evidence of record. ---
+// --- Observability (ADR-0003): opt-in OTel export — no Otel:Endpoint → no SDK; same egress discipline as model endpoints (in-perimeter, never phone-home); spans are diagnostics, the audit chain is the evidence. ---
 bool otelEnabled = false;
 if (builder.Configuration["Otel:Endpoint"] is { Length: > 0 } otelEndpoint)
 {
@@ -98,11 +94,7 @@ if (builder.Configuration["Otel:Endpoint"] is { Length: > 0 } otelEndpoint)
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.TypeInfoResolverChain.Insert(0, CovenantJsonContext.Default));
 
-// --- Provider layer (ADR-0001: adapters over Microsoft.Extensions.AI) ---
-// OpenAI:Endpoint / OpenAI:ModelId / OpenAI:StrongModelId are optional overrides: point the "openai"
-// adapter at any OpenAI-compatible server (e.g. Ollama) for a fully offline demo. Clients are
-// registered per exact "adapter:model" key — a policy route to an unregistered model fails closed
-// rather than silently serving a different model.
+// --- Provider layer (ADR-0001). OpenAI:* config can point at any OpenAI-compatible server; clients register per exact "adapter:model" key — a route to an unregistered model fails closed. ---
 string publicModelId = builder.Configuration["OpenAI:ModelId"] ?? "gpt-4o-mini";
 string strongModelId = builder.Configuration["OpenAI:StrongModelId"] ?? "gpt-4o";
 
@@ -143,9 +135,8 @@ var policy = new PolicyConfig
     }
 };
 
-// Real per-token prices (defaults reflect OpenAI's published per-1M rates, converted to per-1K —
-// the scaffold's earlier placeholders were 1000× off). Override per model via config:
-//   Pricing:<model>:InPer1M / Pricing:<model>:OutPer1M   (USD per million tokens)
+// Real per-token prices (published per-1M rates converted to per-1K; earlier placeholders were 1000× off).
+// Override per model: Pricing:<model>:InPer1M / OutPer1M (USD per million tokens).
 var priceMap = new Dictionary<string, (decimal, decimal)>
 {
     [publicModelId] = (0.00015m, 0.0006m),     // gpt-4o-mini: $0.15 / $0.60 per 1M
@@ -169,9 +160,8 @@ var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();
 var spendLedger = new InMemorySpendLedger();
 
-// Budgets survive restarts: replay the audit log (the event store) into the ledger (its projection).
-// A tampered chain at boot is a fail-closed condition — serving requests on top of corrupted
-// evidence is exactly what this appliance exists to prevent.
+// Budgets survive restarts: replay the audit log (event store) into the ledger (projection).
+// A tampered chain at boot is fail-closed — never serve on top of corrupted evidence.
 var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath);
 if (!chainAtBoot.Valid)
 {
@@ -203,6 +193,16 @@ var pipeline = new InferencePipeline(
 
 builder.Services.AddSingleton(pipeline);
 builder.Services.AddHostedService(_ => auditSink);   // drains the audit channel in the background
+
+// ADR-0006: evidence graph — optional, in-perimeter, never load-bearing. No Neo4j:Uri → not registered.
+if (builder.Configuration["Neo4j:Uri"] is { Length: > 0 } neo4jUri)
+{
+    builder.Services.AddHostedService(_ => new EvidenceGraphProjector(
+        auditPath,
+        neo4jUri,
+        builder.Configuration["Neo4j:User"] ?? "neo4j",
+        builder.Configuration["Neo4j:Password"] ?? ""));
+}
 
 var app = builder.Build();
 
@@ -258,8 +258,7 @@ app.MapPost("/v1/chat/completions",
 
     var ctx = new InferenceContext(request);
 
-    // --- Streamed mode (ADR-0002): SSE headers are committed lazily on the FIRST delta, so a
-    //     pre-flight denial still returns a plain JSON error below. ---
+    // --- Streamed mode (ADR-0002): SSE headers commit lazily on the FIRST delta, so a pre-flight denial still returns a plain JSON error below. ---
     if (request.Stream)
     {
         var resp = http.Response;
@@ -465,9 +464,8 @@ app.MapGet("/admin/status/stream", async (HttpContext http, CancellationToken ct
     return Results.Empty;
 });
 
-// Demo/ops reset: ARCHIVES the audit log (rename with timestamp — evidence is never deleted) and
-// clears the in-memory ledger so budgets reopen. Ledger and evidence stay consistent because both
-// reset together; the archived chain remains independently verifiable.
+// Demo/ops reset: ARCHIVES the audit log (rename — evidence is never deleted) and clears the ledger
+// together, so ledger and evidence stay consistent; the archived chain remains verifiable.
 app.MapPost("/admin/reset", async (HttpContext http) =>
 {
     if (!Authorized(http)) return Unauthorized();
@@ -479,9 +477,8 @@ app.MapPost("/admin/reset", async (HttpContext http) =>
         CovenantJsonContext.Default.ResetResponse);
 });
 
-// The dashboard itself: one self-contained embedded page, no CDN, no external assets — the
-// appliance stays a single artifact with no egress (root CLAUDE.md #4). Data calls need the token.
-// no-store: a stale cached page against a newer endpoint is how dashboards die silently.
+// The dashboard: one self-contained embedded page, no CDN, no egress (root CLAUDE.md #4). Data calls
+// need the token; no-store because a stale cached page against a newer endpoint dies silently.
 app.MapGet("/admin/ui", (HttpContext http) =>
 {
     http.Response.Headers.CacheControl = "no-store";

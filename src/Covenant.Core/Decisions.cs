@@ -16,12 +16,8 @@ public sealed record PolicyOutcome(PolicyEffect Effect, string Reason, RouteTarg
 /// <summary>Cost attributed to a caller's tags for one inference.</summary>
 public sealed record AttributionRecord(AttributionTags Tags, string Model, Usage Usage);
 
-/// <summary>
-/// The content of one audit entry. The tamper-evidence chain (previous/entry hash) is added by the
-/// durable sink as it writes, so the chain is a property of the log, not of this stage's output.
-/// Effect/Reason record the FINAL outcome of the request — a request the policy stage allowed but a
-/// later stage refused (or that errored) is evidence of a denial, not of an allow.
-/// </summary>
+/// <summary>Content of one audit entry; the tamper-evidence chain is added by the sink as it writes.
+/// Effect/Reason record the FINAL outcome — allowed-then-refused (or errored) is evidence of a denial.</summary>
 public sealed record AuditEntry(
     string Id,
     DateTimeOffset TimestampUtc,

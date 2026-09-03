@@ -4,9 +4,7 @@ using Xunit;
 
 namespace Covenant.Tests;
 
-/// <summary>Savings math for the dashboard. Baseline is stated, not implied: every allowed request
-/// priced as if it had run on the STRONG model; savings split between in-perimeter serving and the
-/// complexity router. Exact decimal, never invented — all-strong traffic must claim zero.</summary>
+/// <summary>Dashboard savings math: stated baseline (every allowed request priced on the STRONG model), split by cause; never invented — all-strong traffic must claim zero.</summary>
 public class FinOpsTests
 {
     private const string LocalModel = "llama-3.1-8b-instruct";

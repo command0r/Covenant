@@ -13,15 +13,8 @@ public sealed class AuthConfig
     public required IReadOnlyList<ApiKeyRecord> Keys { get; init; }
 }
 
-/// <summary>
-/// Pipeline stage: authentication (first stage after audit — canonical order in src/CLAUDE.md).
-/// A valid key overwrites the caller identity with the key's principal and team — client-supplied
-/// headers become hints that a key can override, never authority. Fail-closed:
-///  - a presented-but-unknown key is denied even when anonymous access is allowed (a wrong credential
-///    is an authentication failure, not an anonymous request);
-///  - no key is denied unless AllowAnonymous was explicitly configured.
-/// The raw credential is consumed here and goes nowhere else — not into audit, spans, or logs.
-/// </summary>
+/// <summary>Auth stage (order in src/CLAUDE.md), fail-closed: a valid key overwrites caller identity; an unknown key is denied even when anonymous is allowed; no key is denied unless AllowAnonymous is explicit.
+/// The raw credential is consumed here and never reaches audit, spans, or logs.</summary>
 public sealed class AuthStage : IPipelineStage
 {
     private readonly AuthConfig _config;

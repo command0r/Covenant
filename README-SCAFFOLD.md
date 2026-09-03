@@ -84,6 +84,16 @@ Any OTLP/HTTP backend works — Langfuse (`https://<host>/api/public/otel/v1/tra
 `"Authorization=Basic <base64 pk:sk>"`), Grafana, a collector that forwards. See
 `deploy/otel/otel-collector-config.yaml`.
 
+Optional evidence graph (ADR-0006 — auditor/forensics queries over the audit log as a Neo4j graph;
+derived data, never the evidence of record):
+```
+(cd deploy/neo4j && docker compose up -d)    # browser at http://localhost:7474 (neo4j / covenant-graph)
+dotnet user-secrets set "Neo4j:Uri"      "bolt://localhost:7687" --project src/Covenant.Host
+dotnet user-secrets set "Neo4j:Password" "covenant-graph"        --project src/Covenant.Host
+```
+The projector tails the verified log every 5s; canned Cypher queries live in `deploy/neo4j/queries.md`
+(who touched PHI, spend lineage per team, kill-switch forensics, duplicate-prompt fingerprints).
+
 Fully offline demo (no OpenAI account needed): point the "openai" adapter at the same local server —
 governance, budgets, and audit behave identically:
 ```

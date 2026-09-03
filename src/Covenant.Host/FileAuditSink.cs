@@ -6,14 +6,8 @@ using Microsoft.Extensions.Hosting;
 
 namespace Covenant.Host;
 
-/// <summary>
-/// Off-hot-path audit sink. Stages enqueue to an in-memory channel; a single background reader drains
-/// it, hash-chains each entry (EntryHash = SHA256(PreviousHash || content)), and appends one line to an
-/// append-only file. Tamper-evidence comes from the chain: altering any past line breaks every hash after it.
-///
-/// This is the first-slice implementation. Production swaps the file for WORM-capable storage and may
-/// anchor the chain externally — see deploy/CLAUDE.md. The chaining logic stays the same.
-/// </summary>
+/// <summary>Off-hot-path audit sink: hash-chains entries to an append-only file (tamper-evident).
+/// First slice; WORM store is the audit-store ADR (deploy/CLAUDE.md).</summary>
 public sealed class FileAuditSink(string path) : IAuditSink, IHostedService
 {
     private readonly Channel<AuditEntry> _channel =
@@ -66,10 +60,8 @@ public sealed class FileAuditSink(string path) : IAuditSink, IHostedService
         }
     }
 
-    /// <summary>
-    /// Archives the current log (rename, never delete — evidence retires, it doesn't die) and starts
-    /// a fresh chain at genesis. Returns the archive path, or null if there was nothing to archive.
-    /// </summary>
+    /// <summary>Archives the current log (rename, never delete — evidence retires, it doesn't die) and
+    /// restarts the chain at genesis. Returns the archive path, or null if nothing to archive.</summary>
     public async Task<string?> RotateAsync()
     {
         await _fileLock.WaitAsync();
