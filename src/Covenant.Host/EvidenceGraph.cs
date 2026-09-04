@@ -42,8 +42,12 @@ public sealed class EvidenceGraphProjector(string auditPath, string uri, string 
             try
             {
                 // Only verified prefix is projected — nothing past a chain break enters the graph.
-                var (_, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
-                if (entries.Count > _projected)
+                var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+                if (!verification.Valid)
+                {
+                    // Fail closed: nothing unverified enters the graph; retry next cycle.
+                }
+                else if (entries.Count > _projected)
                 {
                     var batch = ToParameters(entries.Skip(_projected).ToList());
                     await using var session = driver.AsyncSession();

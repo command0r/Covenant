@@ -59,7 +59,10 @@ public static class AuditChainVerifier
 
         if (anchorPath is not null && File.Exists(anchorPath))
         {
+            // Anchor failure ⇒ the log itself may be a coherent forgery, so NO prefix is trustworthy:
+            // fail closed with an EMPTY entry list (unlike chain-walk breaks, whose prefix is hash-verified).
             int anchorNo = 0;
+            long lastCount = 0;
             foreach (var line in File.ReadLines(anchorPath))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
@@ -67,15 +70,20 @@ public static class AuditChainVerifier
 
                 var parts = line.Split(AuditChain.Separator, 3);
                 if (parts.Length != 3 || !long.TryParse(parts[0], out var anchoredCount) || anchoredCount < 1)
-                    return (ChainVerification.Broken(entries.Count, anchorNo, $"malformed anchor #{anchorNo}"), entries);
+                    return (ChainVerification.Broken(0, anchorNo, $"malformed anchor at anchor-file line {anchorNo}"), []);
+
+                if (anchoredCount <= lastCount)
+                    return (ChainVerification.Broken(0, anchorNo,
+                        $"anchor sequence not increasing at anchor-file line {anchorNo} (anchor file tampered)"), []);
+                lastCount = anchoredCount;
 
                 if (anchoredCount > entries.Count)
-                    return (ChainVerification.Broken(entries.Count, anchorNo,
-                        $"log truncated: anchor #{anchorNo} attests {anchoredCount} entries, log has {entries.Count}"), entries);
+                    return (ChainVerification.Broken(0, anchorNo,
+                        $"log truncated: anchor at anchor-file line {anchorNo} attests {anchoredCount} entries, log has {entries.Count}"), []);
 
                 if (!string.Equals(hashes[(int)anchoredCount - 1], parts[1], StringComparison.Ordinal))
-                    return (ChainVerification.Broken(entries.Count, anchorNo,
-                        $"anchor #{anchorNo} hash mismatch at entry {anchoredCount} (history rewritten)"), entries);
+                    return (ChainVerification.Broken(0, anchorNo,
+                        $"anchor hash mismatch at entry {anchoredCount} (anchor-file line {anchorNo}: history rewritten)"), []);
             }
         }
 

@@ -188,7 +188,8 @@ var rateCounterGlobal = new RateCounter();
 var rateCounterTeams = new RateCounter();
 int promptPreviewChars = OptionalNonNegativeInt("Audit:PromptPreviewChars", 0);
 
-// Second gate: every later section (pricing, routing, cache, rate limits, preview) has parsed by now.
+// Second gate: pricing, routing, cache, rate limits, and preview have parsed by now (anchoring
+// parses just below and has its own gate before sink construction).
 FailIfConfigErrors();
 
 // Chain-head anchoring (ADR-0007): both settings together or neither; the anchor path should live

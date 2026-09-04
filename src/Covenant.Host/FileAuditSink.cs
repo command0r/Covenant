@@ -55,14 +55,33 @@ public sealed class FileAuditSink(string path, string? anchorPath = null, int an
             {
                 var content = JsonSerializer.Serialize(entry, AuditJsonContext.Default.AuditEntry);
                 var entryHash = AuditChain.Hash(_previousHash, content);
-                await File.AppendAllTextAsync(path,
-                    $"{_previousHash}{AuditChain.Separator}{entryHash}{AuditChain.Separator}{content}{Environment.NewLine}");
+                try
+                {
+                    await File.AppendAllTextAsync(path,
+                        $"{_previousHash}{AuditChain.Separator}{entryHash}{AuditChain.Separator}{content}{Environment.NewLine}");
+                }
+                catch (Exception ex)
+                {
+                    // Fail-closed: an appliance that cannot write evidence must not keep serving.
+                    Environment.FailFast($"covenant: audit log write failed ({ex.Message}) — halting rather than serving unaudited.");
+                }
                 _previousHash = entryHash;
                 _count++;
 
                 if (anchorEvery > 0 && anchorPath is not null && _count % anchorEvery == 0)
-                    await File.AppendAllTextAsync(anchorPath,
-                        $"{_count}{AuditChain.Separator}{entryHash}{AuditChain.Separator}{DateTimeOffset.UtcNow:o}{Environment.NewLine}");
+                {
+                    try
+                    {
+                        await File.AppendAllTextAsync(anchorPath,
+                            $"{_count}{AuditChain.Separator}{entryHash}{AuditChain.Separator}{DateTimeOffset.UtcNow:o}{Environment.NewLine}");
+                    }
+                    catch (Exception ex)
+                    {
+                        // A missed anchor only widens exposure by one cadence (verification stays sound);
+                        // surface loudly, never let the anchor volume kill the primary drain.
+                        Console.Error.WriteLine($"covenant: WARNING — anchor write to '{anchorPath}' failed ({ex.Message}); exposure widened by one cadence.");
+                    }
+                }
             }
             finally
             {
@@ -77,10 +96,15 @@ public sealed class FileAuditSink(string path, string? anchorPath = null, int an
         await _fileLock.WaitAsync();
         try
         {
-            if (!File.Exists(path)) return null;
             var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
-            var archive = $"{path}.{stamp}.archived";
-            File.Move(path, archive);
+            string? archive = null;
+            if (File.Exists(path))
+            {
+                archive = $"{path}.{stamp}.archived";
+                File.Move(path, archive);
+            }
+            // Archive anchors even when the log is absent (out-of-band deletion): otherwise stale
+            // anchors would fail verification forever with no sanctioned recovery path.
             if (anchorPath is not null && File.Exists(anchorPath))
                 File.Move(anchorPath, $"{anchorPath}.{stamp}.archived");
             _previousHash = AuditChain.GenesisHash;

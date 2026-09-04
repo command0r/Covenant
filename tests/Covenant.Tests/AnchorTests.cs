@@ -81,6 +81,49 @@ public sealed class AnchorTests : IDisposable
         Assert.False(File.Exists(_log));
         Assert.False(File.Exists(_anchors));                             // anchors retire with their chain
         Assert.True(File.Exists(archived));
+        Assert.NotEmpty(Directory.GetFiles(Path.GetTempPath(),           // archived, not deleted —
+            Path.GetFileName(_anchors) + ".*.archived"));                // evidence retires, it doesn't die
+    }
+
+    [Fact]
+    public async Task Anchoring_continues_correctly_across_restarts()
+    {
+        await Write(3, anchorEvery: 2);                                  // anchor at 2
+        await Write(1, anchorEvery: 2);                                  // new sink instance = restart; entry 4 → anchor at 4
+
+        var anchors = (await File.ReadAllLinesAsync(_anchors)).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        Assert.Equal(2, anchors.Count);
+        Assert.StartsWith("4\t", anchors[1]);                            // count resumed, not restarted
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+        Assert.True(verification.Valid);
+        Assert.Equal(4, entries.Count);
+    }
+
+    [Fact]
+    public async Task Anchors_without_a_log_fail_verification_with_no_trusted_entries()
+    {
+        await Write(2, anchorEvery: 1);
+        File.Delete(_log);                                               // the strongest attack: fresh start
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("truncated", verification.Failure);
+        Assert.Empty(entries);                                           // nothing is trusted
+    }
+
+    [Fact]
+    public async Task Malformed_anchor_file_fails_closed()
+    {
+        await Write(2, anchorEvery: 1);
+        await File.AppendAllTextAsync(_anchors, "not-a-number\tdeadbeef\tgarbage\n");
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("malformed anchor", verification.Failure);
+        Assert.Empty(entries);
     }
 
     [Fact]
