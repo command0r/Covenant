@@ -9,7 +9,8 @@ public sealed class RateLimitConfig
     public int PerTeamPerMinute { get; init; }
 }
 
-/// <summary>Fixed-minute-window counters (deliberate first slice: deterministic, testable, O(1)); a boundary burst can briefly reach 2× the cap.</summary>
+/// <summary>Fixed-minute-window counters (deterministic, O(1); boundary burst can briefly reach 2× cap).
+/// A backwards clock step starts a fresh window — the lesser evil vs freezing counts.</summary>
 public sealed class RateCounter(TimeProvider? clock = null)
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
@@ -33,28 +34,31 @@ public sealed class RateCounter(TimeProvider? clock = null)
     }
 }
 
-/// <summary>Rate stage — the "rate" half of the canonical budget/rate slot (src/CLAUDE.md): checked before
-/// any money is spent; every request arriving here counts, and refusals are audited like every denial.</summary>
-public sealed class RateLimitStage(RateCounter counter, RateLimitConfig config) : IPipelineStage
+/// <summary>Rate stage — the "rate" half of the canonical budget/rate slot (src/CLAUDE.md), before any money is spent.
+/// Team cap is checked FIRST so a runaway team cannot consume global slots and starve the appliance; separate
+/// counters keep a team literally named "global" from colliding with the appliance-wide key. Refusals are audited.</summary>
+public sealed class RateLimitStage(RateCounter globalCounter, RateCounter teamCounter, RateLimitConfig config) : IPipelineStage
 {
-    private const string GlobalKey = "global";
+    private const string GlobalKey = "appliance";
 
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
-        if (config.GlobalPerMinute > 0 && counter.Increment(GlobalKey) > config.GlobalPerMinute)
-        {
-            ctx.Deny($"rate limit exceeded: appliance cap {config.GlobalPerMinute}/min", DenialKind.RateLimited);
-            return;
-        }
-
         if (config.PerTeamPerMinute > 0)
         {
             var team = ctx.Identity.Tags.Team;
-            if (counter.Increment(team) > config.PerTeamPerMinute)
+            if (teamCounter.Increment(team) > config.PerTeamPerMinute)
             {
                 ctx.Deny($"rate limit exceeded for team '{team}': {config.PerTeamPerMinute}/min", DenialKind.RateLimited);
                 return;
             }
+        }
+
+        // Only team-admitted requests count against the appliance cap: the global limit bounds
+        // admitted load, not one team's rejected flood.
+        if (config.GlobalPerMinute > 0 && globalCounter.Increment(GlobalKey) > config.GlobalPerMinute)
+        {
+            ctx.Deny($"rate limit exceeded: appliance cap {config.GlobalPerMinute}/min", DenialKind.RateLimited);
+            return;
         }
 
         await next(ctx, ct);

@@ -81,6 +81,8 @@ Rate limits (opt-in; refusals are HTTP 429 and audited; 0 = unlimited):
 dotnet user-secrets set "RateLimit:PerTeamPerMinute" "30"  --project src/Covenant.Host
 dotnet user-secrets set "RateLimit:GlobalPerMinute"  "120" --project src/Covenant.Host
 ```
+With `Auth:AllowAnonymous` set, team names come from client headers — set BOTH caps there, since
+per-team alone can be diluted by invented team names.
 
 Response cache (opt-in; a hit skips the provider entirely — $0, no latency; keys are team-scoped,
 entries live in memory only and die with the process):

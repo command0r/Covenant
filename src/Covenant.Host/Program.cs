@@ -27,6 +27,17 @@ string? globalCapRaw = builder.Configuration["Budget:GlobalCapUsd"];
 decimal globalCapUsd = 0m;
 
 var configErrors = new List<string>();
+
+// Optional numeric settings: absent = fallback (opt-in off); present-but-invalid or negative =
+// misconfiguration → refuse to start. Fail-open "unparseable means unlimited" is forbidden here.
+int OptionalNonNegativeInt(string key, int fallback)
+{
+    var raw = builder.Configuration[key];
+    if (string.IsNullOrWhiteSpace(raw)) return fallback;
+    if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) && v >= 0) return v;
+    configErrors.Add($"{key} — must be a non-negative integer, got '{raw}'");
+    return fallback;
+}
 if (string.IsNullOrWhiteSpace(openAiKey))
     configErrors.Add("OpenAI:ApiKey       — provider credential");
 if (string.IsNullOrWhiteSpace(adminToken))
@@ -60,17 +71,8 @@ foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren(
 if (apiKeys.Count == 0 && !allowAnonymous)
     configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
 
-if (configErrors.Count > 0)
-{
-    Console.Error.WriteLine("covenant: refusing to start (fail-closed). Missing or invalid configuration:");
-    foreach (var e in configErrors) Console.Error.WriteLine($"  {e}");
-    Console.Error.WriteLine();
-    Console.Error.WriteLine("dev:  dotnet user-secrets set \"OpenAI:ApiKey\" \"<value>\" --project src/Covenant.Host");
-    Console.Error.WriteLine("      (see README-SCAFFOLD.md §4 — user-secrets load only in the Development");
-    Console.Error.WriteLine("      environment, which Properties/launchSettings.json sets for local runs)");
-    Console.Error.WriteLine("prod: env vars (OpenAI__ApiKey, Admin__Token, Budget__GlobalCapUsd) or the customer vault.");
-    Environment.Exit(1);
-}
+// NOTE: the fail-closed configuration check runs AFTER all config parsing (see below) so every
+// section — auth, budget, pricing, cache, rate limits — reports into one refusal.
 
 // --- Observability (ADR-0003): opt-in OTel export — no Otel:Endpoint → no SDK; same egress discipline as model endpoints (in-perimeter, never phone-home); spans are diagnostics, the audit chain is the evidence. ---
 bool otelEnabled = false;
@@ -153,24 +155,38 @@ foreach (var child in builder.Configuration.GetSection("Pricing").GetChildren())
 }
 var prices = new PriceBook(priceMap);
 
-long complexityThreshold =
-    long.TryParse(builder.Configuration["Routing:ComplexityTokenThreshold"], out var thr) ? thr : 400;
+long complexityThreshold = OptionalNonNegativeInt("Routing:ComplexityTokenThreshold", 400);
 
 // Response cache: opt-in via Cache:TtlSeconds > 0 (holds response content in memory; team-scoped keys).
 var cacheConfig = new CacheConfig
 {
-    TtlSeconds = int.TryParse(builder.Configuration["Cache:TtlSeconds"], out var cttl) ? cttl : 0,
-    MaxEntries = int.TryParse(builder.Configuration["Cache:MaxEntries"], out var cmax) ? cmax : 1_000,
+    TtlSeconds = OptionalNonNegativeInt("Cache:TtlSeconds", 0),
+    MaxEntries = OptionalNonNegativeInt("Cache:MaxEntries", 1_000),
 };
 var responseCache = new ResponseCache();
 
 // Rate limits: opt-in via RateLimit:* (0 = unlimited). Refusals are 429s and audited like any denial.
 var rateConfig = new RateLimitConfig
 {
-    GlobalPerMinute = int.TryParse(builder.Configuration["RateLimit:GlobalPerMinute"], out var rg) ? rg : 0,
-    PerTeamPerMinute = int.TryParse(builder.Configuration["RateLimit:PerTeamPerMinute"], out var rt) ? rt : 0,
+    GlobalPerMinute = OptionalNonNegativeInt("RateLimit:GlobalPerMinute", 0),
+    PerTeamPerMinute = OptionalNonNegativeInt("RateLimit:PerTeamPerMinute", 0),
 };
-var rateCounter = new RateCounter();
+var rateCounterGlobal = new RateCounter();
+var rateCounterTeams = new RateCounter();
+int promptPreviewChars = OptionalNonNegativeInt("Audit:PromptPreviewChars", 0);
+
+// All config parsed — one fail-closed refusal covering every section (misconfig → refuse to start).
+if (configErrors.Count > 0)
+{
+    Console.Error.WriteLine("covenant: refusing to start (fail-closed). Missing or invalid configuration:");
+    foreach (var e in configErrors) Console.Error.WriteLine($"  {e}");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("dev:  dotnet user-secrets set \"OpenAI:ApiKey\" \"<value>\" --project src/Covenant.Host");
+    Console.Error.WriteLine("      (see README-SCAFFOLD.md §4 — user-secrets load only in the Development");
+    Console.Error.WriteLine("      environment, which Properties/launchSettings.json sets for local runs)");
+    Console.Error.WriteLine("prod: env vars (OpenAI__ApiKey, Admin__Token, Budget__GlobalCapUsd) or the customer vault.");
+    Environment.Exit(1);
+}
 
 var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();
@@ -195,7 +211,7 @@ var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamC
 var pipeline = new InferencePipeline(
 [
     new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
-        int.TryParse(builder.Configuration["Audit:PromptPreviewChars"], out var ppc) ? ppc : 0),
+        promptPreviewChars),
     new AuthStage(new AuthConfig { AllowAnonymous = allowAnonymous, Keys = apiKeys }), // auth first
     new ClassifyStage(new RegexDataClassifier()),    // classify
     new PolicyStage(new PolicyEngine(policy, new RoutingOptions
@@ -203,7 +219,7 @@ var pipeline = new InferencePipeline(
         ComplexityTokenThreshold = complexityThreshold,
     })),                                             // policy + complexity routing, fail-closed
     new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
-    new RateLimitStage(rateCounter, rateConfig),     // rate half of budget/rate; cache hits bypass (deliberate: free)
+    new RateLimitStage(rateCounterGlobal, rateCounterTeams, rateConfig), // rate half of budget/rate; cache hits bypass (free)
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
     new ProviderCallStage(registry),                 // route + provider call
     new AttributionStage(prices),                    // attribute cost
