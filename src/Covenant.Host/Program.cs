@@ -1,5 +1,7 @@
 using System.ClientModel;
 using System.Globalization;
+using System.Text.Json;
+using Anthropic;
 using System.Security.Cryptography;
 using System.Text;
 using Covenant.Adapters;
@@ -71,7 +73,8 @@ foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren(
 if (apiKeys.Count == 0 && !allowAnonymous)
     configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
 
-// Fail-closed refusal, printed as a diagnostic (never a crash). Called twice: before provider-client
+// Fail-closed refusal, printed as a diagnostic (never a crash). Called after each config region —
+// the first gate sits before provider-client
 // construction (which would throw on a missing key) and again after ALL config sections have parsed.
 void FailIfConfigErrors()
 {
@@ -135,16 +138,33 @@ if (builder.Configuration["Local:Endpoint"] is { Length: > 0 } localEndpoint)
         .AsIChatClient();
 }
 
+// Optional Anthropic provider (ADR-0001 start set) — official SDK over IChatClient, opt-in via key.
+string anthropicModelId = builder.Configuration["Anthropic:ModelId"] ?? "claude-haiku-4-5";
+bool anthropicEnabled = false;
+if (builder.Configuration["Anthropic:ApiKey"] is { Length: > 0 } anthropicKey)
+{
+    anthropicEnabled = true;
+    var anthropicClient = builder.Configuration["Anthropic:Endpoint"] is { Length: > 0 } anthropicEndpoint
+        ? new AnthropicClient { ApiKey = anthropicKey, BaseUrl = anthropicEndpoint }
+        : new AnthropicClient { ApiKey = anthropicKey };
+    clients[$"anthropic:{anthropicModelId}"] = anthropicClient.AsIChatClient(anthropicModelId);
+}
+
 var registry = new ChatClientRegistry(clients);
 
 // --- Policy (first slice): PII/PHI have no public route, so they fail closed until "local" is wired. ---
+// Ordered cheapest → strongest: the policy engine complexity-routes within this set. Anthropic (when
+// configured) sits mid-list: reachable by explicit model request, never the default escalation.
+List<RouteTarget> generalRoutes = [new("openai", publicModelId)];
+if (anthropicEnabled) generalRoutes.Add(new("anthropic", anthropicModelId));
+generalRoutes.Add(new("openai", strongModelId));
+
 var policy = new PolicyConfig
 {
     AllowedRoutes = new Dictionary<DataClassification, IReadOnlyList<RouteTarget>>
     {
-        // Ordered cheapest → strongest: the policy engine complexity-routes within this set.
-        [DataClassification.Public]   = [new("openai", publicModelId), new("openai", strongModelId)],
-        [DataClassification.Internal] = [new("openai", publicModelId), new("openai", strongModelId)],
+        [DataClassification.Public]   = generalRoutes,
+        [DataClassification.Internal] = generalRoutes,
         [DataClassification.Pii]      = [new("local", localModelId)],
         [DataClassification.Phi]      = [new("local", localModelId)],
     }
@@ -158,6 +178,7 @@ var priceMap = new Dictionary<string, (decimal, decimal)>
     [strongModelId] = (0.0025m, 0.01m),        // gpt-4o:      $2.50 / $10.00 per 1M
     [localModelId] = (0m, 0m),                 // in-perimeter compute: no per-token provider cost
 };
+if (anthropicEnabled) priceMap[anthropicModelId] = (0.001m, 0.005m); // claude-haiku-4-5: $1 / $5 per 1M
 foreach (var child in builder.Configuration.GetSection("Pricing").GetChildren())
 {
     if (decimal.TryParse(child["InPer1M"], NumberStyles.Number, CultureInfo.InvariantCulture, out var inPer1M)
@@ -188,16 +209,26 @@ var rateCounterGlobal = new RateCounter();
 var rateCounterTeams = new RateCounter();
 int promptPreviewChars = OptionalNonNegativeInt("Audit:PromptPreviewChars", 0);
 
-// Second gate: every later section (pricing, routing, cache, rate limits, preview) has parsed by now.
+// Second gate: pricing, routing, cache, rate limits, and preview have parsed by now (anchoring
+// parses just below and has its own gate before sink construction).
 FailIfConfigErrors();
 
-var auditSink = new FileAuditSink(auditPath);
+// Chain-head anchoring (ADR-0007): both settings together or neither; the anchor path should live
+// on an independent storage domain — that placement is the entire security value.
+string? anchorPath = builder.Configuration["Audit:AnchorPath"];
+int anchorEvery = OptionalNonNegativeInt("Audit:AnchorEvery", 0);
+if (string.IsNullOrWhiteSpace(anchorPath)) anchorPath = null;
+if ((anchorPath is null) != (anchorEvery == 0))
+    configErrors.Add("Audit:AnchorPath / Audit:AnchorEvery — set both to enable anchoring, or neither");
+FailIfConfigErrors();
+
+var auditSink = new FileAuditSink(auditPath, anchorPath, anchorEvery);
 var killSwitch = new KillSwitch();
 var spendLedger = new InMemorySpendLedger();
 
 // Budgets survive restarts: replay the audit log (event store) into the ledger (projection).
 // A tampered chain at boot is fail-closed — never serve on top of corrupted evidence.
-var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath);
+var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
 if (!chainAtBoot.Valid)
 {
     Console.Error.WriteLine(
@@ -210,8 +241,11 @@ if (!chainAtBoot.Valid)
 LedgerReplay.Rebuild(priorEntries, spendLedger);
 var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamCapsUsd };
 
-// --- Pipeline assembly. Outermost first; audit wraps everything; order per src/CLAUDE.md. ---
-var pipeline = new InferencePipeline(
+// --- Pipeline assembly. The provider registry is resolved from DI so tests can substitute a stub
+//     provider (a later registration wins); everything else is captured here. Outermost first;
+//     audit wraps everything; order per src/CLAUDE.md. ---
+builder.Services.AddSingleton<IChatClientRegistry>(registry);
+builder.Services.AddSingleton(sp => new InferencePipeline(
 [
     new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
         promptPreviewChars),
@@ -224,11 +258,9 @@ var pipeline = new InferencePipeline(
     new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
     new RateLimitStage(rateCounterGlobal, rateCounterTeams, rateConfig), // rate half of budget/rate; cache hits bypass (free)
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
-    new ProviderCallStage(registry),                 // route + provider call
+    new ProviderCallStage(sp.GetRequiredService<IChatClientRegistry>()), // route + provider call
     new AttributionStage(prices),                    // attribute cost
-]);
-
-builder.Services.AddSingleton(pipeline);
+]));
 builder.Services.AddHostedService(_ => auditSink);   // drains the audit channel in the background
 
 // ADR-0006: evidence graph — optional, in-perimeter, never load-bearing. No Neo4j:Uri → not registered.
@@ -238,13 +270,89 @@ if (builder.Configuration["Neo4j:Uri"] is { Length: > 0 } neo4jUri)
         auditPath,
         neo4jUri,
         builder.Configuration["Neo4j:User"] ?? "neo4j",
-        builder.Configuration["Neo4j:Password"] ?? ""));
+        builder.Configuration["Neo4j:Password"] ?? "",
+        anchorPath));
 }
 
 var app = builder.Build();
 
 // Model discovery for OpenAI-compatible clients (Open WebUI, SDKs). Same auth semantics as chat:
 // a valid API key, or anonymous only if explicitly allowed. Only policy-permitted models are listed.
+// Anthropic-dialect ingress (/v1/messages): same pipeline, same governance — only the wire differs.
+// Anthropic clients authenticate with x-api-key (Bearer also accepted); errors use Anthropic's
+// taxonomy; streaming speaks the Messages SSE event protocol with lazy header commit (pre-flight
+// denials stay plain JSON).
+app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipeline pipe, HttpContext http, CancellationToken ct) =>
+{
+    string? credential = http.Request.Headers["x-api-key"].FirstOrDefault();
+    if (string.IsNullOrEmpty(credential)
+        && http.Request.Headers.Authorization.FirstOrDefault() is { } authHeader
+        && authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        credential = authHeader["Bearer ".Length..].Trim();
+
+    var principal = http.Request.Headers["X-Covenant-Principal"].FirstOrDefault() ?? "anonymous";
+    var tags = new AttributionTags(
+        Team: http.Request.Headers["X-Covenant-Team"].FirstOrDefault() ?? "unknown",
+        Workflow: http.Request.Headers["X-Covenant-Workflow"].FirstOrDefault() ?? "unknown",
+        UseCase: http.Request.Headers["X-Covenant-UseCase"].FirstOrDefault() ?? "unknown");
+
+    var request = new InferenceRequest(principal, AnthropicWire.ToCanonical(body), body.Model, tags,
+        Stream: body.Stream == true, Credential: credential);
+    var ctx = new InferenceContext(request);
+    var msgId = $"msg_{Guid.NewGuid():n}";
+
+    if (request.Stream)
+    {
+        var resp = http.Response;
+        bool sseStarted = false;
+
+        async ValueTask WriteEventAsync(string evt, string json, CancellationToken token)
+        {
+            await resp.WriteAsync($"event: {evt}\ndata: {json}\n\n", token);
+            await resp.Body.FlushAsync(token);
+        }
+
+        ctx.DeltaSink = async (delta, token) =>
+        {
+            if (!sseStarted)
+            {
+                sseStarted = true;
+                resp.StatusCode = StatusCodes.Status200OK;
+                resp.ContentType = "text/event-stream";
+                resp.Headers.CacheControl = "no-cache";
+                await WriteEventAsync("message_start", AnthropicWire.MessageStartEvent(msgId, ctx.Policy?.Route?.ModelId ?? ""), token);
+                await WriteEventAsync("content_block_start", AnthropicWire.ContentBlockStartEvent, token);
+            }
+            await WriteEventAsync("content_block_delta", AnthropicWire.ContentBlockDeltaEvent(delta.Content), token);
+        };
+
+        await pipe.ExecuteAsync(ctx, ct);
+
+        if (!sseStarted)
+            return AnthropicDenial(ctx);            // denied before the first byte — plain JSON error
+
+        if (ctx.IsDenied)
+        {
+            var (streamErrType, _) = AnthropicWire.MapDenial(ctx.DenialKind);
+            await WriteEventAsync("error", AnthropicWire.ErrorEvent(streamErrType, ctx.DenialReason ?? "stream failed"), ct);
+        }
+        else if (ctx.Response is { } fin)
+        {
+            await WriteEventAsync("content_block_stop", AnthropicWire.ContentBlockStopEvent, ct);
+            await WriteEventAsync("message_delta", AnthropicWire.MessageDeltaEvent(fin.Usage.OutputTokens), ct);
+            await WriteEventAsync("message_stop", AnthropicWire.MessageStopEvent, ct);
+        }
+        return Results.Empty;
+    }
+
+    await pipe.ExecuteAsync(ctx, ct);
+
+    if (ctx.IsDenied || ctx.Response is null)
+        return AnthropicDenial(ctx);
+
+    return Results.Json(AnthropicWire.BuildResponse(msgId, ctx.Response), CovenantJsonContext.Default.AnthropicMessageResponse);
+});
+
 app.MapGet("/v1/models", (HttpContext http) =>
 {
     string? cred = null;
@@ -396,6 +504,16 @@ static IResult DenialResult(InferenceContext ctx)
         CovenantJsonContext.Default.ErrorResponse, statusCode: status);
 }
 
+// Anthropic-dialect denial: same DenialKind semantics, Anthropic's error taxonomy and statuses.
+static IResult AnthropicDenial(InferenceContext ctx)
+{
+    var (errType, status) = AnthropicWire.MapDenial(ctx.DenialKind);
+    return Results.Json(new AnthropicErrorResponse
+    {
+        Error = new AnthropicErrorBody { Type = errType, Message = ctx.DenialReason ?? "no response" }
+    }, CovenantJsonContext.Default.AnthropicErrorResponse, statusCode: status);
+}
+
 bool Authorized(HttpContext http)
 {
     var provided = http.Request.Headers["X-Covenant-Admin-Token"].FirstOrDefault() ?? string.Empty;
@@ -426,7 +544,7 @@ app.MapGet("/admin/evidence", (HttpContext http) =>
 {
     if (!Authorized(http)) return Unauthorized();
 
-    var report = EvidenceExport.Build(auditPath, TimeProvider.System);
+    var report = EvidenceExport.Build(auditPath, TimeProvider.System, anchorPath);
     return Results.Json(report, CovenantJsonContext.Default.EvidenceReport);
 });
 
@@ -436,7 +554,7 @@ var startedUtc = DateTimeOffset.UtcNow;
 
 StatusReport BuildStatus()
 {
-    var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath);
+    var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
     var teamSpend = spendLedger.SnapshotByTeam();
 
     var teams = new List<TeamBudgetStatus>();

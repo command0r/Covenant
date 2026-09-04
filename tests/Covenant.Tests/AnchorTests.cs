@@ -1,0 +1,191 @@
+using Covenant.Core;
+using Covenant.Host;
+using Xunit;
+
+namespace Covenant.Tests;
+
+/// <summary>ADR-0007 guarantees: end-truncation past an anchor is detected (the gap the plain chain cannot see), anchor tampering is detected, rotation archives both files, and no anchors = unchanged behavior.</summary>
+public sealed class AnchorTests : IDisposable
+{
+    private readonly string _log = Path.Combine(Path.GetTempPath(), $"covenant-anchor-test-{Guid.NewGuid():n}.log");
+    private readonly string _anchors;
+
+    public AnchorTests() => _anchors = _log + ".anchors";
+
+    public void Dispose()
+    {
+        foreach (var f in new[] { _log, _anchors })
+            if (File.Exists(f)) File.Delete(f);
+        foreach (var f in Directory.GetFiles(Path.GetTempPath(), Path.GetFileName(_log) + "*.archived"))
+            File.Delete(f);
+        foreach (var f in Directory.GetFiles(Path.GetTempPath(), Path.GetFileName(_anchors) + "*.archived"))
+            File.Delete(f);
+    }
+
+    private static AuditEntry Entry(string id) =>
+        new(id, DateTimeOffset.UtcNow, "tester", new AttributionTags("platform", "w", "u"),
+            DataClassification.Internal, PolicyEffect.Allow, "allowed", "gpt-4o-mini", new Usage(10, 5, 0.001m));
+
+    private async Task<FileAuditSink> Write(int count, int anchorEvery)
+    {
+        var sink = new FileAuditSink(_log, _anchors, anchorEvery);
+        await sink.StartAsync(default);
+        for (int i = 0; i < count; i++) await sink.EnqueueAsync(Entry($"e{i}"));
+        await sink.StopAsync(default);
+        return sink;
+    }
+
+    [Fact]
+    public async Task End_truncation_is_invisible_to_the_plain_chain_but_caught_by_anchors()
+    {
+        await Write(4, anchorEvery: 2);                                  // anchors at entries 2 and 4
+
+        var lines = await File.ReadAllLinesAsync(_log);
+        await File.WriteAllLinesAsync(_log, lines.Take(3));              // silently drop the last entry
+
+        var (plain, _) = AuditChainVerifier.VerifyAndRead(_log);
+        Assert.True(plain.Valid);                                        // the documented blind spot…
+
+        var (anchored, _) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+        Assert.False(anchored.Valid);                                    // …closed by ADR-0007
+        Assert.Contains("truncated", anchored.Failure);
+    }
+
+    [Fact]
+    public async Task Rewritten_history_with_forged_log_hashes_is_caught_by_the_anchor_hash()
+    {
+        await Write(2, anchorEvery: 1);
+
+        // Rewrite the whole log coherently (valid chain, different content) — only the anchor knows.
+        File.Delete(_log);
+        var sink = new FileAuditSink(_log);                              // no anchors: writes a fresh valid chain
+        await sink.StartAsync(default);
+        await sink.EnqueueAsync(Entry("forged-1"));
+        await sink.EnqueueAsync(Entry("forged-2"));
+        await sink.StopAsync(default);
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("hash mismatch", verification.Failure);
+        Assert.Empty(entries);                                           // a coherent forgery has no trusted prefix
+    }
+
+    [Fact]
+    public async Task Non_increasing_anchor_sequence_fails_closed()
+    {
+        await Write(2, anchorEvery: 1);
+        var lines = await File.ReadAllLinesAsync(_anchors);
+        await File.AppendAllTextAsync(_anchors, lines[0] + Environment.NewLine);  // replayed anchor
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("not increasing", verification.Failure);
+        Assert.Empty(entries);
+    }
+
+    [Fact]
+    public async Task Forged_prefix_ending_in_a_deliberate_break_cannot_dodge_anchor_comparison()
+    {
+        await Write(2, anchorEvery: 1);
+
+        // Rewrite the log as a coherent forgery, then append one garbage line so the walk breaks
+        // before reaching the end — pre-fix, anchors were skipped and the forged prefix trusted.
+        File.Delete(_log);
+        var sink = new FileAuditSink(_log);
+        await sink.StartAsync(default);
+        await sink.EnqueueAsync(Entry("forged-1"));
+        await sink.EnqueueAsync(Entry("forged-2"));
+        await sink.StopAsync(default);
+        await File.AppendAllTextAsync(_log, "garbage line" + Environment.NewLine);
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Empty(entries);                                           // anchors contradict the forged prefix
+    }
+
+    [Fact]
+    public async Task Rotation_archives_log_and_anchor_file_together()
+    {
+        var sink = await Write(2, anchorEvery: 1);
+
+        var archived = await sink.RotateAsync();
+
+        Assert.NotNull(archived);
+        Assert.False(File.Exists(_log));
+        Assert.False(File.Exists(_anchors));                             // anchors retire with their chain
+        Assert.True(File.Exists(archived));
+        Assert.NotEmpty(Directory.GetFiles(Path.GetTempPath(),           // archived, not deleted —
+            Path.GetFileName(_anchors) + ".*.archived"));                // evidence retires, it doesn't die
+    }
+
+    [Fact]
+    public async Task Anchoring_continues_correctly_across_restarts()
+    {
+        await Write(3, anchorEvery: 2);                                  // anchor at 2
+        await Write(1, anchorEvery: 2);                                  // new sink instance = restart; entry 4 → anchor at 4
+
+        var anchors = (await File.ReadAllLinesAsync(_anchors)).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+        Assert.Equal(2, anchors.Count);
+        Assert.StartsWith("4\t", anchors[1]);                            // count resumed, not restarted
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+        Assert.True(verification.Valid);
+        Assert.Equal(4, entries.Count);
+    }
+
+    [Fact]
+    public async Task Anchors_without_a_log_fail_verification_with_no_trusted_entries()
+    {
+        await Write(2, anchorEvery: 1);
+        File.Delete(_log);                                               // the strongest attack: fresh start
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("truncated", verification.Failure);
+        Assert.Empty(entries);                                           // nothing is trusted
+    }
+
+    [Fact]
+    public async Task Malformed_anchor_file_fails_closed()
+    {
+        await Write(2, anchorEvery: 1);
+        await File.AppendAllTextAsync(_anchors, "not-a-number\tdeadbeef\tgarbage\n");
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("malformed anchor", verification.Failure);
+        Assert.Empty(entries);
+    }
+
+    [Fact]
+    public async Task Anchor_cadence_only_anchors_every_nth_entry()
+    {
+        await Write(5, anchorEvery: 2);
+
+        var anchors = (await File.ReadAllLinesAsync(_anchors)).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+
+        Assert.Equal(2, anchors.Count);                                  // at entries 2 and 4; entry 5 unanchored
+        Assert.StartsWith("2\t", anchors[0]);
+        Assert.StartsWith("4\t", anchors[1]);
+    }
+
+    [Fact]
+    public async Task Without_anchors_configured_verification_behaves_as_before()
+    {
+        var sink = new FileAuditSink(_log);
+        await sink.StartAsync(default);
+        await sink.EnqueueAsync(Entry("a"));
+        await sink.StopAsync(default);
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, anchorPath: null);
+
+        Assert.True(verification.Valid);
+        Assert.Single(entries);
+        Assert.False(File.Exists(_anchors));
+    }
+}

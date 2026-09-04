@@ -27,6 +27,8 @@
     <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.17.0" />
     <!-- ADR-0006: evidence graph projector, active only when Neo4j:Uri is configured. -->
     <PackageReference Include="Neo4j.Driver" Version="6.2.1" />
+    <!-- ADR-0001 start set: Anthropic provider via the official SDK's IChatClient (opt-in via Anthropic:ApiKey). -->
+    <PackageReference Include="Anthropic" Version="12.8.0" />
   </ItemGroup>
 
 </Project>

@@ -114,4 +114,9 @@ public sealed class ResetResponse
 [JsonSerializable(typeof(ResetResponse))]
 [JsonSerializable(typeof(EvidenceReport))]
 [JsonSerializable(typeof(StatusReport))]
+// Anthropic dialect (types defined in AnthropicContracts.cs) — every [JsonSerializable] must live on
+// ONE partial declaration of the context; splitting them collides the source generator's hint names.
+[JsonSerializable(typeof(AnthropicMessagesRequest))]
+[JsonSerializable(typeof(AnthropicMessageResponse))]
+[JsonSerializable(typeof(AnthropicErrorResponse))]
 public partial class CovenantJsonContext : JsonSerializerContext;
