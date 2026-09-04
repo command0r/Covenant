@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Coverage scope for the CI gate: governance logic is what the threshold measures.
+     Excluded: AdminUi.cs (an embedded HTML/JS string constant — markup, not logic) and
+     OpenAiContracts.cs (wire DTOs with no behavior). Everything else in src/ counts. -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <ExcludeByFile>**/AdminUi.cs,**/OpenAiContracts.cs</ExcludeByFile>
+          <ExcludeByAttribute>Obsolete,GeneratedCode,CompilerGenerated,ExcludeFromCodeCoverage</ExcludeByAttribute>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
