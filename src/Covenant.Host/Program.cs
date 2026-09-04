@@ -241,8 +241,11 @@ if (!chainAtBoot.Valid)
 LedgerReplay.Rebuild(priorEntries, spendLedger);
 var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamCapsUsd };
 
-// --- Pipeline assembly. Outermost first; audit wraps everything; order per src/CLAUDE.md. ---
-var pipeline = new InferencePipeline(
+// --- Pipeline assembly. The provider registry is resolved from DI so tests can substitute a stub
+//     provider (a later registration wins); everything else is captured here. Outermost first;
+//     audit wraps everything; order per src/CLAUDE.md. ---
+builder.Services.AddSingleton<IChatClientRegistry>(registry);
+builder.Services.AddSingleton(sp => new InferencePipeline(
 [
     new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
         promptPreviewChars),
@@ -255,11 +258,9 @@ var pipeline = new InferencePipeline(
     new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
     new RateLimitStage(rateCounterGlobal, rateCounterTeams, rateConfig), // rate half of budget/rate; cache hits bypass (free)
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
-    new ProviderCallStage(registry),                 // route + provider call
+    new ProviderCallStage(sp.GetRequiredService<IChatClientRegistry>()), // route + provider call
     new AttributionStage(prices),                    // attribute cost
-]);
-
-builder.Services.AddSingleton(pipeline);
+]));
 builder.Services.AddHostedService(_ => auditSink);   // drains the audit channel in the background
 
 // ADR-0006: evidence graph — optional, in-perimeter, never load-bearing. No Neo4j:Uri → not registered.
