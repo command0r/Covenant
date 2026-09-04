@@ -71,7 +71,8 @@ foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren(
 if (apiKeys.Count == 0 && !allowAnonymous)
     configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
 
-// Fail-closed refusal, printed as a diagnostic (never a crash). Called twice: before provider-client
+// Fail-closed refusal, printed as a diagnostic (never a crash). Called after each config region —
+// the first gate sits before provider-client
 // construction (which would throw on a missing key) and again after ALL config sections have parsed.
 void FailIfConfigErrors()
 {
@@ -188,16 +189,26 @@ var rateCounterGlobal = new RateCounter();
 var rateCounterTeams = new RateCounter();
 int promptPreviewChars = OptionalNonNegativeInt("Audit:PromptPreviewChars", 0);
 
-// Second gate: every later section (pricing, routing, cache, rate limits, preview) has parsed by now.
+// Second gate: pricing, routing, cache, rate limits, and preview have parsed by now (anchoring
+// parses just below and has its own gate before sink construction).
 FailIfConfigErrors();
 
-var auditSink = new FileAuditSink(auditPath);
+// Chain-head anchoring (ADR-0007): both settings together or neither; the anchor path should live
+// on an independent storage domain — that placement is the entire security value.
+string? anchorPath = builder.Configuration["Audit:AnchorPath"];
+int anchorEvery = OptionalNonNegativeInt("Audit:AnchorEvery", 0);
+if (string.IsNullOrWhiteSpace(anchorPath)) anchorPath = null;
+if ((anchorPath is null) != (anchorEvery == 0))
+    configErrors.Add("Audit:AnchorPath / Audit:AnchorEvery — set both to enable anchoring, or neither");
+FailIfConfigErrors();
+
+var auditSink = new FileAuditSink(auditPath, anchorPath, anchorEvery);
 var killSwitch = new KillSwitch();
 var spendLedger = new InMemorySpendLedger();
 
 // Budgets survive restarts: replay the audit log (event store) into the ledger (projection).
 // A tampered chain at boot is fail-closed — never serve on top of corrupted evidence.
-var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath);
+var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
 if (!chainAtBoot.Valid)
 {
     Console.Error.WriteLine(
@@ -238,7 +249,8 @@ if (builder.Configuration["Neo4j:Uri"] is { Length: > 0 } neo4jUri)
         auditPath,
         neo4jUri,
         builder.Configuration["Neo4j:User"] ?? "neo4j",
-        builder.Configuration["Neo4j:Password"] ?? ""));
+        builder.Configuration["Neo4j:Password"] ?? "",
+        anchorPath));
 }
 
 var app = builder.Build();
@@ -426,7 +438,7 @@ app.MapGet("/admin/evidence", (HttpContext http) =>
 {
     if (!Authorized(http)) return Unauthorized();
 
-    var report = EvidenceExport.Build(auditPath, TimeProvider.System);
+    var report = EvidenceExport.Build(auditPath, TimeProvider.System, anchorPath);
     return Results.Json(report, CovenantJsonContext.Default.EvidenceReport);
 });
 
@@ -436,7 +448,7 @@ var startedUtc = DateTimeOffset.UtcNow;
 
 StatusReport BuildStatus()
 {
-    var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath);
+    var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
     var teamSpend = spendLedger.SnapshotByTeam();
 
     var teams = new List<TeamBudgetStatus>();

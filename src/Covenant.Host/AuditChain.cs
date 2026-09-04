@@ -4,7 +4,7 @@ using System.Text;
 namespace Covenant.Host;
 
 /// <summary>Hash-chain primitives shared by writer and verifier: line = <c>{previousHash}\t{entryHash}\t{contentJson}</c>, <c>entryHash = SHA256(previousHash + contentJson)</c>; altering, removing, or reordering any past line breaks every hash after it.
-/// Known limit (deliberate, first slice): truncation from the END is NOT detectable from the file alone — needs external chain-head anchoring (WORM / notarization), the audit-store ADR.</summary>
+/// Truncation from the END is not detectable from the file alone — closed by opt-in chain-head anchoring (ADR-0007, Audit:AnchorPath).</summary>
 public static class AuditChain
 {
     public const char Separator = '\t';

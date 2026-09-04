@@ -6,7 +6,7 @@ namespace Covenant.Host;
 
 /// <summary>ADR-0006: optional projection of the audit log into in-perimeter Neo4j; never load-bearing — the chained log stays the evidence of record, the graph is rebuildable derived data.
 /// Idempotent (MERGE on stable keys), so restarts/replays are safe; if Neo4j is down, governance is unaffected and the projector catches up.</summary>
-public sealed class EvidenceGraphProjector(string auditPath, string uri, string user, string password)
+public sealed class EvidenceGraphProjector(string auditPath, string uri, string user, string password, string? anchorPath = null)
     : BackgroundService
 {
     private const string UpsertCypher =
@@ -42,8 +42,12 @@ public sealed class EvidenceGraphProjector(string auditPath, string uri, string 
             try
             {
                 // Only verified prefix is projected — nothing past a chain break enters the graph.
-                var (_, entries) = AuditChainVerifier.VerifyAndRead(auditPath);
-                if (entries.Count > _projected)
+                var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+                if (!verification.Valid)
+                {
+                    // Fail closed: nothing unverified enters the graph; retry next cycle.
+                }
+                else if (entries.Count > _projected)
                 {
                     var batch = ToParameters(entries.Skip(_projected).ToList());
                     await using var session = driver.AsyncSession();
