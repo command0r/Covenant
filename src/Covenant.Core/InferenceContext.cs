@@ -2,7 +2,7 @@ namespace Covenant.Core;
 
 /// <summary>Why a request was refused. Callers see different HTTP statuses (401 vs 403 vs 502);
 /// the audit trail records all of them as denials.</summary>
-public enum DenialKind { None, Governance, UpstreamFailure, Unauthenticated }
+public enum DenialKind { None, Governance, UpstreamFailure, Unauthenticated, RateLimited }
 
 /// <summary>Mutable pipeline state; exactly one terminal outcome: Response (served) or DenialReason
 /// (refused). Default Classification is the most restrictive — fail-closed until classify runs.</summary>

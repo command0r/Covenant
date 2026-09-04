@@ -164,6 +164,14 @@ var cacheConfig = new CacheConfig
 };
 var responseCache = new ResponseCache();
 
+// Rate limits: opt-in via RateLimit:* (0 = unlimited). Refusals are 429s and audited like any denial.
+var rateConfig = new RateLimitConfig
+{
+    GlobalPerMinute = int.TryParse(builder.Configuration["RateLimit:GlobalPerMinute"], out var rg) ? rg : 0,
+    PerTeamPerMinute = int.TryParse(builder.Configuration["RateLimit:PerTeamPerMinute"], out var rt) ? rt : 0,
+};
+var rateCounter = new RateCounter();
+
 var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();
 var spendLedger = new InMemorySpendLedger();
@@ -195,6 +203,7 @@ var pipeline = new InferencePipeline(
         ComplexityTokenThreshold = complexityThreshold,
     })),                                             // policy + complexity routing, fail-closed
     new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
+    new RateLimitStage(rateCounter, rateConfig),     // rate half of budget/rate; cache hits bypass (deliberate: free)
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
     new ProviderCallStage(registry),                 // route + provider call
     new AttributionStage(prices),                    // attribute cost
@@ -360,6 +369,7 @@ static IResult DenialResult(InferenceContext ctx)
     {
         DenialKind.Unauthenticated => ("unauthenticated", StatusCodes.Status401Unauthorized),
         DenialKind.UpstreamFailure => ("upstream_error", StatusCodes.Status502BadGateway),
+        DenialKind.RateLimited => ("rate_limited", StatusCodes.Status429TooManyRequests),
         _ => ("denied", StatusCodes.Status403Forbidden),
     };
     return Results.Json(

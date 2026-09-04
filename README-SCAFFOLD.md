@@ -76,6 +76,12 @@ Reset between demo runs: **Settings → Archive log & reset counters** in the da
 `curl -X POST localhost:5100/admin/reset -H 'X-Covenant-Admin-Token: dev-admin-token'`). The audit
 log is archived with a timestamp, never deleted; budgets reopen.
 
+Rate limits (opt-in; refusals are HTTP 429 and audited; 0 = unlimited):
+```
+dotnet user-secrets set "RateLimit:PerTeamPerMinute" "30"  --project src/Covenant.Host
+dotnet user-secrets set "RateLimit:GlobalPerMinute"  "120" --project src/Covenant.Host
+```
+
 Response cache (opt-in; a hit skips the provider entirely — $0, no latency; keys are team-scoped,
 entries live in memory only and die with the process):
 ```

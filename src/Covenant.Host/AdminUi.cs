@@ -316,6 +316,7 @@ function explain(reason) {
   if (r.includes('global budget')) return 'The appliance-wide spend cap is exhausted. Raise Budget:GlobalCapUsd, or archive & reset in Settings.';
   if (r.includes('budget exhausted for team')) return 'This team hit its spend cap. Raise its cap, or archive & reset in Settings.';
   if (r.includes('authentication required') || r.includes('unknown api key')) return 'The caller presented no valid API key. Clients must send Authorization: Bearer <key>.';
+  if (r.includes('rate limit exceeded')) return 'Too many requests in the current minute (HTTP 429). Raise RateLimit:PerTeamPerMinute / GlobalPerMinute, or wait for the window to reset.';
   if (r.includes('not permitted for classification') || r.includes('no permitted route')) return 'Policy allows no route for this data classification — fail-closed by design.';
   if (r.includes('call failed') || r.includes('stream failed')) return 'The upstream provider failed (quota, network, 5xx). Covenant refused fail-closed, audited it, and returned 502 to the caller.';
   if (r.includes('no response produced')) return 'The request errored before a response existed; recorded as a denial (fail-closed evidence).';
