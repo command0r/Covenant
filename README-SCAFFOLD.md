@@ -68,6 +68,16 @@ dotnet user-secrets set "Local:Endpoint" "http://localhost:11434/v1" --project s
 dotnet user-secrets set "Local:ModelId"  "llama3.1:8b"               --project src/Covenant.Host
 ```
 
+Optional Anthropic provider + dialect: `/v1/messages` (Anthropic wire, `x-api-key` auth, Messages SSE
+protocol) works regardless — same pipeline, same governance, Anthropic's error taxonomy. To also
+ROUTE to Claude models:
+```
+dotnet user-secrets set "Anthropic:ApiKey"  "<key>"            --project src/Covenant.Host
+dotnet user-secrets set "Anthropic:ModelId" "claude-haiku-4-5" --project src/Covenant.Host
+```
+Configured, the model joins the Public/Internal permitted set (mid-list: reachable by explicit
+request, never the default escalation). Anthropic clients then work unchanged against Covenant.
+
 Pricing: defaults are real per-1M rates (gpt-4o-mini $0.15/$0.60, gpt-4o $2.50/$10.00) converted
 internally to per-1K. Override per model when providers change prices:
 `dotnet user-secrets set "Pricing:gpt-4o-mini:InPer1M" "0.15" ...` (+ `OutPer1M`).
