@@ -71,7 +71,8 @@ foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren(
 if (apiKeys.Count == 0 && !allowAnonymous)
     configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
 
-// Fail-closed refusal, printed as a diagnostic (never a crash). Called twice: before provider-client
+// Fail-closed refusal, printed as a diagnostic (never a crash). Called after each config region —
+// the first gate sits before provider-client
 // construction (which would throw on a missing key) and again after ALL config sections have parsed.
 void FailIfConfigErrors()
 {

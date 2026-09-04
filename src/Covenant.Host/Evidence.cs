@@ -12,18 +12,22 @@ public sealed record ChainVerification(bool Valid, int EntryCount, int? FirstInv
 }
 
 /// <summary>Re-walks the log recomputing every hash (format in AuditChain): detects edits, forged hashes,
-/// removed/reordered lines, mid-file restarts. Entries return only up to the first invalid line.</summary>
+/// removed/reordered lines, mid-file restarts; anchored verification adds truncation and whole-log
+/// rewrites. Walk break → hash-verified prefix returned; anchor contradiction → empty (nothing trusted).</summary>
 public static class AuditChainVerifier
 {
     public static (ChainVerification Verification, IReadOnlyList<AuditEntry> Entries) VerifyAndRead(string path)
         => VerifyAndRead(path, anchorPath: null);
 
     /// <summary>With an anchor path (ADR-0007), the log must contain every anchored count with exactly
-    /// the anchored head hash at that position — end-truncation past any anchor fails verification.</summary>
+    /// the anchored head hash at that position — end-truncation past any anchor fails verification.
+    /// On a chain-walk break the hash-verified prefix is returned (after anchors within the prefix are
+    /// checked); on any anchor contradiction NOTHING is trusted — entries come back empty.</summary>
     public static (ChainVerification Verification, IReadOnlyList<AuditEntry> Entries) VerifyAndRead(string path, string? anchorPath)
     {
         var entries = new List<AuditEntry>();
         var hashes = new List<string>();
+        ChainVerification walk = ChainVerification.Ok(0);
 
         if (File.Exists(path))
         {
@@ -37,30 +41,32 @@ public static class AuditChainVerifier
 
                 var parts = line.Split(AuditChain.Separator, 3);
                 if (parts.Length != 3)
-                    return (ChainVerification.Broken(entries.Count, lineNo, "malformed line"), entries);
+                { walk = ChainVerification.Broken(entries.Count, lineNo, "malformed line"); break; }
 
                 var (prevHash, entryHash, content) = (parts[0], parts[1], parts[2]);
 
                 if (!string.Equals(prevHash, previous, StringComparison.Ordinal))
-                    return (ChainVerification.Broken(entries.Count, lineNo, "chain link mismatch (removed, reordered, or restarted)"), entries);
+                { walk = ChainVerification.Broken(entries.Count, lineNo, "chain link mismatch (removed, reordered, or restarted)"); break; }
 
                 if (!string.Equals(entryHash, AuditChain.Hash(previous, content), StringComparison.Ordinal))
-                    return (ChainVerification.Broken(entries.Count, lineNo, "content hash mismatch (entry altered)"), entries);
+                { walk = ChainVerification.Broken(entries.Count, lineNo, "content hash mismatch (entry altered)"); break; }
 
                 var entry = JsonSerializer.Deserialize(content, AuditJsonContext.Default.AuditEntry);
                 if (entry is null)
-                    return (ChainVerification.Broken(entries.Count, lineNo, "entry is not valid JSON"), entries);
+                { walk = ChainVerification.Broken(entries.Count, lineNo, "entry is not valid JSON"); break; }
 
                 entries.Add(entry);
                 hashes.Add(entryHash);
                 previous = entryHash;
             }
+
+            if (walk.Valid) walk = ChainVerification.Ok(entries.Count);
         }
 
+        // Anchors are checked even when the walk broke: a forged prefix ending in a deliberate break
+        // must not dodge anchor comparison. Any anchor contradiction ⇒ no prefix is trustworthy.
         if (anchorPath is not null && File.Exists(anchorPath))
         {
-            // Anchor failure ⇒ the log itself may be a coherent forgery, so NO prefix is trustworthy:
-            // fail closed with an EMPTY entry list (unlike chain-walk breaks, whose prefix is hash-verified).
             int anchorNo = 0;
             long lastCount = 0;
             foreach (var line in File.ReadLines(anchorPath))
@@ -77,9 +83,15 @@ public static class AuditChainVerifier
                         $"anchor sequence not increasing at anchor-file line {anchorNo} (anchor file tampered)"), []);
                 lastCount = anchoredCount;
 
-                if (anchoredCount > entries.Count)
-                    return (ChainVerification.Broken(0, anchorNo,
-                        $"log truncated: anchor at anchor-file line {anchorNo} attests {anchoredCount} entries, log has {entries.Count}"), []);
+                if (anchoredCount > hashes.Count)
+                {
+                    // Beyond the verified prefix: with a valid walk this is truncation; with a broken
+                    // walk it is unevaluable (the walk break already fails verification) — skip.
+                    if (walk.Valid)
+                        return (ChainVerification.Broken(0, anchorNo,
+                            $"log truncated: anchor at anchor-file line {anchorNo} attests {anchoredCount} entries, log has {hashes.Count}"), []);
+                    continue;
+                }
 
                 if (!string.Equals(hashes[(int)anchoredCount - 1], parts[1], StringComparison.Ordinal))
                     return (ChainVerification.Broken(0, anchorNo,
@@ -87,7 +99,7 @@ public static class AuditChainVerifier
             }
         }
 
-        return (ChainVerification.Ok(entries.Count), entries);
+        return (walk, entries);
     }
 }
 

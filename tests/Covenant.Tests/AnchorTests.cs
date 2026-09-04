@@ -64,10 +64,46 @@ public sealed class AnchorTests : IDisposable
         await sink.EnqueueAsync(Entry("forged-2"));
         await sink.StopAsync(default);
 
-        var (verification, _) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
 
         Assert.False(verification.Valid);
         Assert.Contains("hash mismatch", verification.Failure);
+        Assert.Empty(entries);                                           // a coherent forgery has no trusted prefix
+    }
+
+    [Fact]
+    public async Task Non_increasing_anchor_sequence_fails_closed()
+    {
+        await Write(2, anchorEvery: 1);
+        var lines = await File.ReadAllLinesAsync(_anchors);
+        await File.AppendAllTextAsync(_anchors, lines[0] + Environment.NewLine);  // replayed anchor
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Contains("not increasing", verification.Failure);
+        Assert.Empty(entries);
+    }
+
+    [Fact]
+    public async Task Forged_prefix_ending_in_a_deliberate_break_cannot_dodge_anchor_comparison()
+    {
+        await Write(2, anchorEvery: 1);
+
+        // Rewrite the log as a coherent forgery, then append one garbage line so the walk breaks
+        // before reaching the end — pre-fix, anchors were skipped and the forged prefix trusted.
+        File.Delete(_log);
+        var sink = new FileAuditSink(_log);
+        await sink.StartAsync(default);
+        await sink.EnqueueAsync(Entry("forged-1"));
+        await sink.EnqueueAsync(Entry("forged-2"));
+        await sink.StopAsync(default);
+        await File.AppendAllTextAsync(_log, "garbage line" + Environment.NewLine);
+
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(_log, _anchors);
+
+        Assert.False(verification.Valid);
+        Assert.Empty(entries);                                           // anchors contradict the forged prefix
     }
 
     [Fact]
