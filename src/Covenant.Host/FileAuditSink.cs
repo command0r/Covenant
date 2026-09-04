@@ -42,7 +42,9 @@ public sealed class FileAuditSink(string path, string? anchorPath = null, int an
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        _channel.Writer.Complete();
+        // TryComplete, not Complete: StopAsync can run more than once across host disposal
+        // (Complete throws ChannelClosedException on an already-completed channel). Idempotent.
+        _channel.Writer.TryComplete();
         if (_drain is not null) await _drain;
     }
 
