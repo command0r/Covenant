@@ -1,0 +1,52 @@
+# CI: the impartial merge gate — build + tests + coverage threshold.
+# Tuned for minimal Actions minutes:
+#   - Linux runner only (1x minute multiplier)
+#   - one job, one `dotnet test` (restore+build+test in a single invocation)
+#   - NuGet cache keyed on csproj + build-props hashes (warm restore = seconds)
+#   - docs/deploy-only PRs are handled by ci-docs.yml (same check name, no-op) so the
+#     required check is always satisfiable without a full build
+#   - superseded PR runs are cancelled; main pushes always complete (evidence trail)
+name: ci
+
+on:
+  pull_request:
+    paths-ignore: ['**.md', 'docs/**', 'deploy/**', '.gitignore']
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**', 'deploy/**', '.gitignore']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props', '**/Directory.Packages.props') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Test with coverage
+        run: dotnet test -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+
+      - name: Enforce coverage threshold (line >= 0.60)
+        run: |
+          COUNT=$(find ./coverage -name 'coverage.cobertura.xml' | wc -l)
+          test "$COUNT" -eq 1 || { echo "expected exactly 1 coverage report (single test project), found $COUNT"; exit 1; }
+          FILE=$(find ./coverage -name 'coverage.cobertura.xml')
+          RATE=$(grep -o 'line-rate="[0-9.]*"' "$FILE" | head -1 | grep -o '[0-9.]*')
+          echo "line coverage: $RATE (threshold 0.60)"
+          awk -v r="$RATE" 'BEGIN { exit (r >= 0.60 ? 0 : 1) }'
