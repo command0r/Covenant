@@ -1,0 +1,19 @@
+# Companion to ci.yml: docs/deploy-only PRs produce the SAME check name ("ci / test") as a no-op,
+# so "test" can be a required branch-protection check without docs PRs hanging at "Expected" —
+# and without burning a full build (~5s vs ~3min). GitHub's documented pattern for paths-ignore
+# with required checks.
+name: ci
+
+on:
+  pull_request:
+    paths: ['**.md', 'docs/**', 'deploy/**', '.gitignore']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "Docs/deploy-only change — build not required; gate satisfied."
