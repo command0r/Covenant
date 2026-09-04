@@ -41,7 +41,8 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 Signal: ctx.ClassificationSignal,
                 PromptPreview: promptPreviewChars > 0
                     ? Truncate(string.Join(" ⏎ ", ctx.Request.Messages.Select(m => m.Content)), promptPreviewChars)
-                    : null);
+                    : null,
+                CacheHit: ctx.ServedFromCache);
 
             await sink.EnqueueAsync(entry, ct);
         }

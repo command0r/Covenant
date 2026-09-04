@@ -32,4 +32,5 @@ public sealed record AuditEntry(
     int PromptChars = 0,
     string? PromptSha256 = null,
     string? Signal = null,
-    string? PromptPreview = null);
+    string? PromptPreview = null,
+    bool CacheHit = false);

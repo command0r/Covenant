@@ -439,6 +439,7 @@ function render(s) {
   const routerSplit = Object.entries(f.requests_by_model).map(([m, c]) => c + '× ' + m).join(' · ');
   $('savingsSub').textContent = 'Vs all-strong baseline: local ' + money(f.savings_local_usd)
     + ' · router ' + money(f.savings_router_usd)
+    + ' · cache ' + money(f.savings_cache_usd) + ' (' + f.cache_hits + ' hits)'
     + (routerSplit ? ' — served: ' + routerSplit : '');
 
   $('requests').textContent = f.requests;
@@ -519,7 +520,7 @@ function detailRow(x) {
     + d('Principal', esc(x.principal))
     + d('Team / workflow / use case', esc(x.team) + ' / ' + esc(x.workflow) + ' / ' + esc(x.use_case))
     + d('Classification', clsPill(x.classification) + (x.signal ? ' <span style="color:var(--muted)">— ' + esc(x.signal) + '</span>' : ''))
-    + d('Served by', x.model ? esc(x.model) : '— (not served)')
+    + d('Served by', x.model ? esc(x.model) + (x.cache ? ' — from cache ($0, no provider call)' : '') : '— (not served)')
     + d('Prompt size', x.prompt_chars + ' chars (~' + Math.round(x.prompt_chars / 4) + ' tokens)')
     + d('Prompt SHA-256', x.prompt_sha256
         ? '<span title="' + esc(x.prompt_sha256) + '">' + esc(x.prompt_sha256.slice(0, 16)) + '…</span>'
@@ -553,7 +554,10 @@ function renderFeed() {
     + '<td class="ell" title="' + esc(x.principal) + '">' + esc(x.principal) + '</td>'
     + '<td class="ell" title="' + esc(x.team) + '">' + esc(x.team) + '</td>'
     + '<td>' + clsPill(x.classification) + '</td>'
-    + '<td class="ell">' + (x.model ? '<span class="pill public" title="' + esc(x.model) + '">' + esc(x.model) + '</span>' : '<span style="color:var(--faint)">—</span>') + '</td>'
+    + '<td class="ell">' + (x.model
+      ? '<span class="pill ' + (x.cache ? 'local' : 'public') + '" title="' + esc(x.model) + (x.cache ? ' (cache hit)' : '') + '">'
+        + esc(x.model) + (x.cache ? ' ⚡' : '') + '</span>'
+      : '<span style="color:var(--faint)">—</span>') + '</td>'
     + '<td class="num">' + x.tokens + '</td>'
     + '<td class="num">' + money(x.cost_usd) + '</td>'
     + '<td class="num">' + Math.round(x.ms) + ' ms</td>'

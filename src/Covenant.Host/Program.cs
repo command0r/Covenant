@@ -156,6 +156,14 @@ var prices = new PriceBook(priceMap);
 long complexityThreshold =
     long.TryParse(builder.Configuration["Routing:ComplexityTokenThreshold"], out var thr) ? thr : 400;
 
+// Response cache: opt-in via Cache:TtlSeconds > 0 (holds response content in memory; team-scoped keys).
+var cacheConfig = new CacheConfig
+{
+    TtlSeconds = int.TryParse(builder.Configuration["Cache:TtlSeconds"], out var cttl) ? cttl : 0,
+    MaxEntries = int.TryParse(builder.Configuration["Cache:MaxEntries"], out var cmax) ? cmax : 1_000,
+};
+var responseCache = new ResponseCache();
+
 var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();
 var spendLedger = new InMemorySpendLedger();
@@ -186,6 +194,7 @@ var pipeline = new InferencePipeline(
     {
         ComplexityTokenThreshold = complexityThreshold,
     })),                                             // policy + complexity routing, fail-closed
+    new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
     new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
     new ProviderCallStage(registry),                 // route + provider call
     new AttributionStage(prices),                    // attribute cost

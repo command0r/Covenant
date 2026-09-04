@@ -69,6 +69,12 @@ Reset between demo runs: **Settings → Archive log & reset counters** in the da
 `curl -X POST localhost:5100/admin/reset -H 'X-Covenant-Admin-Token: dev-admin-token'`). The audit
 log is archived with a timestamp, never deleted; budgets reopen.
 
+Response cache (opt-in; a hit skips the provider entirely — $0, no latency; keys are team-scoped,
+entries live in memory only and die with the process):
+```
+dotnet user-secrets set "Cache:TtlSeconds" "300" --project src/Covenant.Host
+```
+
 Complexity routing: Public/Internal route lists are ordered cheapest → strongest
 (`gpt-4o-mini` → `gpt-4o` by default; override via `OpenAI:ModelId` / `OpenAI:StrongModelId`).
 Prompts estimated above `Routing:ComplexityTokenThreshold` tokens (default 400, chars÷4 heuristic)

@@ -39,6 +39,9 @@ public sealed class InferenceContext(InferenceRequest request)
 
     public DenialKind DenialKind { get; private set; } = DenialKind.None;
 
+    /// <summary>Set by the cache stage on a hit: served without any provider call, cost $0.</summary>
+    public bool ServedFromCache { get; set; }
+
     public bool IsDenied => DenialReason is not null;
 
     /// <summary>Refuse the request. First reason wins; later calls are ignored.</summary>

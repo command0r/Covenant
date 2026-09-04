@@ -63,6 +63,8 @@ public sealed class FinOpsSummary
     [JsonPropertyName("estimated_savings_usd")] public required decimal EstimatedSavingsUsd { get; init; }
     [JsonPropertyName("savings_local_usd")] public required decimal SavingsLocalUsd { get; init; }
     [JsonPropertyName("savings_router_usd")] public required decimal SavingsRouterUsd { get; init; }
+    [JsonPropertyName("savings_cache_usd")] public required decimal SavingsCacheUsd { get; init; }
+    [JsonPropertyName("cache_hits")] public required int CacheHits { get; init; }
     [JsonPropertyName("cost_by_team_usd")] public required Dictionary<string, decimal> CostByTeamUsd { get; init; }
     [JsonPropertyName("denials_by_reason")] public required Dictionary<string, int> DenialsByReason { get; init; }
     /// <summary>Per-minute request/denial/cost buckets (most recent 60 non-empty), for the activity chart.</summary>
@@ -104,6 +106,7 @@ public sealed class RecentRequest
     [JsonPropertyName("signal")] public string? Signal { get; init; }
     /// <summary>Truncated input preview — present only when the operator set Audit:PromptPreviewChars.</summary>
     [JsonPropertyName("prompt_preview")] public string? PromptPreview { get; init; }
+    [JsonPropertyName("cache")] public required bool CacheHit { get; init; }
 }
 
 public static class FinOps
@@ -144,7 +147,8 @@ public static class FinOps
         var strongPrice = prices.GetValueOrDefault(strongModelId);
         int allowed = 0, denied = 0, localRequests = 0;
         long localTokens = 0;
-        decimal totalCost = 0m, savingsLocal = 0m, savingsRouter = 0m;
+        decimal totalCost = 0m, savingsLocal = 0m, savingsRouter = 0m, savingsCache = 0m;
+        int cacheHits = 0;
         var costByTeam = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var denialsByReason = new Dictionary<string, int>();
         var requestsByModel = new Dictionary<string, int>();
@@ -167,8 +171,15 @@ public static class FinOps
             if (e.Effect == PolicyEffect.Allow)
             {
                 allowed++;
-                // Baseline: this request runs on the strong model. Savings = baseline − actual price,
-                // never below zero, attributed to in-perimeter serving or the complexity router.
+                // Baseline: this request runs (uncached) on the strong model. Savings split by cause;
+                // a cache hit saves its model's full price, router/local save the delta vs strong.
+                if (e.CacheHit && e.ServedByModel is { Length: > 0 } cachedModel)
+                {
+                    cacheHits++;
+                    var p = prices.GetValueOrDefault(cachedModel);
+                    savingsCache += e.Usage.InputTokens / 1000m * p.InPer1K
+                                  + e.Usage.OutputTokens / 1000m * p.OutPer1K;
+                }
                 if (e.ServedByModel is { Length: > 0 } model
                     && !string.Equals(model, strongModelId, StringComparison.OrdinalIgnoreCase))
                 {
@@ -204,9 +215,11 @@ public static class FinOps
             TotalCostUsd = totalCost,
             LocalRequests = localRequests,
             LocalTokens = localTokens,
-            EstimatedSavingsUsd = savingsLocal + savingsRouter,
+            EstimatedSavingsUsd = savingsLocal + savingsRouter + savingsCache,
             SavingsLocalUsd = savingsLocal,
             SavingsRouterUsd = savingsRouter,
+            SavingsCacheUsd = savingsCache,
+            CacheHits = cacheHits,
             CostByTeamUsd = costByTeam,
             DenialsByReason = denialsByReason,
             Activity = DenseActivity(buckets),
@@ -233,6 +246,7 @@ public static class FinOps
                     PromptSha256 = e.PromptSha256,
                     Signal = e.Signal,
                     PromptPreview = e.PromptPreview,
+                    CacheHit = e.CacheHit,
                 })
                 .ToList(),
         };
