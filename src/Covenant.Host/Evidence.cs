@@ -16,37 +16,67 @@ public sealed record ChainVerification(bool Valid, int EntryCount, int? FirstInv
 public static class AuditChainVerifier
 {
     public static (ChainVerification Verification, IReadOnlyList<AuditEntry> Entries) VerifyAndRead(string path)
+        => VerifyAndRead(path, anchorPath: null);
+
+    /// <summary>With an anchor path (ADR-0007), the log must contain every anchored count with exactly
+    /// the anchored head hash at that position — end-truncation past any anchor fails verification.</summary>
+    public static (ChainVerification Verification, IReadOnlyList<AuditEntry> Entries) VerifyAndRead(string path, string? anchorPath)
     {
         var entries = new List<AuditEntry>();
-        if (!File.Exists(path))
-            return (ChainVerification.Ok(0), entries);
+        var hashes = new List<string>();
 
-        var previous = AuditChain.GenesisHash;
-        int lineNo = 0;
-
-        foreach (var line in File.ReadLines(path))
+        if (File.Exists(path))
         {
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            lineNo++;
+            var previous = AuditChain.GenesisHash;
+            int lineNo = 0;
 
-            var parts = line.Split(AuditChain.Separator, 3);
-            if (parts.Length != 3)
-                return (ChainVerification.Broken(entries.Count, lineNo, "malformed line"), entries);
+            foreach (var line in File.ReadLines(path))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                lineNo++;
 
-            var (prevHash, entryHash, content) = (parts[0], parts[1], parts[2]);
+                var parts = line.Split(AuditChain.Separator, 3);
+                if (parts.Length != 3)
+                    return (ChainVerification.Broken(entries.Count, lineNo, "malformed line"), entries);
 
-            if (!string.Equals(prevHash, previous, StringComparison.Ordinal))
-                return (ChainVerification.Broken(entries.Count, lineNo, "chain link mismatch (removed, reordered, or restarted)"), entries);
+                var (prevHash, entryHash, content) = (parts[0], parts[1], parts[2]);
 
-            if (!string.Equals(entryHash, AuditChain.Hash(previous, content), StringComparison.Ordinal))
-                return (ChainVerification.Broken(entries.Count, lineNo, "content hash mismatch (entry altered)"), entries);
+                if (!string.Equals(prevHash, previous, StringComparison.Ordinal))
+                    return (ChainVerification.Broken(entries.Count, lineNo, "chain link mismatch (removed, reordered, or restarted)"), entries);
 
-            var entry = JsonSerializer.Deserialize(content, AuditJsonContext.Default.AuditEntry);
-            if (entry is null)
-                return (ChainVerification.Broken(entries.Count, lineNo, "entry is not valid JSON"), entries);
+                if (!string.Equals(entryHash, AuditChain.Hash(previous, content), StringComparison.Ordinal))
+                    return (ChainVerification.Broken(entries.Count, lineNo, "content hash mismatch (entry altered)"), entries);
 
-            entries.Add(entry);
-            previous = entryHash;
+                var entry = JsonSerializer.Deserialize(content, AuditJsonContext.Default.AuditEntry);
+                if (entry is null)
+                    return (ChainVerification.Broken(entries.Count, lineNo, "entry is not valid JSON"), entries);
+
+                entries.Add(entry);
+                hashes.Add(entryHash);
+                previous = entryHash;
+            }
+        }
+
+        if (anchorPath is not null && File.Exists(anchorPath))
+        {
+            int anchorNo = 0;
+            foreach (var line in File.ReadLines(anchorPath))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                anchorNo++;
+
+                var parts = line.Split(AuditChain.Separator, 3);
+                if (parts.Length != 3 || !long.TryParse(parts[0], out var anchoredCount) || anchoredCount < 1)
+                    return (ChainVerification.Broken(entries.Count, anchorNo, $"malformed anchor #{anchorNo}"), entries);
+
+                if (anchoredCount > entries.Count)
+                    return (ChainVerification.Broken(entries.Count, anchorNo,
+                        $"log truncated: anchor #{anchorNo} attests {anchoredCount} entries, log has {entries.Count}"), entries);
+
+                if (!string.Equals(hashes[(int)anchoredCount - 1], parts[1], StringComparison.Ordinal))
+                    return (ChainVerification.Broken(entries.Count, anchorNo,
+                        $"anchor #{anchorNo} hash mismatch at entry {anchoredCount} (history rewritten)"), entries);
+            }
         }
 
         return (ChainVerification.Ok(entries.Count), entries);
@@ -86,9 +116,9 @@ public static class LedgerReplay
 
 public static class EvidenceExport
 {
-    public static EvidenceReport Build(string auditLogPath, TimeProvider clock)
+    public static EvidenceReport Build(string auditLogPath, TimeProvider clock, string? anchorPath = null)
     {
-        var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditLogPath);
+        var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditLogPath, anchorPath);
 
         var costByTeam = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var byClassification = new Dictionary<string, int>();
