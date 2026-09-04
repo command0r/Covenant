@@ -59,10 +59,8 @@ public sealed class AnthropicErrorBody
     [JsonPropertyName("message")] public string Message { get; set; } = "";
 }
 
-[JsonSerializable(typeof(AnthropicMessagesRequest))]
-[JsonSerializable(typeof(AnthropicMessageResponse))]
-[JsonSerializable(typeof(AnthropicErrorResponse))]
-public partial class CovenantJsonContext;
+// The [JsonSerializable] registrations for these types live on the single CovenantJsonContext
+// declaration in OpenAiContracts.cs — one attributed partial only (source-generator requirement).
 
 /// <summary>Pure Anthropic-wire ↔ canonical mapping — unit-tested without a server.</summary>
 public static class AnthropicWire
