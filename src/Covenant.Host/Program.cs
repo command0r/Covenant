@@ -71,8 +71,21 @@ foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren(
 if (apiKeys.Count == 0 && !allowAnonymous)
     configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
 
-// NOTE: the fail-closed configuration check runs AFTER all config parsing (see below) so every
-// section — auth, budget, pricing, cache, rate limits — reports into one refusal.
+// Fail-closed refusal, printed as a diagnostic (never a crash). Called twice: before provider-client
+// construction (which would throw on a missing key) and again after ALL config sections have parsed.
+void FailIfConfigErrors()
+{
+    if (configErrors.Count == 0) return;
+    Console.Error.WriteLine("covenant: refusing to start (fail-closed). Missing or invalid configuration:");
+    foreach (var e in configErrors) Console.Error.WriteLine($"  {e}");
+    Console.Error.WriteLine();
+    Console.Error.WriteLine("dev:  dotnet user-secrets set \"OpenAI:ApiKey\" \"<value>\" --project src/Covenant.Host");
+    Console.Error.WriteLine("      (see README-SCAFFOLD.md §4 — user-secrets load only in the Development");
+    Console.Error.WriteLine("      environment, which Properties/launchSettings.json sets for local runs)");
+    Console.Error.WriteLine("prod: env vars (OpenAI__ApiKey, Admin__Token, Budget__GlobalCapUsd) or the customer vault.");
+    Environment.Exit(1);
+}
+FailIfConfigErrors();
 
 // --- Observability (ADR-0003): opt-in OTel export — no Otel:Endpoint → no SDK; same egress discipline as model endpoints (in-perimeter, never phone-home); spans are diagnostics, the audit chain is the evidence. ---
 bool otelEnabled = false;
@@ -175,18 +188,8 @@ var rateCounterGlobal = new RateCounter();
 var rateCounterTeams = new RateCounter();
 int promptPreviewChars = OptionalNonNegativeInt("Audit:PromptPreviewChars", 0);
 
-// All config parsed — one fail-closed refusal covering every section (misconfig → refuse to start).
-if (configErrors.Count > 0)
-{
-    Console.Error.WriteLine("covenant: refusing to start (fail-closed). Missing or invalid configuration:");
-    foreach (var e in configErrors) Console.Error.WriteLine($"  {e}");
-    Console.Error.WriteLine();
-    Console.Error.WriteLine("dev:  dotnet user-secrets set \"OpenAI:ApiKey\" \"<value>\" --project src/Covenant.Host");
-    Console.Error.WriteLine("      (see README-SCAFFOLD.md §4 — user-secrets load only in the Development");
-    Console.Error.WriteLine("      environment, which Properties/launchSettings.json sets for local runs)");
-    Console.Error.WriteLine("prod: env vars (OpenAI__ApiKey, Admin__Token, Budget__GlobalCapUsd) or the customer vault.");
-    Environment.Exit(1);
-}
+// Second gate: every later section (pricing, routing, cache, rate limits, preview) has parsed by now.
+FailIfConfigErrors();
 
 var auditSink = new FileAuditSink(auditPath);
 var killSwitch = new KillSwitch();

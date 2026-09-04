@@ -51,7 +51,8 @@ public sealed class HttpMappingTests : IClassFixture<WebApplicationFactory<Progr
         Assert.Equal(HttpStatusCode.BadGateway, first.StatusCode);
         Assert.Contains("upstream_error", await first.Content.ReadAsStringAsync());
 
-        // Request 2: over the per-team cap → 429, buffered.
+        // Request 2: over the per-team cap → 429, buffered. (Known ~ms/60s flake: a real minute
+        // boundary between requests 1 and 2 resets the window; accepted, documented.)
         var second = await _client.PostAsync("/v1/chat/completions", Chat("hello again"));
         Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
         Assert.Contains("rate_limited", await second.Content.ReadAsStringAsync());
