@@ -27,6 +27,13 @@ dotnet build
 dotnet test
 ```
 
+Coverage (target: ≥60% line coverage on src/, governance hardest):
+```
+dotnet test --collect:"XPlat Code Coverage"
+# summary: the generated coverage.cobertura.xml under tests/Covenant.Tests/TestResults/<guid>/
+grep -o 'line-rate="[0-9.]*"' tests/Covenant.Tests/TestResults/*/coverage.cobertura.xml | head -1
+```
+
 The tests that must pass, hardest first:
 - `Pii_request_is_denied_never_reaches_public_provider_and_is_audited` — fail-closed. This one is the
   product. It uses a tripwire client that throws if PII ever reaches a public provider.
