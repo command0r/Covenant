@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Covenant.Host;
@@ -9,12 +10,62 @@ public sealed class OpenAiChatRequest
     [JsonPropertyName("model")] public string? Model { get; set; }
     [JsonPropertyName("messages")] public List<OpenAiMessage> Messages { get; set; } = [];
     [JsonPropertyName("stream")] public bool? Stream { get; set; }
+    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; set; }
+    [JsonPropertyName("max_completion_tokens")] public int? MaxCompletionTokens { get; set; }
+    /// <summary>Everything else the client sent. Inspected by OpenAiWire.Unsupported so that features
+    /// governance cannot see (tools, functions) are refused, never silently dropped.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
 }
 
 public sealed class OpenAiMessage
 {
     [JsonPropertyName("role")] public string Role { get; set; } = "user";
-    [JsonPropertyName("content")] public string Content { get; set; } = "";
+    /// <summary>String in the classic protocol; an array of content parts (text/image_url/…) in the
+    /// multimodal one. Bound raw so ingress can refuse anything but text — see OpenAiWire.</summary>
+    [JsonPropertyName("content")] public JsonElement? Content { get; set; }
+    [JsonPropertyName("tool_calls"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public JsonElement? ToolCalls { get; set; }
+}
+
+/// <summary>Pure OpenAI-wire ↔ canonical helpers — unit-tested without a server.</summary>
+public static class OpenAiWire
+{
+    private static readonly string[] UnsupportedTopLevel = ["tools", "tool_choice", "functions", "function_call"];
+
+    /// <summary>Why this request cannot be governed, or null if it is plain text chat.</summary>
+    public static string? Unsupported(OpenAiChatRequest r)
+    {
+        if (r.Extra is { } extra)
+            foreach (var key in UnsupportedTopLevel)
+                if (extra.TryGetValue(key, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+                    return $"'{key}' (tool use is not yet governed)";
+        foreach (var m in r.Messages)
+        {
+            if (m.ToolCalls is { ValueKind: not (JsonValueKind.Null or JsonValueKind.Undefined) })
+                return "'tool_calls' (tool use is not yet governed)";
+            if (string.Equals(m.Role, "tool", StringComparison.OrdinalIgnoreCase))
+                return "role 'tool' (tool use is not yet governed)";
+            if (m.Content is { ValueKind: JsonValueKind.Array } parts)
+                foreach (var p in parts.EnumerateArray())
+                {
+                    var type = p.ValueKind == JsonValueKind.Object && p.TryGetProperty("type", out var t) ? t.GetString() : null;
+                    if (type != "text") return $"content part '{type ?? "?"}' (only text can be classified)";
+                }
+        }
+        return null;
+    }
+
+    /// <summary>Text of a message: a string, or the concatenation of text parts (Unsupported already
+    /// guaranteed there are no other kinds).</summary>
+    public static string Text(OpenAiMessage m) => m.Content switch
+    {
+        { ValueKind: JsonValueKind.String } s => s.GetString() ?? "",
+        { ValueKind: JsonValueKind.Array } parts => string.Concat(parts.EnumerateArray()
+            .Select(p => p.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "")),
+        _ => "",
+    };
+
+    /// <summary>Response content is always a string on this wire.</summary>
+    public static JsonElement TextElement(string s) => JsonSerializer.SerializeToElement(s, CovenantJsonContext.Default.String);
 }
 
 public sealed class OpenAiChatResponse
@@ -104,6 +155,7 @@ public sealed class ResetResponse
     [JsonPropertyName("archived_to")] public string? ArchivedTo { get; set; }
 }
 
+[JsonSerializable(typeof(string))]
 [JsonSerializable(typeof(OpenAiChatRequest))]
 [JsonSerializable(typeof(OpenAiChatResponse))]
 [JsonSerializable(typeof(OpenAiChatChunk))]

@@ -11,7 +11,9 @@ namespace Covenant.Host;
 public sealed class AnthropicMessagesRequest
 {
     [JsonPropertyName("model")] public string? Model { get; set; }
-    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; set; }   // accepted; not yet forwarded
+    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; set; }
+    /// <summary>Everything else (tools, tool_choice, …) — inspected by AnthropicWire.Unsupported.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
     [JsonPropertyName("stream")] public bool? Stream { get; set; }
     [JsonPropertyName("system")] public JsonElement? System { get; set; }
     [JsonPropertyName("messages")] public List<AnthropicWireMessage> Messages { get; set; } = [];
@@ -65,7 +67,26 @@ public sealed class AnthropicErrorBody
 /// <summary>Pure Anthropic-wire ↔ canonical mapping — unit-tested without a server.</summary>
 public static class AnthropicWire
 {
-    /// <summary>Normalizes string-or-block-array content to plain text; non-text blocks are ignored.</summary>
+    /// <summary>Why this request cannot be governed (image/document/tool blocks, tool definitions), or null.</summary>
+    public static string? Unsupported(AnthropicMessagesRequest r)
+    {
+        if (r.Extra is { } extra)
+            foreach (var key in new[] { "tools", "tool_choice" })
+                if (extra.TryGetValue(key, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
+                    return $"'{key}' (tool use is not yet governed)";
+        foreach (var block in r.Messages.Select(m => m.Content).Append(r.System ?? default))
+        {
+            if (block.ValueKind != JsonValueKind.Array) continue;
+            foreach (var b in block.EnumerateArray())
+            {
+                var type = b.ValueKind == JsonValueKind.Object && b.TryGetProperty("type", out var t) ? t.GetString() : null;
+                if (type != "text") return $"content block '{type ?? "?"}' (only text can be classified)";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Normalizes string-or-block-array content to plain text (Unsupported already refused non-text blocks).</summary>
     public static string ExtractText(JsonElement content) => content.ValueKind switch
     {
         JsonValueKind.String => content.GetString() ?? "",
@@ -109,6 +130,7 @@ public static class AnthropicWire
         DenialKind.Unauthenticated => ("authentication_error", StatusCodes.Status401Unauthorized),
         DenialKind.RateLimited => ("rate_limit_error", StatusCodes.Status429TooManyRequests),
         DenialKind.UpstreamFailure => ("api_error", StatusCodes.Status502BadGateway),
+        DenialKind.Unsupported => ("invalid_request_error", StatusCodes.Status400BadRequest),
         _ => ("permission_error", StatusCodes.Status403Forbidden),
     };
 

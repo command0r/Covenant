@@ -250,6 +250,7 @@ builder.Services.AddSingleton(sp => new InferencePipeline(
     new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
         promptPreviewChars),
     new AuthStage(new AuthConfig { AllowAnonymous = allowAnonymous, Keys = apiKeys }), // auth first
+    new ShapeStage(),                                // refuse shapes governance can't see (images, tools) — audited
     new ClassifyStage(new RegexDataClassifier()),    // classify
     new PolicyStage(new PolicyEngine(policy, new RoutingOptions
     {
@@ -297,7 +298,8 @@ app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipel
         UseCase: http.Request.Headers["X-Covenant-UseCase"].FirstOrDefault() ?? "unknown");
 
     var request = new InferenceRequest(principal, AnthropicWire.ToCanonical(body), body.Model, tags,
-        Stream: body.Stream == true, Credential: credential);
+        Stream: body.Stream == true, Credential: credential,
+        MaxOutputTokens: body.MaxTokens, UnsupportedFeature: AnthropicWire.Unsupported(body));
     var ctx = new InferenceContext(request);
     var msgId = $"msg_{Guid.NewGuid():n}";
 
@@ -395,11 +397,13 @@ app.MapPost("/v1/chat/completions",
 
     var request = new InferenceRequest(
         Principal: principal,
-        Messages: body.Messages.Select(m => new ChatMessage(ParseRole(m.Role), m.Content)).ToList(),
+        Messages: body.Messages.Select(m => new ChatMessage(ParseRole(m.Role), OpenAiWire.Text(m))).ToList(),
         RequestedModel: body.Model,
         Attribution: tags,
         Stream: body.Stream == true,
-        Credential: credential);
+        Credential: credential,
+        MaxOutputTokens: body.MaxCompletionTokens ?? body.MaxTokens,
+        UnsupportedFeature: OpenAiWire.Unsupported(body));
 
     var ctx = new InferenceContext(request);
 
@@ -478,7 +482,7 @@ app.MapPost("/v1/chat/completions",
     var dto = new OpenAiChatResponse
     {
         Model = r.ServedByModel,
-        Choices = [new OpenAiChoice { Index = 0, Message = new OpenAiMessage { Role = "assistant", Content = r.Message.Content } }],
+        Choices = [new OpenAiChoice { Index = 0, Message = new OpenAiMessage { Role = "assistant", Content = OpenAiWire.TextElement(r.Message.Content) } }],
         Usage = new OpenAiUsage
         {
             PromptTokens = r.Usage.InputTokens,
@@ -497,6 +501,7 @@ static IResult DenialResult(InferenceContext ctx)
         DenialKind.Unauthenticated => ("unauthenticated", StatusCodes.Status401Unauthorized),
         DenialKind.UpstreamFailure => ("upstream_error", StatusCodes.Status502BadGateway),
         DenialKind.RateLimited => ("rate_limited", StatusCodes.Status429TooManyRequests),
+        DenialKind.Unsupported => ("unsupported", StatusCodes.Status400BadRequest),
         _ => ("denied", StatusCodes.Status403Forbidden),
     };
     return Results.Json(
