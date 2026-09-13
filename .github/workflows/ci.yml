@@ -40,7 +40,7 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
 
       - name: Test with coverage
-        run: dotnet test -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+        run: dotnet test -c Release --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings --results-directory ./coverage
 
       - name: Enforce coverage threshold (line >= 0.80)
         run: |

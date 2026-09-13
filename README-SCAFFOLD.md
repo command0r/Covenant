@@ -27,9 +27,9 @@ dotnet build
 dotnet test
 ```
 
-Coverage (target: ≥60% line coverage on src/, governance hardest):
+Coverage (CI gate: ≥80% line coverage on src/, scoped by tests/coverlet.runsettings — same command as CI):
 ```
-dotnet test --collect:"XPlat Code Coverage"
+dotnet test --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings
 # summary: the generated coverage.cobertura.xml under tests/Covenant.Tests/TestResults/<guid>/
 grep -o 'line-rate="[0-9.]*"' tests/Covenant.Tests/TestResults/*/coverage.cobertura.xml | head -1
 ```
