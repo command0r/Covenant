@@ -59,4 +59,17 @@ public class RoutingTests
         var denied = Engine().Evaluate(Ctx("hi", requestedModel: "claude-3-opus"));
         Assert.Equal(PolicyEffect.Deny, denied.Effect);      // …but only within the permitted set
     }
+
+    [Fact]
+    public void Denial_reason_bounds_the_client_supplied_model_id()
+    {
+        // The reason is evidence: an unbounded model string must not land in the audit chain verbatim.
+        var huge = new string('x', 5000) + "\u0007";
+        var outcome = Engine().Evaluate(Ctx("hi", requestedModel: huge));
+
+        Assert.Equal(PolicyEffect.Deny, outcome.Effect);
+        Assert.True(outcome.Reason.Length < 200);
+        Assert.Contains("truncated", outcome.Reason);
+        Assert.DoesNotContain("\u0007", outcome.Reason, StringComparison.Ordinal);   // ordinal: ICU treats control chars as ignorable, so culture IndexOf "finds" them anywhere
+    }
 }

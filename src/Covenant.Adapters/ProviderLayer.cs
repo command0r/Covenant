@@ -35,7 +35,7 @@ public sealed class ProviderCallStage(IChatClientRegistry registry) : IPipelineS
         }
 
         var messages = ctx.Request.Messages.Select(ToMeai).ToList();
-        var options = new MEAI.ChatOptions { ModelId = route.ModelId };
+        var options = new MEAI.ChatOptions { ModelId = route.ModelId, MaxOutputTokens = ctx.Request.MaxOutputTokens };
 
         // ADR-0002: streaming is an emission mode, not a different pipeline. The stream is consumed
         // HERE so attribution, budget, and audit run on the normal unwind with real usage.

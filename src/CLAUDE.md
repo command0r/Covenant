@@ -13,7 +13,7 @@ Governance and Adapters never depend on each other; they meet only through Core'
 ## The three patterns that define this codebase
 1. **Canonical schema at the center.** Everything normalizes to one internal model. Provider-specific shapes exist *only* inside adapters. If a provider concept leaks past an adapter, that's a bug.
 2. **Adapter contract.** Each provider implements one interface: canonical→request, response→canonical, SSE stream normalization, error mapping, token/usage accounting. Adding a provider is one adapter and nothing else. Start set: OpenAI, Anthropic, one self-hosted OpenAI-compatible (vLLM) target.
-3. **Pipeline = ordered middleware.** `auth → classify → policy → cache-lookup → route → budget/rate → provider-call → post-process → attribute → audit`. Governance features are *stages*, not special cases.
+3. **Pipeline = ordered middleware.** `auth → shape → classify → policy → cache-lookup → route → budget/rate → provider-call → post-process → attribute → audit`. Governance features are *stages*, not special cases.
 
 ## Ordering rules (non-obvious — do not reorder)
 - **Cache before route** — a hit skips the model call entirely.

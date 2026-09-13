@@ -26,7 +26,9 @@ public sealed record InferenceRequest(
     string? RequestedModel,
     AttributionTags Attribution,
     bool Stream = false,
-    string? Credential = null);
+    string? Credential = null,
+    int? MaxOutputTokens = null,
+    string? UnsupportedFeature = null);   // set by ingress when the wire carried something governance cannot see (images, tools) → denied in-pipeline, audited
 
 /// <summary>Who the pipeline decided the caller is: self-declared until the auth stage overwrites it
 /// on a valid key. Everything downstream reads THIS, never the raw request headers.</summary>

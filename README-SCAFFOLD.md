@@ -27,9 +27,9 @@ dotnet build
 dotnet test
 ```
 
-Coverage (target: ≥60% line coverage on src/, governance hardest):
+Coverage (CI gate: ≥80% line coverage on src/, scoped by tests/coverlet.runsettings — same command as CI):
 ```
-dotnet test --collect:"XPlat Code Coverage"
+dotnet test --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings
 # summary: the generated coverage.cobertura.xml under tests/Covenant.Tests/TestResults/<guid>/
 grep -o 'line-rate="[0-9.]*"' tests/Covenant.Tests/TestResults/*/coverage.cobertura.xml | head -1
 ```
@@ -215,8 +215,11 @@ from openai import OpenAI
 client = OpenAI(base_url="http://localhost:5100/v1", api_key="demo-key")
 client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": "hi"}])
 ```
-First slice speaks plain-text chat (buffered + SSE). Multimodal content and tool calls are not yet
-part of the wire surface.
+Wire surface: plain-text chat (buffered + SSE) on both dialects; `max_tokens` is forwarded to the
+model. Anything governance cannot inspect — image/file content parts, tool definitions, tool calls
+and results — is **refused with HTTP 400** (`unsupported` / `invalid_request_error`) and audited,
+never silently stripped: an image could carry PHI the classifier never saw. Tool-call governance
+is a future ADR.
 
 ## 6. Next
 - Run the **NativeAOT spike** from ADR-0001 (`PublishAot=true` in `Covenant.Host.csproj`) and record the

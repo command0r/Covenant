@@ -11,7 +11,9 @@ namespace Covenant.Host;
 public sealed class AnthropicMessagesRequest
 {
     [JsonPropertyName("model")] public string? Model { get; set; }
-    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; set; }   // accepted; not yet forwarded
+    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; set; }
+    /// <summary>Everything else (tools, tool_choice, …) — inspected by AnthropicWire.Unsupported.</summary>
+    [JsonExtensionData] public Dictionary<string, JsonElement>? Extra { get; set; }
     [JsonPropertyName("stream")] public bool? Stream { get; set; }
     [JsonPropertyName("system")] public JsonElement? System { get; set; }
     [JsonPropertyName("messages")] public List<AnthropicWireMessage> Messages { get; set; } = [];
@@ -65,16 +67,45 @@ public sealed class AnthropicErrorBody
 /// <summary>Pure Anthropic-wire ↔ canonical mapping — unit-tested without a server.</summary>
 public static class AnthropicWire
 {
-    /// <summary>Normalizes string-or-block-array content to plain text; non-text blocks are ignored.</summary>
+    /// <summary>Why this request cannot be governed (image/document/tool blocks, tool definitions), or null.</summary>
+    private static readonly string[] UnsupportedTopLevel = ["tools", "tool_choice", "mcp_servers", "thinking", "container"];
+
+    public static string? Unsupported(AnthropicMessagesRequest r)
+    {
+        if (r.Extra is { } extra)
+            foreach (var key in UnsupportedTopLevel)
+                if (extra.TryGetValue(key, out var v) && WireLabels.Present(v))
+                    return $"'{key}' (not yet governed)";
+        if (r.Messages is null) return "'messages' is null";
+        if (r.Messages.Any(m => m is null)) return "a message is null";
+        foreach (var block in r.Messages.Select(m => m.Content).Append(r.System ?? default))
+        {
+            switch (block.ValueKind)
+            {
+                case JsonValueKind.String or JsonValueKind.Null or JsonValueKind.Undefined:
+                    break;
+                case JsonValueKind.Array:
+                    foreach (var b in block.EnumerateArray())
+                    {
+                        if (WireLabels.PartType(b) is var type && type != "text")
+                            return $"content block '{WireLabels.Safe(type)}' (only text can be classified)";
+                        if (!WireLabels.HasStringText(b))
+                            return "content block 'text' without a string text field";
+                    }
+                    break;
+                default:
+                    return "content is neither a string nor an array of blocks";
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Normalizes string-or-block-array content to plain text (Unsupported already refused non-text blocks).</summary>
     public static string ExtractText(JsonElement content) => content.ValueKind switch
     {
         JsonValueKind.String => content.GetString() ?? "",
-        JsonValueKind.Array => string.Concat(
-            content.EnumerateArray()
-                .Where(b => b.ValueKind == JsonValueKind.Object
-                    && b.TryGetProperty("type", out var t) && t.GetString() == "text"
-                    && b.TryGetProperty("text", out _))
-                .Select(b => b.GetProperty("text").GetString() ?? "")),
+        JsonValueKind.Array => string.Concat(content.EnumerateArray()
+            .Where(b => WireLabels.PartType(b) == "text").Select(WireLabels.TextOf)),
         _ => "",
     };
 
@@ -83,8 +114,8 @@ public static class AnthropicWire
         var messages = new List<ChatMessage>();
         if (request.System is { } sys && ExtractText(sys) is { Length: > 0 } sysText)
             messages.Add(new ChatMessage(ChatRole.System, sysText));
-        foreach (var m in request.Messages)
-            messages.Add(new ChatMessage(
+        foreach (var m in request.Messages ?? [])
+            if (m is not null) messages.Add(new ChatMessage(
                 string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase) ? ChatRole.Assistant : ChatRole.User,
                 ExtractText(m.Content)));
         return messages;
@@ -109,6 +140,7 @@ public static class AnthropicWire
         DenialKind.Unauthenticated => ("authentication_error", StatusCodes.Status401Unauthorized),
         DenialKind.RateLimited => ("rate_limit_error", StatusCodes.Status429TooManyRequests),
         DenialKind.UpstreamFailure => ("api_error", StatusCodes.Status502BadGateway),
+        DenialKind.Unsupported => ("invalid_request_error", StatusCodes.Status400BadRequest),
         _ => ("permission_error", StatusCodes.Status403Forbidden),
     };
 

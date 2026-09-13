@@ -62,7 +62,7 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
             return;
         }
 
-        var key = Key(ctx.Identity.Tags.Team, route.ModelId, ctx.Request.Messages);
+        var key = Key(ctx.Identity.Tags.Team, route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens);
         if (cache.TryGet(key, out var hit))
         {
             ctx.ServedFromCache = true;
@@ -78,9 +78,10 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
             cache.Store(key, fresh, TimeSpan.FromSeconds(config.TtlSeconds), config.MaxEntries);
     }
 
-    private static string Key(string team, string modelId, IReadOnlyList<ChatMessage> messages)
+    private static string Key(string team, string modelId, IReadOnlyList<ChatMessage> messages, int? maxOutputTokens)
     {
-        var sb = new StringBuilder(team).Append('\u001f').Append(modelId);
+        // max_tokens is part of the contract: a 400-token cached answer must not serve a max_tokens=5 ask.
+        var sb = new StringBuilder(team).Append('\u001f').Append(modelId).Append('\u001f').Append(maxOutputTokens?.ToString() ?? "");
         foreach (var m in messages) sb.Append('\u001f').Append(m.Role).Append(':').Append(m.Content);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
     }

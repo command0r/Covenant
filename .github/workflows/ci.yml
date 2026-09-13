@@ -40,13 +40,13 @@ jobs:
           restore-keys: nuget-${{ runner.os }}-
 
       - name: Test with coverage
-        run: dotnet test -c Release --collect:"XPlat Code Coverage" --results-directory ./coverage
+        run: dotnet test -c Release --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings --results-directory ./coverage
 
-      - name: Enforce coverage threshold (line >= 0.60)
+      - name: Enforce coverage threshold (line >= 0.80)
         run: |
           COUNT=$(find ./coverage -name 'coverage.cobertura.xml' | wc -l)
           test "$COUNT" -eq 1 || { echo "expected exactly 1 coverage report (single test project), found $COUNT"; exit 1; }
           FILE=$(find ./coverage -name 'coverage.cobertura.xml')
           RATE=$(grep -o 'line-rate="[0-9.]*"' "$FILE" | head -1 | grep -o '[0-9.]*')
-          echo "line coverage: $RATE (threshold 0.60)"
-          awk -v r="$RATE" 'BEGIN { exit (r >= 0.60 ? 0 : 1) }'
+          echo "line coverage: $RATE (threshold 0.80)"
+          awk -v r="$RATE" 'BEGIN { exit (r >= 0.80 ? 0 : 1) }'

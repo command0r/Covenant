@@ -71,9 +71,22 @@ public class CacheTests
         return (pipeline, client, sink);
     }
 
-    private static InferenceContext Ctx(string content, string team = "platform") =>
+    private static InferenceContext Ctx(string content, string team = "platform", int? maxTokens = null) =>
         new(new InferenceRequest("tester", [new ChatMessage(ChatRole.User, content)], null,
-            new AttributionTags(team, "w", "u")));
+            new AttributionTags(team, "w", "u"), MaxOutputTokens: maxTokens));
+
+    [Fact]
+    public async Task Different_max_tokens_is_a_different_contract_so_no_cache_hit()
+    {
+        var (pipeline, client, _) = Build(new ResponseCache(), ttlSeconds: 60);
+
+        await pipeline.ExecuteAsync(Ctx("classify this", maxTokens: 400), default);
+        var capped = Ctx("classify this", maxTokens: 5);
+        await pipeline.ExecuteAsync(capped, default);
+
+        Assert.Equal(2, client.Calls);                                   // a 400-token answer never serves a 5-token ask
+        Assert.False(capped.ServedFromCache);
+    }
 
     [Fact]
     public async Task Identical_request_hits_cache_costs_zero_and_never_reaches_the_provider_again()
