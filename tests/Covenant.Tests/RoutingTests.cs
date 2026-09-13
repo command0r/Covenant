@@ -70,6 +70,6 @@ public class RoutingTests
         Assert.Equal(PolicyEffect.Deny, outcome.Effect);
         Assert.True(outcome.Reason.Length < 200);
         Assert.Contains("truncated", outcome.Reason);
-        Assert.DoesNotContain("\u0007", outcome.Reason);
+        Assert.DoesNotContain("\u0007", outcome.Reason, StringComparison.Ordinal);   // ordinal: ICU treats control chars as ignorable, so culture IndexOf "finds" them anywhere
     }
 }
