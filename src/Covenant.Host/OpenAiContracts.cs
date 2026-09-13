@@ -41,10 +41,12 @@ public static class OpenAiWire
             foreach (var key in UnsupportedTopLevel)
                 if (extra.TryGetValue(key, out var v) && WireLabels.Present(v))
                     return $"'{key}' (not yet governed)";
-        if (r.Extra is { } e2 && e2.TryGetValue("n", out var n) && n.ValueKind == JsonValueKind.Number && n.TryGetInt32(out var nn) && nn > 1)
+        if (r.Extra is { } e2 && e2.TryGetValue("n", out var n) && n.ValueKind == JsonValueKind.Number && n.TryGetDouble(out var nn) && nn > 1)
             return "'n' > 1 (one governed choice per request)";
+        if (r.Messages is null) return "'messages' is null";
         foreach (var m in r.Messages)
         {
+            if (m is null) return "a message is null";
             if (m.ToolCalls is { } tc && WireLabels.Present(tc))
                 return "'tool_calls' (not yet governed)";
             if (string.Equals(m.Role, "tool", StringComparison.OrdinalIgnoreCase))

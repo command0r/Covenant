@@ -76,6 +76,8 @@ public static class AnthropicWire
             foreach (var key in UnsupportedTopLevel)
                 if (extra.TryGetValue(key, out var v) && WireLabels.Present(v))
                     return $"'{key}' (not yet governed)";
+        if (r.Messages is null) return "'messages' is null";
+        if (r.Messages.Any(m => m is null)) return "a message is null";
         foreach (var block in r.Messages.Select(m => m.Content).Append(r.System ?? default))
         {
             switch (block.ValueKind)
@@ -112,8 +114,8 @@ public static class AnthropicWire
         var messages = new List<ChatMessage>();
         if (request.System is { } sys && ExtractText(sys) is { Length: > 0 } sysText)
             messages.Add(new ChatMessage(ChatRole.System, sysText));
-        foreach (var m in request.Messages)
-            messages.Add(new ChatMessage(
+        foreach (var m in request.Messages ?? [])
+            if (m is not null) messages.Add(new ChatMessage(
                 string.Equals(m.Role, "assistant", StringComparison.OrdinalIgnoreCase) ? ChatRole.Assistant : ChatRole.User,
                 ExtractText(m.Content)));
         return messages;

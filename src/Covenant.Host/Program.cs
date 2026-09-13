@@ -397,7 +397,7 @@ app.MapPost("/v1/chat/completions",
 
     var request = new InferenceRequest(
         Principal: principal,
-        Messages: body.Messages.Select(m => new ChatMessage(ParseRole(m.Role), OpenAiWire.Text(m))).ToList(),
+        Messages: (body.Messages ?? []).Where(m => m is not null).Select(m => new ChatMessage(ParseRole(m.Role), OpenAiWire.Text(m))).ToList(),
         RequestedModel: body.Model,
         Attribution: tags,
         Stream: body.Stream == true,
@@ -648,7 +648,7 @@ app.MapGet("/admin/ui", (HttpContext http) =>
 
 app.Run();
 
-static ChatRole ParseRole(string role) => role.ToLowerInvariant() switch
+static ChatRole ParseRole(string? role) => (role ?? "user").ToLowerInvariant() switch
 {
     "system" => ChatRole.System,
     "assistant" => ChatRole.Assistant,

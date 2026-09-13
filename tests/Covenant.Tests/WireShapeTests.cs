@@ -60,11 +60,14 @@ public class WireShapeTests
     [InlineData("""{"messages":[{"role":"user","content":[{"type":"text","text":5}]}]}""")]    // text not a string
     [InlineData("""{"messages":[{"role":"user","content":{"weird":true}}]}""")]                // content an object
     [InlineData("""{"messages":[{"role":"user","content":[7,"x",null]}]}""")]                  // parts not objects
+    [InlineData("""{"messages":null}""")]
+    [InlineData("""{"messages":[null]}""")]
+    [InlineData("""{"messages":[{"role":null,"content":"hi"}],"n":2.0}""")]                     // null role, non-integer n>1
     public void OpenAi_malformed_content_is_refused_never_thrown(string json)
     {
         var r = JsonSerializer.Deserialize(json, CovenantJsonContext.Default.OpenAiChatRequest)!;
         var reason = OpenAiWire.Unsupported(r);                          // must not throw (a throw = un-audited 500)
-        _ = OpenAiWire.Text(r.Messages[0]);
+        if (r.Messages is [{ } first]) _ = OpenAiWire.Text(first);
         Assert.NotNull(reason);
     }
 
@@ -96,6 +99,8 @@ public class WireShapeTests
     [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":[{"type":2}]}]}""")]
     [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":{"x":1}}]}""")]
     [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":[{"type":"text","text":[1]}]}]}""")]
+    [InlineData("""{"max_tokens":5,"messages":null}""")]
+    [InlineData("""{"max_tokens":5,"messages":[null]}""")]
     public void Anthropic_malformed_content_is_refused_never_thrown(string json)
     {
         var r = JsonSerializer.Deserialize(json, CovenantJsonContext.Default.AnthropicMessagesRequest)!;

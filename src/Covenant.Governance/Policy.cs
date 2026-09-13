@@ -38,7 +38,7 @@ public sealed class PolicyEngine(PolicyConfig config, RoutingOptions? routing = 
             var match = routes.FirstOrDefault(r => string.Equals(r.ModelId, requested, StringComparison.OrdinalIgnoreCase));
             return match is not null
                 ? PolicyOutcome.Allow(match)
-                : PolicyOutcome.Deny($"model '{requested}' not permitted for classification '{ctx.Classification}'");
+                : PolicyOutcome.Deny($"model '{Evidence.Bounded(requested)}' not permitted for classification '{ctx.Classification}'");
         }
 
         if (routes.Count == 1)
