@@ -25,7 +25,7 @@ N_DETAIL = [
     ("ingress", "caller", 310, 180, 150, 200, ["Ingress", "/v1/chat/completions", "/v1/messages", "/v1/models", "", "→ one canonical request"], {}),
 
     ("audit", "evidence", 490, 160, 470, 250, ["Audit stage — outermost; records allow, deny, and error alike", "metadata + SHA-256 prompt fingerprint — never content"], {"container": True}),
-    ("s_auth", "govern", 510, 210, 100, 55, ["Auth", "virtual API keys"], {}),
+    ("s_auth", "govern", 510, 210, 100, 55, ["Auth + shape", "keys · text only"], {}),
     ("s_classify", "govern", 620, 210, 100, 55, ["Classify", "PII / PHI"], {}),
     ("s_policy", "govern", 730, 210, 100, 55, ["Policy", "route, complexity"], {}),
     ("s_cache", "govern", 840, 210, 100, 55, ["Cache", "team-scoped TTL"], {}),
@@ -34,7 +34,7 @@ N_DETAIL = [
     ("s_provider", "provider", 620, 320, 100, 55, ["Provider call", "adapter:model"], {}),
     ("s_attr", "evidence", 510, 320, 100, 55, ["Attribute cost", "team, workflow"], {}),
 
-    ("denied", "denied", 490, 440, 210, 70, ["Denied — fail-closed", "401 · 403 · 429 · 502", "no provider call, still audited"], {}),
+    ("denied", "denied", 490, 440, 210, 70, ["Denied — fail-closed", "400 · 401 · 403 · 429 · 502", "no provider call, still audited"], {}),
     ("response", "caller", 730, 440, 230, 70, ["Response + usage", "OpenAI or Anthropic wire", "buffered or SSE stream"], {}),
 
     ("log", "evidence", 310, 560, 200, 80, ["Hash-chained audit log", "append-only · SHA-256 links", "tampered chain refuses boot"], {}),
@@ -160,7 +160,7 @@ def svg(embed_xml):
 N_HL = [
     ("perimeter", "none", 250, 50, 700, 420, ["Customer perimeter — nothing leaves except allow-listed model egress"], {"container": True, "dashed": True}),
     ("clients", "caller", 30, 230, 180, 90, ["Any AI client", "OpenAI or Anthropic wire", "SDKs, Open WebUI, agents"], {}),
-    ("covenant", "govern", 290, 120, 360, 150, ["Covenant — one governed pipeline", "auth → classify → policy → cache → rate limit", "→ budget / kill switch → provider → attribute cost", "", "fail-closed: no match, no call"], {}),
+    ("covenant", "govern", 290, 120, 360, 150, ["Covenant — one governed pipeline", "auth → shape → classify → policy → cache → rate limit", "→ budget / kill switch → provider → attribute cost", "", "fail-closed: no match, no call"], {}),
     ("evidence", "evidence", 290, 320, 360, 110, ["Tamper-evident evidence", "hash-chained audit log + anchored head", "spend ledger · evidence export · dashboard"], {}),
     ("local", "provider", 700, 320, 210, 90, ["In-perimeter model", "Ollama / vLLM", "PII / PHI never leave"], {}),
     ("external", "provider", 1000, 130, 200, 110, ["Allow-listed providers", "OpenAI · Anthropic", "egress only to these"], {}),

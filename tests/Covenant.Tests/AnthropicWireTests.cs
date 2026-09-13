@@ -46,7 +46,8 @@ public class AnthropicWireTests
 
         var canonical = AnthropicWire.ToCanonical(request);
 
-        Assert.Equal("part one, part two", canonical[0].Content);       // image block dropped, text kept
+        // Defence in depth only: ingress refuses non-text blocks (AnthropicWire.Unsupported) before this runs.
+        Assert.Equal("part one, part two", canonical[0].Content);
     }
 
     [Fact]
@@ -96,6 +97,7 @@ public class AnthropicWireTests
     [InlineData(DenialKind.RateLimited, "rate_limit_error", 429)]
     [InlineData(DenialKind.UpstreamFailure, "api_error", 502)]
     [InlineData(DenialKind.Governance, "permission_error", 403)]
+    [InlineData(DenialKind.Unsupported, "invalid_request_error", 400)]
     public void Denial_kinds_map_to_anthropics_error_taxonomy(DenialKind kind, string errorType, int status)
     {
         var (type, code) = AnthropicWire.MapDenial(kind);

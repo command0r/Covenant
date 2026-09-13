@@ -312,6 +312,7 @@ function clsPill(c) {
 function explain(reason) {
   const r = (reason || '').toLowerCase();
   if (r.includes('no adapter registered')) return 'Policy routed this to the in-perimeter model, but none is configured — so it was refused rather than sent to a public provider. That is fail-closed working. To serve this class of data, configure Local:Endpoint.';
+  if (r.includes('unsupported request shape') || r.includes('max_tokens must be')) return 'The request carried something governance cannot inspect (an image, a file, tool definitions or calls) or an invalid cap. It was refused (HTTP 400) rather than sent with the ungovernable part silently stripped.';
   if (r.includes('kill switch')) return 'An operator engaged the kill switch; all inference stops until it is disengaged (Overview tab).';
   if (r.includes('global budget')) return 'The appliance-wide spend cap is exhausted. Raise Budget:GlobalCapUsd, or archive & reset in Settings.';
   if (r.includes('budget exhausted for team')) return 'This team hit its spend cap. Raise its cap, or archive & reset in Settings.';

@@ -68,19 +68,31 @@ public sealed class AnthropicErrorBody
 public static class AnthropicWire
 {
     /// <summary>Why this request cannot be governed (image/document/tool blocks, tool definitions), or null.</summary>
+    private static readonly string[] UnsupportedTopLevel = ["tools", "tool_choice", "mcp_servers", "thinking", "container"];
+
     public static string? Unsupported(AnthropicMessagesRequest r)
     {
         if (r.Extra is { } extra)
-            foreach (var key in new[] { "tools", "tool_choice" })
-                if (extra.TryGetValue(key, out var v) && v.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined))
-                    return $"'{key}' (tool use is not yet governed)";
+            foreach (var key in UnsupportedTopLevel)
+                if (extra.TryGetValue(key, out var v) && WireLabels.Present(v))
+                    return $"'{key}' (not yet governed)";
         foreach (var block in r.Messages.Select(m => m.Content).Append(r.System ?? default))
         {
-            if (block.ValueKind != JsonValueKind.Array) continue;
-            foreach (var b in block.EnumerateArray())
+            switch (block.ValueKind)
             {
-                var type = b.ValueKind == JsonValueKind.Object && b.TryGetProperty("type", out var t) ? t.GetString() : null;
-                if (type != "text") return $"content block '{type ?? "?"}' (only text can be classified)";
+                case JsonValueKind.String or JsonValueKind.Null or JsonValueKind.Undefined:
+                    break;
+                case JsonValueKind.Array:
+                    foreach (var b in block.EnumerateArray())
+                    {
+                        if (WireLabels.PartType(b) is var type && type != "text")
+                            return $"content block '{WireLabels.Safe(type)}' (only text can be classified)";
+                        if (!WireLabels.HasStringText(b))
+                            return "content block 'text' without a string text field";
+                    }
+                    break;
+                default:
+                    return "content is neither a string nor an array of blocks";
             }
         }
         return null;
@@ -90,12 +102,8 @@ public static class AnthropicWire
     public static string ExtractText(JsonElement content) => content.ValueKind switch
     {
         JsonValueKind.String => content.GetString() ?? "",
-        JsonValueKind.Array => string.Concat(
-            content.EnumerateArray()
-                .Where(b => b.ValueKind == JsonValueKind.Object
-                    && b.TryGetProperty("type", out var t) && t.GetString() == "text"
-                    && b.TryGetProperty("text", out _))
-                .Select(b => b.GetProperty("text").GetString() ?? "")),
+        JsonValueKind.Array => string.Concat(content.EnumerateArray()
+            .Where(b => WireLabels.PartType(b) == "text").Select(WireLabels.TextOf)),
         _ => "",
     };
 

@@ -45,11 +45,63 @@ public class WireShapeTests
         Assert.Contains(expected, OpenAiWire.Unsupported(r));
     }
 
-    [Fact]
-    public void OpenAi_null_tools_is_not_a_tool_request()
+    [Theory]
+    [InlineData("""{"messages":[{"role":"user","content":"hi"}],"tools":null}""")]
+    [InlineData("""{"messages":[{"role":"user","content":"hi"}],"tools":[]}""")]        // clients send tools: [] when tool use is off
+    [InlineData("""{"messages":[{"role":"user","content":"hi"}],"n":1,"temperature":0.2,"stream_options":{"include_usage":true}}""")]
+    public void OpenAi_absent_or_harmless_extras_are_not_refused(string json)
     {
-        var r = JsonSerializer.Deserialize("""{"messages":[{"role":"user","content":"hi"}],"tools":null}""", CovenantJsonContext.Default.OpenAiChatRequest)!;
+        var r = JsonSerializer.Deserialize(json, CovenantJsonContext.Default.OpenAiChatRequest)!;
         Assert.Null(OpenAiWire.Unsupported(r));
+    }
+
+    [Theory]
+    [InlineData("""{"messages":[{"role":"user","content":[{"type":1}]}]}""")]                 // type not a string
+    [InlineData("""{"messages":[{"role":"user","content":[{"type":"text","text":5}]}]}""")]    // text not a string
+    [InlineData("""{"messages":[{"role":"user","content":{"weird":true}}]}""")]                // content an object
+    [InlineData("""{"messages":[{"role":"user","content":[7,"x",null]}]}""")]                  // parts not objects
+    public void OpenAi_malformed_content_is_refused_never_thrown(string json)
+    {
+        var r = JsonSerializer.Deserialize(json, CovenantJsonContext.Default.OpenAiChatRequest)!;
+        var reason = OpenAiWire.Unsupported(r);                          // must not throw (a throw = un-audited 500)
+        _ = OpenAiWire.Text(r.Messages[0]);
+        Assert.NotNull(reason);
+    }
+
+    [Fact]
+    public void Denial_reasons_never_echo_client_bytes()
+    {
+        // The reason lands in the append-only audit chain: only allow-listed labels may appear in it.
+        const string secret = "ZZZ-secret-phi-ZZZ";
+        var o = JsonSerializer.Deserialize($$"""{"messages":[{"role":"user","content":[{"type":"{{secret}}"}]}]}""", CovenantJsonContext.Default.OpenAiChatRequest)!;
+        var a = JsonSerializer.Deserialize($$"""{"max_tokens":5,"messages":[{"role":"user","content":[{"type":"{{secret}}"}]}]}""", CovenantJsonContext.Default.AnthropicMessagesRequest)!;
+
+        Assert.DoesNotContain(secret, OpenAiWire.Unsupported(o));
+        Assert.DoesNotContain(secret, AnthropicWire.Unsupported(a));
+        Assert.Contains("unknown", OpenAiWire.Unsupported(o));
+        Assert.Contains("image_url", OpenAiWire.Unsupported(JsonSerializer.Deserialize(
+            """{"messages":[{"role":"user","content":[{"type":"image_url"}]}]}""", CovenantJsonContext.Default.OpenAiChatRequest)!));
+    }
+
+    [Theory]
+    [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":"hi"}],"tools":[]}""")]
+    [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"metadata":{"user_id":"u"}}""")]
+    public void Anthropic_absent_or_harmless_extras_are_not_refused(string json)
+    {
+        var r = JsonSerializer.Deserialize(json, CovenantJsonContext.Default.AnthropicMessagesRequest)!;
+        Assert.Null(AnthropicWire.Unsupported(r));
+    }
+
+    [Theory]
+    [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":[{"type":2}]}]}""")]
+    [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":{"x":1}}]}""")]
+    [InlineData("""{"max_tokens":5,"messages":[{"role":"user","content":[{"type":"text","text":[1]}]}]}""")]
+    public void Anthropic_malformed_content_is_refused_never_thrown(string json)
+    {
+        var r = JsonSerializer.Deserialize(json, CovenantJsonContext.Default.AnthropicMessagesRequest)!;
+        var reason = AnthropicWire.Unsupported(r);
+        _ = AnthropicWire.ToCanonical(r);
+        Assert.NotNull(reason);
     }
 
     [Theory]
@@ -159,6 +211,18 @@ public class WireShapeTests
 
         private static StringContent Body(string json) => new(json, Encoding.UTF8, "application/json");
 
+        /// <summary>The audit sink drains off the hot path — poll for the entry instead of sleeping.</summary>
+        private async Task<string> WaitForAuditAsync(string marker)
+        {
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (DateTime.UtcNow < deadline)
+            {
+                if (File.Exists(_auditPath) && await File.ReadAllTextAsync(_auditPath) is var s && s.Contains(marker)) return s;
+                await Task.Delay(25);
+            }
+            throw new TimeoutException($"audit entry '{marker}' not written within 5s");
+        }
+
         [Fact]
         public async Task OpenAi_image_content_is_400_unsupported_and_audited()
         {
@@ -170,11 +234,23 @@ public class WireShapeTests
             Assert.Contains("\"error\":\"unsupported\"", json);
             Assert.Contains("image_url", json);
 
-            await Task.Delay(300);                                        // audit drains off the hot path
-            var log = await File.ReadAllTextAsync(_auditPath);
-            Assert.Contains("unsupported request shape", log);
+            var log = await WaitForAuditAsync("unsupported request shape");
             Assert.Contains("shape-tester", log);                         // the resolved caller, not "anonymous"
             Assert.DoesNotContain("AAAA", log);                           // the image bytes never reach evidence
+        }
+
+        [Fact]
+        public async Task Client_supplied_type_label_never_reaches_response_or_evidence()
+        {
+            const string secret = "QQQ-not-for-evidence-QQQ";
+            var resp = await _client.PostAsync("/v1/chat/completions",
+                Body($$"""{"messages":[{"role":"user","content":[{"type":"{{secret}}","data":"x"}]}]}"""));
+            var json = await resp.Content.ReadAsStringAsync();
+
+            Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+            Assert.DoesNotContain(secret, json);
+            var log = await WaitForAuditAsync("unsupported request shape");
+            Assert.DoesNotContain(secret, log);
         }
 
         [Fact]
