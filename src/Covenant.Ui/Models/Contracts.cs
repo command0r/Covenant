@@ -29,6 +29,8 @@ public sealed class StatusReport
     [JsonPropertyName("prompt_preview_chars")] public int? PromptPreviewChars { get; set; }
     [JsonPropertyName("anchor")] public AnchorStatus? Anchor { get; set; }
     [JsonPropertyName("version")] public string? Version { get; set; }
+    // v2: the active configuration version every new request binds to.
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
 }
 
 public sealed class AnchorStatus
@@ -172,11 +174,17 @@ public sealed class RequestsResponse
 {
     [JsonPropertyName("segment")] public SegmentInfo Segment { get; set; } = new();
     [JsonPropertyName("items")] public List<AuditEntryView> Items { get; set; } = [];
+    /// <summary>Opaque newest-first position of the next (older) page; null/absent = no older page from this Host.</summary>
+    [JsonPropertyName("next_cursor")] public string? NextCursor { get; set; }
 }
 
 public sealed class SegmentInfo
 {
+    /// <summary>Segment id (GET /admin/audit/segments). Required to confirm an archived-segment answer.</summary>
+    [JsonPropertyName("id")] public string? Id { get; set; }
+    [JsonPropertyName("label")] public string? Label { get; set; }
     [JsonPropertyName("path")] public string? Path { get; set; }
+    [JsonPropertyName("events")] public int? Events { get; set; }
     [JsonPropertyName("entries")] public int Entries { get; set; }
     [JsonPropertyName("chain_valid")] public bool ChainValid { get; set; }
     [JsonPropertyName("first_utc")] public DateTimeOffset? FirstUtc { get; set; }
@@ -241,6 +249,9 @@ public sealed class AuditAttemptView
     [JsonPropertyName("DurationMs")] public double? DurationMs { get; set; }
     [JsonPropertyName("CostUsd")] public decimal? CostUsd { get; set; }
     [JsonPropertyName("CostBasis")] public string? CostBasis { get; set; }
+    // T04/T06 additive: the attempt's reservation and whether the reported charge exceeded it (settled in full).
+    [JsonPropertyName("ReservedUsd")] public decimal? ReservedUsd { get; set; }
+    [JsonPropertyName("Overrun")] public bool? Overrun { get; set; }
 }
 
 public sealed class AttributionTagsView
@@ -266,6 +277,38 @@ public sealed class CatalogResponse
     [JsonPropertyName("models")] public List<CatalogModel> Models { get; set; } = [];
     [JsonPropertyName("local")] public LocalRouteInfo? Local { get; set; }
     [JsonPropertyName("probe_allow_list")] public List<string>? ProbeAllowList { get; set; }
+    // v2 (ADR-0011): connection-scoped view of the active configuration.
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
+    [JsonPropertyName("connections")] public List<CatalogConnectionDto>? Connections { get; set; }
+    [JsonPropertyName("egress_allow_list")] public List<string>? EgressAllowList { get; set; }
+}
+
+/// <summary>Catalog view of one configured connection (Host CatalogConnection): registration and observed health,
+/// never credentials. Model health is observed from real governed calls (keyed connection:model).</summary>
+public sealed class CatalogConnectionDto
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("kind")] public string? Kind { get; set; }
+    [JsonPropertyName("boundary")] public string? Boundary { get; set; }
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    [JsonPropertyName("endpoint")] public string? Endpoint { get; set; }
+    [JsonPropertyName("endpoint_allow_listed")] public bool EndpointAllowListed { get; set; }
+    [JsonPropertyName("secret_ref")] public string? SecretRef { get; set; }
+    [JsonPropertyName("secret_available")] public bool? SecretAvailable { get; set; }
+    [JsonPropertyName("models")] public List<CatalogConnectionModelDto> Models { get; set; } = [];
+}
+
+public sealed class CatalogConnectionModelDto
+{
+    [JsonPropertyName("key")] public string? Key { get; set; }
+    [JsonPropertyName("model_id")] public string ModelId { get; set; } = "";
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("registered")] public bool Registered { get; set; }
+    [JsonPropertyName("price_basis")] public string? PriceBasis { get; set; }
+    [JsonPropertyName("in_per_1m")] public decimal? InPer1M { get; set; }
+    [JsonPropertyName("out_per_1m")] public decimal? OutPer1M { get; set; }
+    [JsonPropertyName("health")] public ModelHealth? Health { get; set; }
 }
 
 public sealed class CatalogModel
@@ -279,6 +322,9 @@ public sealed class CatalogModel
     [JsonPropertyName("out_per_1m")] public decimal? OutPer1M { get; set; }
     [JsonPropertyName("endpoint_host")] public string? EndpointHost { get; set; }
     [JsonPropertyName("health")] public ModelHealth? Health { get; set; }
+    [JsonPropertyName("connection_id")] public string? ConnectionId { get; set; }
+    [JsonPropertyName("boundary")] public string? Boundary { get; set; }
+    [JsonPropertyName("key")] public string? Key { get; set; }
 }
 
 public sealed class ModelHealth
@@ -406,4 +452,7 @@ public sealed class StreamFrameDto
 [JsonSerializable(typeof(List<BudgetStateDto>))]
 [JsonSerializable(typeof(SimulateRequestDto))]
 [JsonSerializable(typeof(SimulateResponseDto))]
+// T08 editors and evidence
+[JsonSerializable(typeof(ConfigErrorResponseDto))]
+[JsonSerializable(typeof(List<AuditSegmentDto>))]
 public partial class UiJsonContext : JsonSerializerContext;

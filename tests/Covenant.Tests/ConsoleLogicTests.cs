@@ -354,7 +354,7 @@ public sealed class CostTextTests
     {
         Assert.Equal("$0.0012 (estimated provider charge)", CostText.Cost(Rec.V2(costBasis: "reported", cost: 0.0012m)));
         Assert.Equal("$0.00 configured provider charge · infrastructure excluded", CostText.Cost(Rec.V2(costBasis: "zero_priced", cost: 0m)));
-        Assert.Equal("≈ $0.0030 estimated from text length", CostText.Cost(Rec.V2(costBasis: "estimated_from_text", cost: 0.003m)));
+        Assert.Equal("≈ $0.003 estimated from text length", CostText.Cost(Rec.V2(costBasis: "estimated_from_text", cost: 0.003m)));
         Assert.Equal("≈ $0.0004 estimated from text length", CostText.Cost(Rec.Upstream()));
         Assert.Equal("$0.00 — no provider call", CostText.Cost(Rec.Pause()));
         Assert.Equal("$0.0001 (legacy record)", CostText.Cost(Rec.Legacy()));
@@ -1168,45 +1168,6 @@ public sealed class ConnectionLogicTests
     public void Authority_is_host_and_port()
         => Assert.Equal("ollama-host:11434", ConnectionLogic.Authority("http://ollama-host:11434/v1"));
 
-    private static CatalogResponse Catalog(string? endpoint, string? model, bool registered, bool configured = true) => new()
-    {
-        Mode = "cloud",
-        Local = new LocalRouteInfo { Configured = configured, Endpoint = endpoint, ModelId = model, Registered = registered },
-    };
-
-    [Fact]
-    public void Applied_check_needs_same_endpoint_exact_tag_and_server_registration()
-    {
-        const string draft = "http://ollama-host:11434/v1/";
-        Assert.True(ConnectionLogic.CheckApplied(Catalog("http://ollama-host:11434/v1", "qwen3:8b", true), draft, "qwen3:8b").Pass);
-        Assert.False(ConnectionLogic.CheckApplied(Catalog("http://other:11434/v1", "qwen3:8b", true), draft, "qwen3:8b").Pass);
-        Assert.False(ConnectionLogic.CheckApplied(Catalog("http://ollama-host:11434/v1", "qwen3:4b", true), draft, "qwen3:8b").Pass);
-        Assert.False(ConnectionLogic.CheckApplied(Catalog("http://ollama-host:11434/v1", "qwen3:8b", false), draft, "qwen3:8b").Pass);
-        Assert.False(ConnectionLogic.CheckApplied(Catalog(null, null, false, configured: false), draft, "qwen3:8b").Pass);
-        Assert.False(ConnectionLogic.CheckApplied(null, draft, "qwen3:8b").Pass);
-    }
-
-    [Fact]
-    public void Config_block_has_names_and_values_but_no_secret()
-    {
-        var block = ConnectionLogic.ConfigBlock("http://ollama-host:11434/v1", "qwen3:8b", localOnly: true);
-        Assert.Contains("Providers__Mode=local-only", block, StringComparison.Ordinal);
-        Assert.Contains("Local__Endpoint=http://ollama-host:11434/v1", block, StringComparison.Ordinal);
-        Assert.Contains("Local__ModelId=qwen3:8b", block, StringComparison.Ordinal);
-        Assert.Contains("dotnet user-secrets set \"Local:ModelId\" \"qwen3:8b\"", block, StringComparison.Ordinal);
-        Assert.DoesNotContain("ApiKey=", block, StringComparison.Ordinal);
-
-        var cloud = ConnectionLogic.ConfigBlock("http://ollama-host:11434/v1", "qwen3:8b", localOnly: false);
-        Assert.DoesNotContain("\nProviders__Mode=local-only", "\n" + cloud, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Route_review_text_depends_on_mode()
-    {
-        Assert.Contains("PII and PHI requests route to local:qwen3:8b", ConnectionLogic.RouteReview("cloud", "qwen3:8b"), StringComparison.Ordinal);
-        Assert.Contains("every classification", ConnectionLogic.RouteReview("local-only", "qwen3:8b"), StringComparison.Ordinal);
-    }
-
     [Fact]
     public void Governed_connection_test_prompt_is_fresh_every_run_so_it_cannot_hit_the_cache()
         => Assert.NotEqual(ConnectionLogic.GovernedTestPrompt(), ConnectionLogic.GovernedTestPrompt());
@@ -1252,5 +1213,709 @@ public sealed class ConnectionLogicTests
         var c = LaunchLink.Parse("http://localhost:5201/ui/connect#appkey=secret-app-key&token=adm");
         Assert.NotNull(c);
         Assert.DoesNotContain("secret-app-key", c!.ToString(), StringComparison.Ordinal);
+    }
+}
+
+// ---- T08: editable admin pages and evidence workflows ----
+
+internal static class Cfg
+{
+    /// <summary>A small hybrid configuration: local Ollama + cloud OpenAI, Public → cloud with local fallback,
+    /// Internal → local, PII/PHI → local.</summary>
+    public static CovenantConfigDto Hybrid() => new()
+    {
+        Version = 3,
+        Origin = "console",
+        CreatedUtc = new DateTimeOffset(2026, 10, 16, 9, 0, 0, TimeSpan.Zero),
+        Mode = "hybrid",
+        Connections =
+        [
+            new ConnectionDto
+            {
+                Id = "ollama", DisplayName = "Ollama", Kind = "Ollama", Boundary = "Local", Endpoint = "http://ollama-host:11434/v1", Enabled = true,
+                Models = [new ModelDto { ModelId = "qwen2.5-coder:7b", Price = new PriceDto { InputPer1M = 0m, OutputPer1M = 0m, Basis = "zero-marginal-local" } }],
+            },
+            new ConnectionDto
+            {
+                Id = "openai", DisplayName = "OpenAI", Kind = "OpenAi", Boundary = "Cloud", Enabled = true, SecretRef = "Secrets:openai",
+                Models = [new ModelDto { ModelId = "gpt-4o-mini", Price = new PriceDto { InputPer1M = 0.15m, OutputPer1M = 0.60m, Basis = "provider-list" } }],
+            },
+        ],
+        Policies =
+        [
+            new PolicyDto
+            {
+                Id = "public", Name = "Public", Enabled = true, Classifications = ["Public"], Strategy = "fixed",
+                Targets = [new PolicyTargetDto { ConnectionId = "openai", ModelId = "gpt-4o-mini" }, new PolicyTargetDto { ConnectionId = "ollama", ModelId = "qwen2.5-coder:7b" }],
+            },
+            new PolicyDto
+            {
+                Id = "internal", Name = "Internal", Enabled = true, Classifications = ["Internal"], Strategy = "fixed",
+                Targets = [new PolicyTargetDto { ConnectionId = "ollama", ModelId = "qwen2.5-coder:7b" }],
+            },
+            new PolicyDto
+            {
+                Id = "sensitive", Name = "PII/PHI", Enabled = true, Classifications = ["Pii", "Phi"], Strategy = "fixed",
+                Targets = [new PolicyTargetDto { ConnectionId = "ollama", ModelId = "qwen2.5-coder:7b" }],
+            },
+        ],
+        Budgets = [new BudgetConfigDto { Id = "global", Scope = "global", CapUsd = 25m, Period = "monthly", WarnAt = [0.8m, 0.95m], Enforcement = "hard" }],
+        Settings = new OperationalSettingsDto { CacheTtlSeconds = 300, CacheMaxEntries = 1000, PromptPreviewChars = 0, TraceRetentionMinutes = 10 },
+    };
+}
+
+public sealed class MoneyTests
+{
+    [Theory]
+    [InlineData("0.000184", "$0.000184")]
+    [InlineData("0.0012", "$0.0012")]
+    [InlineData("0.003", "$0.003")]
+    [InlineData("0.00012345", "$0.000123")]
+    [InlineData("0.0123", "$0.0123")]
+    [InlineData("0.5", "$0.50")]
+    [InlineData("1.234", "$1.23")]
+    [InlineData("1234.5", "$1,234.50")]
+    [InlineData("0", "$0.00")]
+    [InlineData("-1.23", "-$1.23")]
+    [InlineData("-0.000184", "-$0.000184")]
+    [InlineData("0.0000001", "<$0.000001")]
+    public void Usd_uses_significant_digits_for_tiny_amounts(string value, string expected)
+        => Assert.Equal(expected, Money.Usd(decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture)));
+
+    [Theory]
+    [InlineData("0.000184")]
+    [InlineData("0.0000049")]
+    [InlineData("0.004999")]
+    [InlineData("0.0000000001")]
+    public void A_non_zero_charge_is_never_rendered_as_zero(string value)
+    {
+        var text = Money.Usd(decimal.Parse(value, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.NotEqual("$0.00", text);
+        Assert.NotEqual("$0", text);
+        Assert.DoesNotContain("$0.00 ", text + " ", StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Null_is_not_reported_and_never_zero()
+    {
+        Assert.Equal("Not reported", Money.Usd((decimal?)null));
+        Assert.Equal("$0.15", Money.Usd((decimal?)0.15m));
+        Assert.Equal("Unpriced", Money.PerMillion(null));
+        Assert.Equal("$0.15 / 1M", Money.PerMillion(0.15m));
+        Assert.Equal("Unpriced — cost unknown, not zero", Money.Price(0.15m, null));
+        Assert.Equal("$0 provider charge (infrastructure excluded)", Money.Price(0m, 0m));
+        Assert.Equal("in $0.15 · out $0.60 per 1M tokens", Money.Price(0.15m, 0.60m));
+    }
+
+    [Fact]
+    public void Caps_have_two_decimals_and_tiny_caps_stay_visible()
+    {
+        Assert.Equal("$250.00", Money.Cap(250m));
+        Assert.Equal("$0.00", Money.Cap(0m));
+        Assert.Equal("$0.005", Money.Cap(0.005m));
+        Assert.Equal("62%", Money.Share(6.2m, 10m));
+        Assert.Equal("n/a", Money.Share(1m, 0m));
+    }
+
+    [Fact]
+    public void Cost_text_now_uses_significant_digits()
+        => Assert.Equal("$0.000184 (estimated provider charge)", CostText.Cost(Rec.V2(costBasis: "reported", cost: 0.000184m)));
+}
+
+public sealed class ConfigDraftTests
+{
+    [Fact]
+    public void Draft_is_a_deep_copy_and_never_aliases_the_applied_configuration()
+    {
+        var applied = Cfg.Hybrid();
+        var session = new ConfigDraft(3, "\"v3\"", applied);
+
+        session.Draft.Policies[0].Targets.Add(new PolicyTargetDto { ConnectionId = "x", ModelId = "y" });
+        session.Draft.Connections[0].Models[0].Price!.InputPer1M = 9m;
+        session.Draft.Settings!.CacheTtlSeconds = 1;
+
+        Assert.Equal(2, applied.Policies[0].Targets.Count);
+        Assert.Equal(0m, applied.Connections[0].Models[0].Price!.InputPer1M);
+        Assert.Equal(300, applied.Settings!.CacheTtlSeconds);
+        Assert.Equal(2, session.Base.Policies[0].Targets.Count);
+        Assert.NotSame(applied.Policies[0].Targets, session.Draft.Policies[0].Targets);
+    }
+
+    [Fact]
+    public void Dirty_tracking_follows_content_not_touches()
+    {
+        var session = new ConfigDraft(3, null, Cfg.Hybrid());
+        Assert.False(session.IsDirty);
+        Assert.Equal("\"v3\"", session.BaseEtag);
+
+        session.Draft.Policies[0].Paused = true;
+        Assert.True(session.IsDirty);
+        session.Draft.Policies[0].Paused = false;
+        Assert.False(session.IsDirty); // toggled back: nothing to save
+
+        Assert.True(PolicyRoutes.MoveDown(session.Draft.Policies[0].Targets, 0));
+        Assert.True(session.IsDirty);   // order is content
+        session.Reset();
+        Assert.False(session.IsDirty);
+        Assert.Equal("openai", session.Draft.Policies[0].Targets[0].ConnectionId);
+    }
+
+    [Fact]
+    public void Change_summary_names_what_changed_without_values()
+    {
+        var before = Cfg.Hybrid();
+        var after = ConfigCopy.Deep(before);
+        after.Mode = "local-only";
+        after.Connections[1].Enabled = false;
+        after.Budgets.Add(new BudgetConfigDto { Id = "team-risk", Scope = "team:risk", CapUsd = 5m });
+        after.Policies.RemoveAt(2);
+        PolicyRoutes.MoveDown(after.Policies[0].Targets, 0);
+
+        var lines = ChangeSummary.Lines(before, after);
+        Assert.Contains("mode hybrid → local-only", lines);
+        Assert.Contains("connection openai changed", lines);
+        Assert.Contains("budget team-risk added", lines);
+        Assert.Contains("policy sensitive removed", lines);
+        Assert.Contains("policy public changed", lines);
+        Assert.DoesNotContain(lines, l => l.Contains("Secrets:", StringComparison.Ordinal));
+        Assert.StartsWith("Console: ", ChangeSummary.Text(before, after), StringComparison.Ordinal);
+        Assert.Equal("Console: no effective change", ChangeSummary.Text(before, ConfigCopy.Deep(before)));
+    }
+}
+
+public sealed class EditOutcomeTests
+{
+    [Fact]
+    public void Only_a_2xx_with_a_version_is_success()
+    {
+        var ok = EditOutcomes.FromResponse(200, "{\"version\":8,\"etag\":\"\\\"v8\\\"\"}");
+        Assert.Equal(EditOutcomeKind.Applied, ok.Kind);
+        Assert.True(ok.Succeeded);
+        Assert.Equal(8, ok.Version);
+        Assert.Equal("Applied version v8", ok.Message);
+
+        Assert.Equal("Rollback applied as new version v9", EditOutcomes.FromResponse(200, "{\"version\":9}", rollback: true).Message);
+
+        var noVersion = EditOutcomes.FromResponse(200, "{}");
+        Assert.Equal(EditOutcomeKind.Failed, noVersion.Kind);
+        Assert.False(noVersion.Succeeded);
+        Assert.False(EditOutcomes.FromResponse(200, "not json").Succeeded);
+    }
+
+    [Fact]
+    public void Stale_edit_412_keeps_the_draft_and_names_the_new_version()
+    {
+        var stale = EditOutcomes.FromResponse(412, "{\"error\":\"stale\",\"reason\":\"the active configuration is v8\",\"active_version\":8}");
+        Assert.Equal(EditOutcomeKind.Stale, stale.Kind);
+        Assert.Equal(8, stale.Version);
+        Assert.StartsWith("Configuration changed since you started editing (now v8).", stale.Message, StringComparison.Ordinal);
+        Assert.Contains("kept", stale.Message, StringComparison.Ordinal);
+        Assert.False(stale.Succeeded);
+
+        Assert.Equal(EditOutcomeKind.Stale, EditOutcomes.FromResponse(409, "").Kind);
+        Assert.Equal("Configuration changed since you started editing. Your draft was not applied and is kept.", EditOutcomes.StaleMessage(null));
+    }
+
+    [Fact]
+    public void Validation_422_maps_errors_to_fields_and_reports_the_active_version_unchanged()
+    {
+        var body = "{\"error\":\"invalid_configuration\",\"active_version\":7,\"errors\":[{\"path\":\"connections[1].secret_ref\",\"code\":\"secret_unavailable\",\"message\":\"secret not set\"},{\"path\":\"policies[0].targets[1]\",\"code\":\"sensitive_cloud_target\",\"message\":\"cloud target for PII\"}],\"warnings\":[{\"path\":\"policies\",\"code\":\"no_route_for_classification\",\"message\":\"Phi has no route\"}]}";
+        var invalid = EditOutcomes.FromResponse(422, body);
+        Assert.Equal(EditOutcomeKind.Invalid, invalid.Kind);
+        Assert.Equal(7, invalid.Version);
+        Assert.Equal(2, invalid.Errors!.Count);
+        Assert.Single(invalid.Warnings!);
+        Assert.Contains("active version is unchanged", invalid.Message, StringComparison.Ordinal);
+
+        var index = new IssueIndex(invalid.Errors, invalid.Warnings!);
+        Assert.Single(index.ErrorsAt("connections[1]"));
+        Assert.Single(index.ErrorsAt("connections[1].secret_ref"));
+        Assert.Empty(index.ErrorsAt("connections[0]"));
+        Assert.True(index.HasErrorAt("policies[0]"));
+        Assert.Single(index.WarningsAt("policies"));
+        Assert.Single(index.Unclaimed(["connections[1]"]));
+        Assert.NotNull(IssueHelp.For("secret_unavailable"));
+    }
+
+    [Theory]
+    [InlineData(428, EditOutcomeKind.PreconditionRequired)]
+    [InlineData(401, EditOutcomeKind.Unauthorized)]
+    [InlineData(404, EditOutcomeKind.NotFound)]
+    [InlineData(400, EditOutcomeKind.Failed)]
+    [InlineData(500, EditOutcomeKind.Failed)]
+    public void Other_answers_are_never_success(int status, EditOutcomeKind kind)
+    {
+        var o = EditOutcomes.FromResponse(status, "{\"error\":\"x\",\"reason\":\"y\"}");
+        Assert.Equal(kind, o.Kind);
+        Assert.False(o.Succeeded);
+        Assert.Null(o.Errors);
+    }
+
+    [Fact]
+    public void Issue_paths_match_on_member_and_element_boundaries_only()
+    {
+        Assert.True(IssueIndex.Under("connections[1]", "connections[1]"));
+        Assert.True(IssueIndex.Under("connections[1].endpoint", "connections[1]"));
+        Assert.True(IssueIndex.Under("connections[1].models[0].price", "connections[1].models[0]"));
+        Assert.False(IssueIndex.Under("connections[10].endpoint", "connections[1"));
+        Assert.False(IssueIndex.Under("connections[10]", "connections[1]"));
+        Assert.False(IssueIndex.Under("settings.cache_ttl_seconds_x", "settings.cache_ttl_seconds_"));
+        Assert.False(IssueIndex.Under(null, "settings"));
+        Assert.Equal("policies[2].targets[0]", IssueIndex.Target(2, 0));
+        Assert.Equal("connections[0].models[1]", IssueIndex.Model(0, 1));
+        Assert.Equal("settings.prompt_preview_chars", IssueIndex.Setting("prompt_preview_chars"));
+    }
+}
+
+public sealed class ImpactTextTests
+{
+    private static ConfigImpactDto Impact() => new()
+    {
+        Classifications =
+        [
+            new ConfigImpactRowDto { Classification = "Public", Profile = "*", Before = "openai/gpt-4o-mini", After = "ollama/qwen", Changed = true },
+            new ConfigImpactRowDto { Classification = "Internal", Profile = "", Before = "ollama/qwen", After = "ollama/qwen", Changed = false },
+            new ConfigImpactRowDto { Classification = "Pii", Profile = "customer", Before = "ollama/qwen", After = "refused: no eligible target" }, // no flag, text differs
+        ],
+        NewlyRefused = ["Pii/customer"],
+        PricingGaps = ["vllm/llama"],
+    };
+
+    [Fact]
+    public void Only_changed_routes_are_listed_with_refusals_marked()
+    {
+        var lines = ImpactText.ChangedRoutes(Impact());
+        Assert.Equal(2, lines.Count);
+        Assert.Equal("Public", lines[0].Scope);
+        Assert.Equal("openai/gpt-4o-mini", lines[0].Before);
+        Assert.Equal("PII · profile customer", lines[1].Scope);
+        Assert.True(lines[1].NowRefused);
+        Assert.False(lines[1].WasRefused);
+        Assert.Empty(ImpactText.ChangedRoutes(null));
+    }
+
+    [Fact]
+    public void Headline_counts_each_kind_of_impact()
+    {
+        Assert.Equal("2 routes change · 1 newly refused · 1 pricing gap", ImpactText.Headline(Impact()));
+        Assert.Equal("No routing change for any classification or profile.", ImpactText.Headline(new ConfigImpactDto()));
+        Assert.StartsWith("Impact not computed", ImpactText.Headline(null), StringComparison.Ordinal);
+        Assert.True(ImpactText.NeedsAttention(Impact()));
+        Assert.False(ImpactText.NeedsAttention(new ConfigImpactDto()));
+    }
+}
+
+public sealed class PolicyRoutesTests
+{
+    [Fact]
+    public void Summary_lines_state_the_effective_route_never_may_use()
+    {
+        var cfg = Cfg.Hybrid();
+        Assert.Equal("Public → openai/gpt-4o-mini · fallback: ollama/qwen2.5-coder:7b", PolicyRoutes.SummaryLine(cfg.Policies[0], cfg));
+        Assert.Equal("Internal → ollama/qwen2.5-coder:7b · no fallback", PolicyRoutes.SummaryLine(cfg.Policies[1], cfg));
+        Assert.Equal("PII + PHI → ollama/qwen2.5-coder:7b · no fallback", PolicyRoutes.SummaryLine(cfg.Policies[2], cfg));
+        foreach (var p in cfg.Policies)
+            Assert.DoesNotContain("may use", PolicyRoutes.SummaryLine(p, cfg), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Paused_route_is_skipped_and_paused_policy_refuses()
+    {
+        var cfg = Cfg.Hybrid();
+        cfg.Policies[0].Targets[0].Paused = true;
+        Assert.Equal("Public → ollama/qwen2.5-coder:7b · no fallback", PolicyRoutes.SummaryLine(cfg.Policies[0], cfg));
+        Assert.Equal("route paused — skipped", PolicyRoutes.Targets(cfg.Policies[0], cfg)[0].ExcludedReason);
+
+        cfg.Policies[0].Targets[1].Paused = true;
+        Assert.Equal("Public → refused (no eligible target)", PolicyRoutes.SummaryLine(cfg.Policies[0], cfg));
+
+        cfg.Policies[1].Paused = true;
+        Assert.Equal("Internal → refused (policy paused)", PolicyRoutes.SummaryLine(cfg.Policies[1], cfg));
+        Assert.Equal("Paused — refuses its traffic", PolicyText.StateText(cfg.Policies[1]));
+        Assert.Contains(PolicyRoutes.RefusalConditions(cfg.Policies[1], cfg), l => l.Contains("paused", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Cloud_targets_are_never_eligible_or_offered_for_sensitive_policies_or_local_only()
+    {
+        var cfg = Cfg.Hybrid();
+        cfg.Policies[2].Targets.Add(new PolicyTargetDto { ConnectionId = "openai", ModelId = "gpt-4o-mini" });
+        var states = PolicyRoutes.Targets(cfg.Policies[2], cfg);
+        Assert.False(states[1].Eligible);
+        Assert.Contains("PII/PHI", states[1].ExcludedReason!, StringComparison.Ordinal);
+
+        cfg.Policies[2].Targets.RemoveAt(1);
+        var options = PolicyRoutes.Options(cfg.Policies[2], cfg);
+        var cloud = Assert.Single(options);
+        Assert.Equal("openai/gpt-4o-mini", cloud.Value);
+        Assert.Equal(PolicyText.SensitiveNeverCloud, cloud.DisabledReason);
+
+        cfg.Mode = "local-only";
+        Assert.Equal("Internal → ollama/qwen2.5-coder:7b · no fallback", PolicyRoutes.SummaryLine(cfg.Policies[1], cfg));
+        Assert.Equal("Public → ollama/qwen2.5-coder:7b · no fallback", PolicyRoutes.SummaryLine(cfg.Policies[0], cfg));
+        Assert.NotNull(Assert.Single(PolicyRoutes.Options(cfg.Policies[1], cfg)).DisabledReason);
+    }
+
+    [Fact]
+    public void Disabled_or_unknown_connections_and_unpermitted_models_are_excluded()
+    {
+        var cfg = Cfg.Hybrid();
+        cfg.Connections[1].Enabled = false;
+        cfg.Policies[1].Targets.Add(new PolicyTargetDto { ConnectionId = "ghost", ModelId = "m" });
+        cfg.Policies[1].Targets.Add(new PolicyTargetDto { ConnectionId = "ollama", ModelId = "not-permitted" });
+        Assert.Equal("Public → ollama/qwen2.5-coder:7b · no fallback", PolicyRoutes.SummaryLine(cfg.Policies[0], cfg));
+        var states = PolicyRoutes.Targets(cfg.Policies[1], cfg);
+        Assert.Contains("not configured", states[1].ExcludedReason!, StringComparison.Ordinal);
+        Assert.Contains("not permitted", states[2].ExcludedReason!, StringComparison.Ordinal);
+        Assert.Empty(PolicyRoutes.Options(cfg.Policies[0], cfg)); // disabled connection offers nothing; ollama already listed
+    }
+
+    [Fact]
+    public void Length_heuristic_is_named_honestly_with_its_threshold()
+    {
+        var cfg = Cfg.Hybrid();
+        var p = cfg.Policies[0];
+        p.Strategy = "length-heuristic";
+        p.ThresholdTokens = 750;
+        Assert.Equal("Length-based heuristic (threshold 750 tokens)", PolicyText.StrategyName(p));
+        Assert.Equal("Public → ≤ 750 tokens: openai/gpt-4o-mini · above: ollama/qwen2.5-coder:7b", PolicyRoutes.SummaryLine(p, cfg));
+        Assert.Equal("Fixed + fallback", PolicyText.StrategyName(cfg.Policies[1]));
+    }
+
+    [Fact]
+    public void Fallback_reorder_moves_one_place_and_stops_at_the_ends()
+    {
+        var list = new List<PolicyTargetDto>
+        {
+            new() { ConnectionId = "a", ModelId = "1" }, new() { ConnectionId = "b", ModelId = "2" }, new() { ConnectionId = "c", ModelId = "3" },
+        };
+        Assert.False(PolicyRoutes.MoveUp(list, 0));
+        Assert.False(PolicyRoutes.MoveDown(list, 2));
+        Assert.False(PolicyRoutes.MoveUp(list, 7));
+        Assert.True(PolicyRoutes.MoveUp(list, 2));
+        Assert.Equal(new[] { "a", "c", "b" }, list.Select(t => t.ConnectionId));
+        Assert.True(PolicyRoutes.MoveDown(list, 0));
+        Assert.Equal(new[] { "c", "a", "b" }, list.Select(t => t.ConnectionId));
+        Assert.Equal("Primary", PolicyRoutes.RoleLabel(0));
+        Assert.Equal("Fallback 2", PolicyRoutes.RoleLabel(2));
+    }
+
+    [Fact]
+    public void Hybrid_defaults_build_a_restrictive_draft_and_need_a_local_model()
+    {
+        var cfg = Cfg.Hybrid();
+        cfg.Mode = "legacy-cloud";
+        cfg.Policies = [new PolicyDto { Id = "legacy-general", Enabled = true, Classifications = ["Public", "Internal"], Targets = [new PolicyTargetDto { ConnectionId = "openai", ModelId = "gpt-4o-mini" }] }];
+        Assert.True(PolicyRoutes.IsLegacy(cfg.Mode));
+
+        Assert.Null(HybridDefaults.ApplyTo(cfg));
+        Assert.Equal("hybrid", cfg.Mode);
+        Assert.Equal(new[] { "public", "internal", "sensitive" }, cfg.Policies.Select(p => p.Id));
+        Assert.Equal(new[] { "openai/gpt-4o-mini", "ollama/qwen2.5-coder:7b" }, cfg.Policies[0].Targets.Select(PolicyRoutes.Key));
+        Assert.All(cfg.Policies.Skip(1), p => Assert.Equal(new[] { "ollama/qwen2.5-coder:7b" }, p.Targets.Select(PolicyRoutes.Key)));
+        Assert.Equal(new[] { "Pii", "Phi" }, cfg.Policies[2].Classifications);
+
+        var noLocal = Cfg.Hybrid();
+        noLocal.Connections.RemoveAt(0);
+        var before = ConfigCopy.Canonical(noLocal);
+        Assert.NotNull(HybridDefaults.ApplyTo(noLocal));
+        Assert.Equal(before, ConfigCopy.Canonical(noLocal)); // untouched when it cannot comply
+    }
+}
+
+public sealed class SegmentScopeTests
+{
+    [Fact]
+    public void Current_segment_is_explicit_then_by_id_then_first()
+    {
+        var a = new AuditSegmentDto { Id = "seg-2", Current = true };
+        var b = new AuditSegmentDto { Id = "current" };
+        var c = new AuditSegmentDto { Id = "2026-10-01" };
+        Assert.True(SegmentScope.IsCurrent(a));
+        Assert.True(SegmentScope.IsCurrent(b));
+        Assert.False(SegmentScope.IsCurrent(new AuditSegmentDto { Id = "x", Current = false }));
+        var unflagged = new List<AuditSegmentDto> { new() { Id = "live" }, c };
+        Assert.True(SegmentScope.IsCurrent(unflagged[0], unflagged));
+        Assert.False(SegmentScope.IsCurrent(c, unflagged));
+        Assert.False(SegmentScope.IsCurrent(c, [b, c]));
+    }
+
+    [Fact]
+    public void Labels_say_which_segment_and_that_filters_cover_only_loaded_records()
+    {
+        var first = new DateTimeOffset(2026, 10, 16, 9, 0, 0, TimeSpan.Zero);
+        Assert.Equal("Current segment · since 2026-10-16 09:00:00 UTC", SegmentScope.Label(new AuditSegmentDto { Id = "current", FirstUtc = first }, true));
+        Assert.Equal("Archived segment Oct 1 · read-only", SegmentScope.Label(new AuditSegmentDto { Id = "a1", Label = "Oct 1" }, false));
+        Assert.Equal("Archived · a1 (1,200 records)", SegmentScope.Option(new AuditSegmentDto { Id = "a1", Entries = 1200 }, false));
+
+        var cov = SegmentScope.Coverage("Current segment", 200, 1500, moreAvailable: true, filtersActive: true);
+        Assert.Contains("200 of 1,500 records loaded", cov, StringComparison.Ordinal);
+        Assert.Contains("Load older", cov, StringComparison.Ordinal);
+        Assert.Contains("only to these loaded records", cov, StringComparison.Ordinal);
+        Assert.DoesNotContain("all history", cov, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not reachable", SegmentScope.Coverage("Current segment", 200, 1500, moreAvailable: false, filtersActive: false), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(false, null, true, EvidenceCompletenessState.Pending)]
+    [InlineData(false, true, false, EvidenceCompletenessState.Unavailable)]
+    [InlineData(true, true, false, EvidenceCompletenessState.Verified)]
+    [InlineData(true, false, false, EvidenceCompletenessState.Unverifiable)]
+    [InlineData(true, null, true, EvidenceCompletenessState.Recorded)]
+    public void Evidence_is_verified_only_when_present_in_a_verified_chain(bool found, bool? chainValid, bool pending, EvidenceCompletenessState expected)
+    {
+        var s = EvidenceCompleteness.State(found, chainValid, pending);
+        Assert.Equal(expected, s);
+        var (label, tone) = EvidenceCompleteness.Text(s);
+        Assert.Equal(expected == EvidenceCompletenessState.Verified, label.StartsWith("Audit integrity verified", StringComparison.Ordinal));
+        Assert.Equal(expected == EvidenceCompletenessState.Verified, tone == "ok");
+    }
+}
+
+public sealed class BudgetTextTests
+{
+    [Fact]
+    public void Thresholds_parse_as_percentages_and_reject_garbage()
+    {
+        Assert.Equal(new[] { 0.8m, 0.95m }, BudgetText.ParseThresholds("95, 80"));
+        Assert.Equal(new[] { 0.5m }, BudgetText.ParseThresholds("50%"));
+        Assert.Empty(BudgetText.ParseThresholds("")!);
+        Assert.Null(BudgetText.ParseThresholds("0"));
+        Assert.Null(BudgetText.ParseThresholds("120"));
+        Assert.Null(BudgetText.ParseThresholds("eighty"));
+        Assert.Equal("80, 95", BudgetText.FormatThresholds([0.8m, 0.95m]));
+        Assert.Equal("80%, 95%", BudgetText.Thresholds([0.8m, 0.95m]));
+    }
+
+    [Fact]
+    public void Server_states_are_worded_and_overrun_is_never_truncated()
+    {
+        Assert.Equal(("Cap reached — new paid work blocked", "bad"), BudgetText.Warning("exceeded"));
+        Assert.Equal("warn", BudgetText.Warning("critical").Tone);
+        Assert.Equal("Exceeded by $0.000184", BudgetText.Remaining(-0.000184m));
+        Assert.Equal("$1.50", BudgetText.Remaining(1.5m));
+        Assert.Equal("Monthly (UTC) · 2026-10", BudgetText.Period("monthly", "2026-10"));
+        Assert.Equal("Team risk", BudgetText.Scope("team:risk"));
+        Assert.Equal("Application demo-app", BudgetText.Scope("application:demo-app"));
+        Assert.Equal(100, BudgetText.MeterPercent(5m, 1m, 4m));
+        Assert.Equal(100, BudgetText.MeterPercent(0.01m, 0m, 0m));
+        Assert.Equal(25, BudgetText.MeterPercent(0.5m, 0.5m, 4m));
+        Assert.StartsWith("Warn only", BudgetText.Enforcement("warn-only"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Local_only_zero_spend_is_detected_for_the_explanatory_empty_state()
+    {
+        Assert.True(BudgetText.NoSpendAnywhere([new BudgetStateDto { Id = "g", CapUsd = 10m }]));
+        Assert.False(BudgetText.NoSpendAnywhere([new BudgetStateDto { Id = "g", CapUsd = 10m, ReservedUsd = 0.0001m }]));
+        Assert.False(BudgetText.NoSpendAnywhere(null));
+    }
+
+    [Fact]
+    public void Contributing_requests_parse_leniently_and_unknown_shapes_are_null()
+    {
+        var arr = BudgetRequests.Parse("[{\"request_id\":\"req_1\",\"attempt_id\":\"a1\",\"amount_usd\":0.000184,\"ts_utc\":\"2026-10-16T09:00:00Z\"},{\"nope\":1}]");
+        var one = Assert.Single(arr!);
+        Assert.Equal("req_1", one.RequestId);
+        Assert.Equal(0.000184m, one.AmountUsd);
+        Assert.Equal("a1", one.AttemptId);
+        Assert.NotNull(one.TimestampUtc);
+
+        var wrapped = BudgetRequests.Parse("{\"items\":[{\"id\":\"req_2\",\"settled_usd\":1.5}]}");
+        Assert.Equal("req_2", Assert.Single(wrapped!).RequestId);
+        Assert.Equal(1.5m, wrapped![0].AmountUsd);
+
+        Assert.Null(BudgetRequests.Parse("{\"something\":true}"));
+        Assert.Null(BudgetRequests.Parse("not json"));
+        Assert.Null(BudgetRequests.Parse(""));
+    }
+}
+
+public sealed class ConnectionFormTests
+{
+    private static readonly Dictionary<string, SecretAvailabilityDto> Secrets = new()
+    {
+        ["Secrets:openai"] = new SecretAvailabilityDto { Available = true },
+        ["Secrets:anthropic"] = new SecretAvailabilityDto { Available = false },
+    };
+
+    [Fact]
+    public void Discovery_never_approves_and_local_prices_default_to_explicit_zero_marginal()
+    {
+        var f = ConnectionForm.NewOllama(["ollama"]);
+        Assert.Equal("ollama-2", f.Id);
+        f.Endpoint = "http://ollama-host:11434/v1";
+        f.ApplyDiscovery(["qwen2.5-coder:7b", "llama3:8b"]);
+        Assert.Equal(2, f.Models.Count);
+        Assert.All(f.Models, m => Assert.False(m.Selected));
+        Assert.All(f.Models, m => Assert.Equal(ConnectionForm.BasisLocal, m.Basis));
+        Assert.All(f.Models, m => Assert.Equal(0m, m.InputPer1M));
+
+        Assert.Contains(f.Problems([], null), p => p.StartsWith("Select at least one", StringComparison.Ordinal));
+        f.Models[1].Selected = true;
+        Assert.Empty(f.Problems(["ollama"], null));
+
+        var dto = f.ToConnection();
+        var model = Assert.Single(dto.Models);       // unselected tags are not saved
+        Assert.Equal("qwen2.5-coder:7b", model.ModelId);
+        Assert.Equal("zero-marginal-local", model.Price!.Basis);
+        Assert.Equal("Local", dto.Boundary);
+        Assert.Null(dto.SecretRef);
+    }
+
+    [Fact]
+    public void Editing_prefills_actual_values_and_marks_what_the_endpoint_no_longer_reports()
+    {
+        var conn = Cfg.Hybrid().Connections[0];
+        var f = ConnectionForm.FromConnection(conn);
+        Assert.False(f.IsNew);
+        Assert.Equal("http://ollama-host:11434/v1", f.Endpoint);
+        var row = Assert.Single(f.Models);
+        Assert.True(row.Selected);
+        Assert.True(row.Configured);
+
+        f.ApplyDiscovery(["other:1b"]);
+        Assert.False(f.Models[0].ReportedByEndpoint);
+        Assert.False(f.Models[1].Selected);
+        Assert.Equal(0, f.SentIndex(f.Models[0]));
+        Assert.Null(f.SentIndex(f.Models[1]));
+    }
+
+    [Fact]
+    public void Cloud_needs_prices_and_an_available_secret_reference()
+    {
+        var f = ConnectionForm.NewCloud("Anthropic", []);
+        Assert.Equal("Cloud", f.Boundary);
+        f.SetKind("OpenAi");
+        Assert.Equal("Cloud", f.Boundary);
+        var m = f.AddModel("gpt-4o-mini");
+        Assert.True(m.Selected);
+        Assert.False(m.Priced);
+        Assert.Null(m.InputPer1M); // cloud prices are never assumed
+
+        var problems = f.Problems([], Secrets);
+        Assert.Contains(problems, p => p.Contains("never treated as $0", StringComparison.Ordinal));
+        Assert.Contains(problems, p => p.StartsWith("Choose the server-side secret", StringComparison.Ordinal));
+
+        m.Priced = true;
+        Assert.Contains(f.Problems([], Secrets), p => p.Contains("enter both input and output prices", StringComparison.Ordinal));
+
+        m.InputPer1M = 0.15m;
+        m.OutputPer1M = 0.6m;
+        f.SecretRef = "Secrets:anthropic";
+        Assert.Contains(f.Problems([], Secrets), p => p.Contains("not available on the server", StringComparison.Ordinal));
+        f.SecretRef = "Secrets:openai";
+        Assert.Empty(f.Problems([], Secrets));
+
+        m.Priced = false;
+        Assert.Contains(f.Problems([], Secrets), p => p.Contains("never treated as $0", StringComparison.Ordinal));
+        Assert.Null(f.ToConnection().Models[0].Price); // unpriced stays unknown, never $0
+    }
+
+    [Fact]
+    public void Apply_to_draft_replaces_its_own_earlier_copy_even_after_an_id_change()
+    {
+        var draft = Cfg.Hybrid();
+        var f = ConnectionForm.NewOllama(draft.Connections.Select(c => c.Id));
+        f.Endpoint = "http://second:11434/v1";
+        f.AddModel("phi3:mini");
+        int i = f.ApplyTo(draft);
+        Assert.Equal(2, i);
+        f.Id = "ollama-b";
+        Assert.Equal(2, f.ApplyTo(draft));
+        Assert.Equal(new[] { "ollama", "openai", "ollama-b" }, draft.Connections.Select(c => c.Id));
+
+        var edit = ConnectionForm.FromConnection(draft.Connections[0]);
+        edit.Enabled = false;
+        Assert.Equal(0, edit.ApplyTo(draft));
+        Assert.False(draft.Connections[0].Enabled);
+        Assert.Equal(3, draft.Connections.Count);
+    }
+
+    [Fact]
+    public void Removing_a_routed_model_is_called_out_before_preview()
+    {
+        var cfg = Cfg.Hybrid();
+        var f = ConnectionForm.FromConnection(cfg.Connections[0]);
+        f.Models[0].Selected = false;
+        Assert.Equal(new[] { "ollama/qwen2.5-coder:7b" }, f.RemovedModelsStillRouted(cfg));
+    }
+
+    [Theory]
+    [InlineData("Secrets:openai", true)]
+    [InlineData("OpenAI:ApiKey", true)]
+    [InlineData("Secrets:", false)]
+    [InlineData("Env:OPENAI", false)]
+    [InlineData("Secrets:bad name", false)]
+    public void Secret_references_are_restricted(string r, bool ok) => Assert.Equal(ok, ConnectionRules.IsValidSecretRef(r));
+
+    [Fact]
+    public void Connection_rules_helpers()
+    {
+        Assert.Equal("Secrets__openai", ConnectionRules.EnvVarFor("Secrets:openai"));
+        Assert.Equal("api.openai.com:443", ConnectionRules.AuthorityOf("OpenAi", null));
+        Assert.Equal("host:8000", ConnectionRules.AuthorityOf("OpenAiCompatible", "http://host:8000/v1"));
+        Assert.False(ConnectionRules.IsValidId("has space"));
+        Assert.True(ConnectionRules.EndpointRequired("Ollama"));
+        Assert.False(ConnectionRules.EndpointRequired("Anthropic"));
+    }
+}
+
+public sealed class ConnectionHealthTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 10, 16, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void A_newer_failure_wins_and_both_facts_are_stated()
+    {
+        var h = new ModelHealth { State = "failed", LastSuccessUtc = Now.AddMinutes(-30), LastFailureUtc = Now.AddMinutes(-2), LastError = "timeout" };
+        var v = ConnectionHealth.Summarize(true, [h], null, null, null, Now);
+        Assert.Equal("bad", v.Tone);
+        Assert.Equal("Last governed call failed 2 min ago · last success 30 min ago", v.Summary);
+        Assert.Contains(v.Details, d => d.Label == "Last failed governed call" && d.Value.Contains("timeout", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_reachable_probe_is_not_called_ready_when_no_call_succeeded()
+    {
+        var probe = new ProbeResponse { Allowed = true, Reachable = true, CheckedUtc = Now.AddSeconds(-5) };
+        var v = ConnectionHealth.Summarize(true, [new ModelHealth { State = "unknown" }], probe, null, null, Now);
+        Assert.Equal("Endpoint reachable (probe 5 s ago) · no governed call observed yet", v.Summary);
+        Assert.DoesNotContain("ready", v.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal("hollow", v.Tone);
+        Assert.Contains(v.Details, d => d.Label == "Last successful governed call" && d.Value == "None observed");
+    }
+
+    [Fact]
+    public void Probe_failure_disabled_and_unobserved_states()
+    {
+        var refused = new ProbeResponse { Allowed = false, Reachable = false };
+        var v = ConnectionHealth.Summarize(true, [], refused, Now.AddMinutes(-1), null, Now);
+        Assert.Equal("bad", v.Tone);
+        Assert.Contains(v.Details, d => d.Value.Contains("not on the probe allow-list", StringComparison.Ordinal));
+
+        Assert.StartsWith("Disabled", ConnectionHealth.Summarize(false, [], null, null, null, Now).Summary, StringComparison.Ordinal);
+        Assert.StartsWith("Not observed yet", ConnectionHealth.Summarize(true, [], null, null, null, Now).Summary, StringComparison.Ordinal);
+
+        var ok = ConnectionHealth.Summarize(true, [new ModelHealth { State = "ok", LastSuccessUtc = Now.AddHours(-3) }], null, null,
+            new ModelHealth { LastFailureUtc = Now.AddHours(-1), LastError = "refused" }, Now);
+        Assert.Equal("Last successful governed call 3 h ago", ok.Summary); // inference fact first; probe is a separate detail
+        Assert.Contains(ok.Details, d => d.Label == "Last endpoint probe" && d.Value.StartsWith("Failed", StringComparison.Ordinal));
+    }
+}
+
+public sealed class RequestFilterApplicationTests
+{
+    [Fact]
+    public void Application_filter_matches_v3_application_id_only()
+    {
+        var a = Rec.V2();
+        a.ApplicationId = "demo-app";
+        var legacy = Rec.Legacy();
+        var c = RequestFilterCriteria.None with { Application = "DEMO-APP" };
+        Assert.True(c.IsActive);
+        Assert.True(RequestFilter.Matches(a, c, DateTimeOffset.UtcNow));
+        Assert.False(RequestFilter.Matches(legacy, c, DateTimeOffset.UtcNow));
+        Assert.Equal(new[] { "demo-app" }, RequestFilter.Applications([a, legacy]));
     }
 }

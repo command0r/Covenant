@@ -4,7 +4,8 @@ namespace Covenant.Ui.Services;
 
 /// <summary>Typed wrapper over wwwroot/js/interop.js. Everything the console asks the browser for goes through
 /// here, so the storage rules are auditable in one place: sessionStorage for the admin token only,
-/// localStorage for the theme only, nothing else is ever persisted.</summary>
+/// localStorage for the theme and the allow-listed console preferences (interop.js PREF_KEYS) only — never a
+/// credential, prompt, response or server configuration.</summary>
 public sealed class Interop(IJSRuntime js)
 {
     private const string Prefix = "covenantInterop.";
@@ -15,6 +16,10 @@ public sealed class Interop(IJSRuntime js)
 
     public ValueTask<string> GetThemeAsync() => js.InvokeAsync<string>(Prefix + "getTheme");
     public ValueTask<string> SetThemeAsync(string theme) => js.InvokeAsync<string>(Prefix + "setTheme", theme);
+
+    /// <summary>Browser-local console preference (allow-listed names only, e.g. "stream-default"); null when unset.</summary>
+    public ValueTask<string?> PrefGetAsync(string name) => js.InvokeAsync<string?>(Prefix + "prefGet", name);
+    public ValueTask<bool> PrefSetAsync(string name, string value) => js.InvokeAsync<bool>(Prefix + "prefSet", name, value);
 
     public ValueTask<bool> FocusElementAsync(string id) => js.InvokeAsync<bool>(Prefix + "focusElement", id);
     public ValueTask TrapFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "trapFocus", containerId);

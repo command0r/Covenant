@@ -353,6 +353,262 @@ public sealed class ContractRoundTripTests
             Assert.False(p.TryGetProperty("allow_sensitive_cloud", out _));
     }
 
+    // ---- T08 editors: every other DTO the console reads or writes on the config/simulate/catalog/archive paths ----
+
+    [Fact]
+    public void Validate_request_and_response_round_trip_with_impact_and_field_paths()
+    {
+        var cfg = Representative(ProviderMode.Hybrid);
+        var envelope = RoundTrip(cfg).Envelope;
+
+        // console → Host: POST /admin/config/validate
+        var reqBody = JsonSerializer.Serialize(new UiModels.ConfigValidateRequestDto { BaseVersion = 7, Config = envelope.Config },
+            UiModels.UiJsonContext.Default.ConfigValidateRequestDto);
+        var hostReq = JsonSerializer.Deserialize(reqBody, ConfigJsonContext.Default.ConfigValidateRequest);
+        Assert.Equal(7, hostReq!.BaseVersion);
+        Assert.Equal(JsonSerializer.Serialize(cfg, ConfigJsonContext.Default.CovenantConfig),
+            JsonSerializer.Serialize(hostReq.Config!, ConfigJsonContext.Default.CovenantConfig));
+
+        // Host → console: the validation result
+        var respBody = JsonSerializer.Serialize(new ConfigValidateResponse
+        {
+            Valid = false,
+            ActiveVersion = 7,
+            Errors = [new ConfigIssueView { Path = "connections[2].secret_ref", Code = "secret_unavailable", Message = "secret not set" }],
+            Warnings = [new ConfigIssueView { Path = "base_version", Code = "stale_base_version", Message = "edited from v6" }],
+            Impact = new ImpactView
+            {
+                Classifications = [new ImpactRowView { Classification = "Public", Profile = "public-tickets", Before = "openai/gpt-x-mini", After = "refused: no eligible target", Changed = true }],
+                ApplicationsAffected = ["demo-app"],
+                UnavailableDestinations = ["openai/gpt-x-mini"],
+                PricingGaps = ["vllm/llama-3.1-8b"],
+                NewlyRefused = ["Public/public-tickets"],
+            },
+        }, ConfigJsonContext.Default.ConfigValidateResponse);
+        var ui = JsonSerializer.Deserialize(respBody, UiModels.UiJsonContext.Default.ConfigValidationResultDto)!;
+        Assert.False(ui.Valid);
+        Assert.Equal(7, ui.ActiveVersion);
+        Assert.Equal("connections[2].secret_ref", Assert.Single(ui.Errors).Path);
+        Assert.Equal("secret_unavailable", ui.Errors[0].Code);
+        Assert.Equal("stale_base_version", Assert.Single(ui.Warnings).Code);
+        var row = Assert.Single(ui.Impact!.Classifications);
+        Assert.True(row.Changed);
+        Assert.Equal("refused: no eligible target", row.After);
+        Assert.Equal(new[] { "demo-app" }, ui.Impact.ApplicationsAffected);
+        Assert.Equal(new[] { "openai/gpt-x-mini" }, ui.Impact.UnavailableDestinations);
+        Assert.Equal(new[] { "vllm/llama-3.1-8b" }, ui.Impact.PricingGaps);
+        Assert.Equal(new[] { "Public/public-tickets" }, ui.Impact.NewlyRefused);
+        Assert.Single(Covenant.Ui.Logic.ImpactText.ChangedRoutes(ui.Impact));
+    }
+
+    [Fact]
+    public void Host_write_answers_map_onto_console_outcomes()
+    {
+        string Error(int? active, bool withIssues) => JsonSerializer.Serialize(new ConfigErrorResponse
+        {
+            Error = withIssues ? "invalid_configuration" : "stale",
+            Reason = "x",
+            ActiveVersion = active,
+            Errors = withIssues ? [new ConfigIssueView { Path = "policies[0].targets[1]", Code = "sensitive_cloud_target", Message = "no" }] : null,
+            Warnings = withIssues ? [] : null,
+        }, ConfigJsonContext.Default.ConfigErrorResponse);
+
+        var stale = Covenant.Ui.Logic.EditOutcomes.FromResponse(412, Error(8, withIssues: false));
+        Assert.Equal(Covenant.Ui.Logic.EditOutcomeKind.Stale, stale.Kind);
+        Assert.Equal(8, stale.Version);
+
+        var invalid = Covenant.Ui.Logic.EditOutcomes.FromResponse(422, Error(7, withIssues: true));
+        Assert.Equal(Covenant.Ui.Logic.EditOutcomeKind.Invalid, invalid.Kind);
+        Assert.Equal("policies[0].targets[1]", Assert.Single(invalid.Errors!).Path);
+
+        var ok = Covenant.Ui.Logic.EditOutcomes.FromResponse(200,
+            JsonSerializer.Serialize(new ConfigPutResponse { Version = 9, Etag = "\"v9\"" }, ConfigJsonContext.Default.ConfigPutResponse));
+        Assert.True(ok.Succeeded);
+        Assert.Equal(9, ok.Version);
+
+        var err = JsonSerializer.Deserialize(Error(8, withIssues: false), UiModels.UiJsonContext.Default.ConfigErrorResponseDto)!;
+        Assert.Equal("stale", err.Error);
+        Assert.Equal(8, err.ActiveVersion);
+    }
+
+    [Fact]
+    public void Version_history_and_rollback_request_round_trip()
+    {
+        var history = JsonSerializer.Serialize(new List<ConfigVersionSummary>
+        {
+            new() { Version = 8, CreatedUtc = Created, Origin = "rollback", BaseVersion = 7, RolledBackFrom = 3, ChangeSummary = "rollback to v3", Active = true },
+            new() { Version = 7, CreatedUtc = Created.AddMinutes(-5), Origin = "console", BaseVersion = 6, Active = false },
+        }, ConfigJsonContext.Default.ListConfigVersionSummary);
+        var ui = JsonSerializer.Deserialize(history, UiModels.UiJsonContext.Default.ListConfigVersionDto)!;
+        Assert.Equal(new[] { 8, 7 }, ui.Select(v => v.Version));
+        Assert.True(ui[0].Active);
+        Assert.Equal(3, ui[0].RolledBackFrom);
+        Assert.Equal("rollback", ui[0].Origin);
+        Assert.Equal(Created, ui[0].CreatedUtc);
+        Assert.Null(ui[1].RolledBackFrom);
+
+        var body = JsonSerializer.Serialize(new UiModels.ConfigRollbackRequestDto { TargetVersion = 3, ExpectedActiveVersion = 8 },
+            UiModels.UiJsonContext.Default.ConfigRollbackRequestDto);
+        var host = JsonSerializer.Deserialize(body, ConfigJsonContext.Default.ConfigRollbackRequest)!;
+        Assert.Equal(3, host.TargetVersion);
+        Assert.Equal(8, host.ExpectedActiveVersion);
+    }
+
+    [Fact]
+    public void Simulator_request_with_a_draft_candidate_and_dry_run_response_round_trip()
+    {
+        var cfg = Representative(ProviderMode.Hybrid);
+        var envelope = RoundTrip(cfg).Envelope;
+        var body = JsonSerializer.Serialize(new UiModels.SimulateRequestDto
+        {
+            ApplicationId = "demo-app", ProfileId = "public-tickets", Prompt = "Priority: low", Model = "openai/gpt-x-mini", Config = envelope.Config,
+        }, UiModels.UiJsonContext.Default.SimulateRequestDto);
+        var host = JsonSerializer.Deserialize(body, ConfigJsonContext.Default.SimulateRequest)!;
+        Assert.Equal("demo-app", host.ApplicationId);
+        Assert.Equal("public-tickets", host.ProfileId);
+        Assert.Equal("openai/gpt-x-mini", host.Model);
+        Assert.Equal(JsonSerializer.Serialize(cfg, ConfigJsonContext.Default.CovenantConfig),
+            JsonSerializer.Serialize(host.Config!, ConfigJsonContext.Default.CovenantConfig));
+
+        // Without a draft the candidate is omitted (the Host simulates the active version).
+        var noDraft = JsonSerializer.Serialize(new UiModels.SimulateRequestDto { ApplicationId = "demo-app", Prompt = "x" }, UiModels.UiJsonContext.Default.SimulateRequestDto);
+        Assert.False(Wire(noDraft).TryGetProperty("config", out _));
+        Assert.Null(JsonSerializer.Deserialize(noDraft, ConfigJsonContext.Default.SimulateRequest)!.Config);
+
+        var resp = JsonSerializer.Serialize(new SimulateResponse
+        {
+            DryRun = true, ConfigVersion = 7, ApplicationId = "demo-app", Profile = "public-tickets",
+            Classification = "Pii", Baseline = "Public", DetectedSignal = "US SSN pattern", PolicyId = "sensitive",
+            Eligible =
+            [
+                new SimulatedTarget { Target = "ollama/qwen3:8b", Boundary = "Local" },
+                new SimulatedTarget { Target = "openai/gpt-x-mini", Boundary = "Cloud", ExcludedReason = "cloud destination for PII" },
+            ],
+            Decision = "route", Primary = "ollama/qwen3:8b", Fallbacks = [], Reason = "allowed", Explanation = "PII → ollama/qwen3:8b",
+        }, ConfigJsonContext.Default.SimulateResponse);
+        var ui = JsonSerializer.Deserialize(resp, UiModels.UiJsonContext.Default.SimulateResponseDto)!;
+        Assert.True(ui.DryRun);
+        Assert.Equal(7, ui.ConfigVersion);
+        Assert.Equal("Pii", ui.Classification);
+        Assert.Equal("Public", ui.Baseline);
+        Assert.Equal("US SSN pattern", ui.DetectedSignal);
+        Assert.Equal("route", ui.Decision);
+        Assert.Equal("ollama/qwen3:8b", ui.Primary);
+        Assert.Equal(new[] { "Local", "Cloud" }, ui.Eligible.Select(e => e.Boundary));
+        Assert.Null(ui.Eligible[0].ExcludedReason);
+        Assert.Equal("cloud destination for PII", ui.Eligible[1].ExcludedReason);
+        Assert.Equal("PII → ollama/qwen3:8b", ui.Explanation);
+    }
+
+    [Fact]
+    public void Catalog_connections_carry_health_registration_and_allow_listing_to_the_console()
+    {
+        var ok = new HealthView { State = "ok", LastSuccessUtc = Created };
+        var body = JsonSerializer.Serialize(new CatalogReport
+        {
+            Mode = "hybrid",
+            Models = [new CatalogModel { Adapter = "ollama", ModelId = "qwen3:8b", Classifications = ["Internal"], Registered = true, PriceBasis = "zero", Health = ok, ConnectionId = "ollama", Boundary = "Local", Key = "ollama:qwen3:8b" }],
+            Local = new LocalConfigView { Configured = true, Endpoint = "http://ollama-host:11434/v1", ModelId = "qwen3:8b", Registered = true, EndpointHealth = new HealthView { State = "failed", LastFailureUtc = Created, LastError = "refused" } },
+            ProbeAllowList = ["ollama-host:11434"],
+            ConfigVersion = 7,
+            EgressAllowList = ["api.openai.com:443", "ollama-host:11434"],
+            Connections =
+            [
+                new CatalogConnection
+                {
+                    Id = "openai", DisplayName = "OpenAI", Kind = "OpenAi", Boundary = "Cloud", Enabled = true, Endpoint = null, EndpointAllowListed = true,
+                    SecretRef = "Secrets:openai", SecretAvailable = false,
+                    Models = [new CatalogConnectionModel { Key = "openai:gpt-x-mini", ModelId = "gpt-x-mini", Registered = false, PriceBasis = "configured", InPer1M = 0.15m, OutPer1M = 0.60m, Health = new HealthView { State = "unknown" } }],
+                },
+            ],
+        }, CovenantJsonContext.Default.CatalogReport);
+
+        var ui = JsonSerializer.Deserialize(body, UiModels.UiJsonContext.Default.CatalogResponse)!;
+        Assert.Equal(7, ui.ConfigVersion);
+        Assert.Equal(new[] { "api.openai.com:443", "ollama-host:11434" }, ui.EgressAllowList);
+        Assert.Equal("Local", ui.Models[0].Boundary);
+        Assert.Equal("ollama", ui.Models[0].ConnectionId);
+        Assert.Equal("ollama:qwen3:8b", ui.Models[0].Key);
+        Assert.Equal("refused", ui.Local!.EndpointHealth!.LastError);
+        var c = Assert.Single(ui.Connections!);
+        Assert.Equal("OpenAi", c.Kind);
+        Assert.Equal("Cloud", c.Boundary);
+        Assert.True(c.EndpointAllowListed);
+        Assert.False(c.SecretAvailable);
+        Assert.Equal("Secrets:openai", c.SecretRef);
+        var m = Assert.Single(c.Models);
+        Assert.False(m.Registered);
+        Assert.Equal(0.15m, m.InPer1M);
+        Assert.Equal("unknown", m.Health!.State);
+    }
+
+    // T04/T06 read paths. These pin the backend's budget-ledger and audit-archive views (implemented concurrently with
+    // the console; see docs/console-v2-progress.md "T08 UI" — integration pending until those land and pass).
+
+    [Fact]
+    public void Budget_state_and_contributions_reach_the_console()
+    {
+        var states = JsonSerializer.Serialize(new List<BudgetStateView>
+        {
+            new()
+            {
+                Id = "global", Scope = "global", Period = "monthly", PeriodId = "2026-10", PeriodStartUtc = Created, PeriodEndUtc = Created.AddDays(16),
+                CapUsd = 25m, SpentUsd = 0.000184m, ReservedUsd = 0.0021m, RemainingUsd = 24.997716m, WarnAt = [0.8m, 0.95m], Warning = "none", Enforcement = "hard",
+            },
+        }, CovenantJsonContext.Default.ListBudgetStateView);
+        var ui = Assert.Single(JsonSerializer.Deserialize(states, UiModels.UiJsonContext.Default.ListBudgetStateDto)!);
+        Assert.Equal("2026-10", ui.PeriodId);
+        Assert.Equal(0.000184m, ui.SpentUsd);
+        Assert.Equal(0.0021m, ui.ReservedUsd);
+        Assert.Equal(Created, ui.PeriodStartUtc);
+        Assert.Equal(new[] { 0.8m, 0.95m }, ui.WarnAt);
+        Assert.Equal("$0.000184", Covenant.Ui.Logic.Money.Usd(ui.SpentUsd));
+
+        var contributions = JsonSerializer.Serialize(new BudgetRequestsView
+        {
+            BudgetId = "global", Scope = "global", PeriodId = "2026-10",
+            Items =
+            [
+                new BudgetContributionView { RequestId = "req_a", AttemptId = "att_2", Kind = "settle", AmountUsd = 0.000184m, TsUtc = Created, Overrun = true },
+                new BudgetContributionView { RequestId = "req_b", AttemptId = "att_1", Kind = "settle-recovered", AmountUsd = 0.0021m, TsUtc = Created },
+            ],
+        }, CovenantJsonContext.Default.BudgetRequestsView);
+        var rows = Covenant.Ui.Logic.BudgetRequests.Parse(contributions)!;
+        Assert.Equal(new[] { "req_a", "req_b" }, rows.Select(r => r.RequestId));
+        Assert.Equal(0.000184m, rows[0].AmountUsd);
+        Assert.Equal("att_2", rows[0].AttemptId);
+        Assert.True(rows[0].Overrun);
+        Assert.Equal("settle-recovered", rows[1].Kind);
+        Assert.Equal(Created, rows[0].TimestampUtc);
+    }
+
+    [Fact]
+    public void Audit_segments_and_cursor_pages_reach_the_console()
+    {
+        var segs = JsonSerializer.Serialize(new List<SegmentView>
+        {
+            new() { Id = "current", Label = "Current", Current = true, Entries = 12, ChainValid = true, FirstUtc = Created },
+            new() { Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00", Current = false, Entries = 40, Events = 2, ChainValid = true, ArchivedUtc = Created.AddDays(-15) },
+        }, AuditJsonContext.Default.ListSegmentView);
+        var ui = JsonSerializer.Deserialize(segs, UiModels.UiJsonContext.Default.ListAuditSegmentDto)!;
+        Assert.True(Covenant.Ui.Logic.SegmentScope.IsCurrent(ui[0], ui));
+        Assert.False(Covenant.Ui.Logic.SegmentScope.IsCurrent(ui[1], ui));
+        Assert.Equal(40, ui[1].Entries);
+        Assert.Equal(2, ui[1].Events);
+        Assert.NotNull(ui[1].ArchivedUtc);
+
+        var page = JsonSerializer.Serialize(new RequestsPage
+        {
+            Segment = new SegmentInfo { Path = "/var/covenant/audit.jsonl", Entries = 40, ChainValid = true, Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00" },
+            Items = [],
+            NextCursor = "opaque-token",
+        }, AuditJsonContext.Default.RequestsPage);
+        var uiPage = JsonSerializer.Deserialize(page, UiModels.UiJsonContext.Default.RequestsResponse)!;
+        Assert.Equal("a-0123456789abcdef", uiPage.Segment.Id); // the console refuses to label an unconfirmed segment
+        Assert.Equal("opaque-token", uiPage.NextCursor);
+        Assert.Equal(40, uiPage.Segment.Entries);
+    }
+
     private static JsonElement Wire(string json)
     {
         using var doc = JsonDocument.Parse(json);

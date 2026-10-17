@@ -178,6 +178,7 @@ public sealed class ConfigImpactRowDto
     [JsonPropertyName("profile")] public string? Profile { get; set; }
     [JsonPropertyName("before")] public string? Before { get; set; }
     [JsonPropertyName("after")] public string? After { get; set; }
+    [JsonPropertyName("changed")] public bool Changed { get; set; }
 }
 
 public sealed class ConfigImpactDto
@@ -192,6 +193,7 @@ public sealed class ConfigImpactDto
 public sealed class ConfigValidationResultDto
 {
     [JsonPropertyName("valid")] public bool Valid { get; set; }
+    [JsonPropertyName("active_version")] public int? ActiveVersion { get; set; }
     [JsonPropertyName("errors")] public List<ConfigIssueDto> Errors { get; set; } = [];
     [JsonPropertyName("warnings")] public List<ConfigIssueDto> Warnings { get; set; } = [];
     [JsonPropertyName("impact")] public ConfigImpactDto? Impact { get; set; }
@@ -207,6 +209,16 @@ public sealed class ConfigPutResponseDto
 {
     [JsonPropertyName("version")] public int Version { get; set; }
     [JsonPropertyName("etag")] public string? Etag { get; set; }
+}
+
+/// <summary>Error body of /admin/config* (400/404/412/422/428): <c>active_version</c> on 412/422/428, field issues on 422.</summary>
+public sealed class ConfigErrorResponseDto
+{
+    [JsonPropertyName("error")] public string? Error { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("active_version")] public int? ActiveVersion { get; set; }
+    [JsonPropertyName("errors")] public List<ConfigIssueDto>? Errors { get; set; }
+    [JsonPropertyName("warnings")] public List<ConfigIssueDto>? Warnings { get; set; }
 }
 
 public sealed class ConfigVersionDto
@@ -287,6 +299,8 @@ public sealed class BudgetStateDto
     [JsonPropertyName("scope")] public string Scope { get; set; } = "";
     [JsonPropertyName("period")] public string? Period { get; set; }
     [JsonPropertyName("period_id")] public string? PeriodId { get; set; }
+    [JsonPropertyName("period_start_utc")] public DateTimeOffset? PeriodStartUtc { get; set; }
+    [JsonPropertyName("period_end_utc")] public DateTimeOffset? PeriodEndUtc { get; set; }
     [JsonPropertyName("cap_usd")] public decimal CapUsd { get; set; }
     [JsonPropertyName("spent_usd")] public decimal SpentUsd { get; set; }
     [JsonPropertyName("reserved_usd")] public decimal ReservedUsd { get; set; }
@@ -303,16 +317,24 @@ public sealed class SimulateRequestDto
     [JsonPropertyName("profile_id")] public string? ProfileId { get; set; }
     [JsonPropertyName("prompt")] public string Prompt { get; set; } = "";
     [JsonPropertyName("model")] public string? Model { get; set; }
+    /// <summary>Optional unsaved candidate to simulate against (validated by the Host, never applied).</summary>
+    [JsonPropertyName("config")] public CovenantConfigDto? Config { get; set; }
 }
 
 public sealed class SimulateEligibleDto
 {
     [JsonPropertyName("target")] public string? Target { get; set; }
+    [JsonPropertyName("boundary")] public string? Boundary { get; set; }
     [JsonPropertyName("excluded_reason")] public string? ExcludedReason { get; set; }
 }
 
 public sealed class SimulateResponseDto
 {
+    /// <summary>Always true from the Host: no provider call, no audit record, no spend or reservation.</summary>
+    [JsonPropertyName("dry_run")] public bool DryRun { get; set; }
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
+    [JsonPropertyName("application_id")] public string? ApplicationId { get; set; }
+    [JsonPropertyName("profile")] public string? Profile { get; set; }
     [JsonPropertyName("classification")] public string? Classification { get; set; }
     [JsonPropertyName("baseline")] public string? Baseline { get; set; }
     [JsonPropertyName("detected_signal")] public string? DetectedSignal { get; set; }
@@ -323,4 +345,38 @@ public sealed class SimulateResponseDto
     [JsonPropertyName("primary")] public string? Primary { get; set; }
     [JsonPropertyName("fallbacks")] public List<string> Fallbacks { get; set; } = [];
     [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("explanation")] public string? Explanation { get; set; }
+}
+
+// ---- Budget drill-down and audit archive (ADR-0014, spec §5) — integration pending on the backend ----
+
+/// <summary>One settled contribution to a budget (GET /admin/budgets/{id}/requests → <c>{budget_id, scope, period_id,
+/// items:[{request_id, attempt_id, kind, amount_usd, ts_utc, overrun}]}</c>). Parsed leniently by Logic/BudgetRequests
+/// (also a bare array and a few alternative field names) so a naming difference degrades to "Not reported".</summary>
+public sealed class BudgetRequestDto
+{
+    public string RequestId { get; set; } = "";
+    public string? AttemptId { get; set; }
+    public decimal? AmountUsd { get; set; }
+    public DateTimeOffset? TimestampUtc { get; set; }
+    public string? Scope { get; set; }
+    /// <summary>settle | settle-recovered | legacy-import.</summary>
+    public string? Kind { get; set; }
+    /// <summary>Reported charge exceeded the reservation (settled in full, never truncated).</summary>
+    public bool Overrun { get; set; }
+}
+
+/// <summary>GET /admin/audit/segments row: the current segment plus archived siblings (ids only, never paths).</summary>
+public sealed class AuditSegmentDto
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("label")] public string? Label { get; set; }
+    [JsonPropertyName("entries")] public int? Entries { get; set; }
+    [JsonPropertyName("first_utc")] public DateTimeOffset? FirstUtc { get; set; }
+    [JsonPropertyName("last_utc")] public DateTimeOffset? LastUtc { get; set; }
+    [JsonPropertyName("chain_valid")] public bool? ChainValid { get; set; }
+    [JsonPropertyName("events")] public int? Events { get; set; }
+    [JsonPropertyName("archived_utc")] public DateTimeOffset? ArchivedUtc { get; set; }
+    /// <summary>Optional explicit flag; when absent the console treats id "current" (else the first row) as current.</summary>
+    [JsonPropertyName("current")] public bool? Current { get; set; }
 }

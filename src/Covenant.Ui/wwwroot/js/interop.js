@@ -1,12 +1,14 @@
 // Covenant console — the entire JS surface. No libraries, no network, no logging.
 //
-// Storage rules (TASK 01): localStorage holds ONLY the theme choice. The admin token lives in
+// Storage rules (TASK 01, T08): localStorage holds ONLY the theme choice and the allow-listed console
+// preferences in PREF_KEYS (browser-local presentation defaults; never credentials or server configuration). The admin token lives in
 // sessionStorage (tab-scoped; closing the tab disconnects). Application keys, prompts and responses are
 // never persisted anywhere by this file — they stay in WASM memory.
 (function () {
   "use strict";
 
   var THEME_KEY = "covenant.theme";
+  var PREF_KEYS = { "stream-default": true };
 
   function applyTheme(theme) {
     var t = theme === "light" ? "light" : "dark";
@@ -44,6 +46,15 @@
       var t = applyTheme(theme);
       try { window.localStorage.setItem(THEME_KEY, t); } catch (e) { /* preference simply won't persist */ }
       return t;
+    },
+
+    prefGet: function (name) {
+      if (!PREF_KEYS[name]) return null;
+      try { return window.localStorage.getItem("covenant.pref." + name); } catch (e) { return null; }
+    },
+    prefSet: function (name, value) {
+      if (!PREF_KEYS[name]) return false;
+      try { window.localStorage.setItem("covenant.pref." + name, String(value)); return true; } catch (e) { return false; }
     },
 
     focusElement: function (id) {

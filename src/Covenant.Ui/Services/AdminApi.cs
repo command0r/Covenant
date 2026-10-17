@@ -12,6 +12,13 @@ public sealed class ApiException(HttpStatusCode? status, string message) : Excep
     public HttpStatusCode? Status { get; } = status;
 }
 
+/// <summary>Status, body text and ETag of a raw admin call (body never contains a secret: config payloads carry
+/// secret references only).</summary>
+public sealed record RawResponse(int Status, string Body, string? ETag)
+{
+    public bool IsSuccess => Status is >= 200 and < 300;
+}
+
 /// <summary>Typed client for /admin/*. Every call carries X-Covenant-Admin-Token from AppState; a 401 raises
 /// Unauthorized (ConsoleSession then disconnects and routes to /connect with "Token rejected") and throws.
 /// Admin and application credentials are never mixed: this class knows nothing about application keys.</summary>
@@ -84,6 +91,83 @@ public sealed class AdminApi(HttpClient http, AppState state)
             throw;
         }
         return response;
+    }
+
+    // ---- T08: configuration editing, budgets drill-down, audit archive, request export ----
+
+    /// <summary>POST /admin/config/validate. Never mutates. Raw answer: 200 carries the result (valid or not);
+    /// 400/404/5xx are reported by the caller.</summary>
+    public Task<RawResponse> ValidateConfigRawAsync(ConfigValidateRequestDto body, CancellationToken ct = default)
+        => SendRawAsync(HttpMethod.Post, "/admin/config/validate", JsonContent.Create(body, UiJsonContext.Default.ConfigValidateRequestDto), null, ct);
+
+    /// <summary>PUT /admin/config with If-Match = the ETag of the version the draft was taken from (never "*").</summary>
+    public Task<RawResponse> PutConfigRawAsync(ConfigPutRequestDto body, string ifMatch, CancellationToken ct = default)
+        => SendRawAsync(HttpMethod.Put, "/admin/config", JsonContent.Create(body, UiJsonContext.Default.ConfigPutRequestDto), ifMatch, ct);
+
+    /// <summary>POST /admin/config/rollback — activates the target's content as a NEW version (412 when the active moved).</summary>
+    public Task<RawResponse> RollbackConfigRawAsync(int targetVersion, int expectedActiveVersion, CancellationToken ct = default)
+        => SendRawAsync(HttpMethod.Post, "/admin/config/rollback",
+            JsonContent.Create(new ConfigRollbackRequestDto { TargetVersion = targetVersion, ExpectedActiveVersion = expectedActiveVersion },
+                UiJsonContext.Default.ConfigRollbackRequestDto), null, ct);
+
+    public Task<List<ConfigVersionDto>> GetConfigVersionsAsync(int limit = 50, CancellationToken ct = default)
+        => GetAsync("/admin/config/versions?limit=" + limit.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            UiJsonContext.Default.ListConfigVersionDto, ct);
+
+    public Task<CovenantConfigDto> GetConfigVersionAsync(int version, CancellationToken ct = default)
+        => GetAsync("/admin/config/versions/" + version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            UiJsonContext.Default.CovenantConfigDto, ct);
+
+    /// <summary>POST /admin/policies/simulate — dry run with the real engine; no provider call, no audit, no spend.
+    /// With <see cref="SimulateRequestDto.Config"/> set, the Host validates that candidate (422 when invalid).</summary>
+    public Task<SimulateResponseDto> SimulateAsync(SimulateRequestDto body, CancellationToken ct = default)
+        => PostAsync("/admin/policies/simulate", body, UiJsonContext.Default.SimulateRequestDto, UiJsonContext.Default.SimulateResponseDto, ct);
+
+    /// <summary>GET /admin/budgets/{id}/requests as raw JSON (parsed leniently by Logic/BudgetRequests).</summary>
+    public Task<string> GetBudgetRequestsJsonAsync(string budgetId, int limit = 100, CancellationToken ct = default)
+        => GetTextAsync("/admin/budgets/" + Uri.EscapeDataString(budgetId) + "/requests?limit="
+                        + limit.ToString(System.Globalization.CultureInfo.InvariantCulture), ct);
+
+    /// <summary>GET /admin/audit/segments — the current segment plus archived siblings (ids only).</summary>
+    public Task<List<AuditSegmentDto>> GetSegmentsAsync(CancellationToken ct = default)
+        => GetAsync("/admin/audit/segments", UiJsonContext.Default.ListAuditSegmentDto, ct);
+
+    /// <summary>One newest-first page: <paramref name="cursor"/> from the previous page's <c>next_cursor</c>;
+    /// <paramref name="segment"/> = a segment id from GET /admin/audit/segments (null = current segment).</summary>
+    public Task<RequestsResponse> GetRequestsPageAsync(int limit, string? cursor, string? segment, CancellationToken ct = default)
+    {
+        var path = "/admin/requests?limit=" + limit.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (!string.IsNullOrWhiteSpace(cursor)) path += "&cursor=" + Uri.EscapeDataString(cursor);
+        if (!string.IsNullOrWhiteSpace(segment)) path += "&segment=" + Uri.EscapeDataString(segment);
+        return GetAsync(path, UiJsonContext.Default.RequestsResponse, ct);
+    }
+
+    /// <summary>GET /admin/requests/{id}/export — the per-request evidence report (no prompt/response content),
+    /// byte-for-byte as the server produced it.</summary>
+    public Task<string> GetRequestExportJsonAsync(string id, string? segment = null, CancellationToken ct = default)
+        => GetTextAsync("/admin/requests/" + Uri.EscapeDataString(id) + "/export"
+                        + (string.IsNullOrWhiteSpace(segment) ? "" : "?segment=" + Uri.EscapeDataString(segment)), ct);
+
+    /// <summary>Raw send for calls whose non-2xx bodies carry meaning (config writes: 412/422/428). A 401 still
+    /// raises <see cref="Unauthorized"/>. Transport failures throw.</summary>
+    public async Task<RawResponse> SendRawAsync(HttpMethod method, string path, HttpContent? content, string? ifMatch, CancellationToken ct)
+    {
+        using var request = NewRequest(method, path);
+        if (content is not null) request.Content = content;
+        if (!string.IsNullOrWhiteSpace(ifMatch)) request.Headers.TryAddWithoutValidation("If-Match", ifMatch);
+        using var response = await http.SendAsync(request, ct);
+        var text = await response.Content.ReadAsStringAsync(ct);
+        if (response.StatusCode == HttpStatusCode.Unauthorized) Unauthorized?.Invoke();
+        string? etag = response.Headers.ETag?.Tag;
+        return new RawResponse((int)response.StatusCode, text, etag);
+    }
+
+    private async Task<string> GetTextAsync(string path, CancellationToken ct)
+    {
+        using var request = NewRequest(HttpMethod.Get, path);
+        using var response = await http.SendAsync(request, ct);
+        await EnsureSuccessAsync(response, ct);
+        return await response.Content.ReadAsStringAsync(ct);
     }
 
     /// <summary>For callers that send their own admin requests (console inference): a 401 there means the admin

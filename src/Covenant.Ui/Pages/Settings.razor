@@ -2,58 +2,145 @@
 @inject AppState State
 @inject AdminApi Api
 @inject ConsoleSession Session
+@inject ConfigEditor Editor
+@inject PlaygroundState Pg
+@inject Interop Interop
 @inject NavigationManager Nav
 @implements IDisposable
 
 <PageTitle>Settings · Covenant</PageTitle>
 
+@*
+  T08. Grouped: Operational (server, versioned configuration — Edit → Preview impact → Save & apply), Console
+  preferences (this browser only), Diagnostics (read-only startup facts; restart-only), Maintenance (archive the audit
+  segment — separate from accounting, precise typed confirmation). Nothing unsupported has a Save button.
+*@
+
 <div class="page">
     <RequiresConnection>
-        @if (State.LastStatus is not { } s)
-        {
-            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
-        }
-        else
-        {
-            <div class="page-head">
-                <div class="titles">
-                    <h1>Settings</h1>
-                    <span class="lede">Values in effect since the last start (@Fmt.Utc(s.StartedUtc)). Change them in configuration and restart — there is nothing to save here.</span>
+        <div class="page-head">
+            <div class="titles">
+                <h1>Settings</h1>
+                <span class="lede">Operational settings are server configuration (versioned, audited). Preferences stay in this browser. Startup values need a restart.</span>
+            </div>
+        </div>
+
+        <EditorBar Owner="settings" Subject="Operational settings" ClaimedPaths="@(new[] { "settings" })"
+                   ViewHint="Viewing applied operational settings. Edit to change them; they apply to new requests after Save." />
+
+        <section class="panel" aria-labelledby="op-h">
+            <div class="panel-head">
+                <h2 id="op-h">Operational</h2>
+                <span class="panel-sub">Server configuration · applies to new requests after Save &amp; apply · no restart</span>
+            </div>
+            @if (Editor.Current?.Settings is not { } st)
+            {
+                if (Editor.Loading || (Editor.Applied is null && Editor.LoadError is null))
+                {
+                    <Skeleton Lines="4" Label="Loading operational settings" />
+                }
+                else if (Editor.Current is not null)
+                {
+                    <EmptyState Title="No operational settings reported" Body="The active configuration carries no settings object, so there is nothing to edit here." />
+                }
+                else
+                {
+                    <EmptyState Title="Operational settings unavailable" Body="@(Editor.LoadError ?? "The configuration could not be read.")" />
+                }
+            }
+            else
+            {
+                <div class="form-grid">
+                    <div class="field">
+                        <label for="s-ttl">Exact-cache TTL (seconds)</label>
+                        <input id="s-ttl" class="input mono" type="number" min="0" disabled="@(!Editing)" @bind="st.CacheTtlSeconds" @bind:after="Editor.Touch" aria-describedby="s-ttl-h" />
+                        <span id="s-ttl-h" class="help">0 disables the cache. A hit still passes auth, classification and policy; it makes no provider call (also while provider calls are paused).</span>
+                        <FieldIssues Issues="@Editor.Issues" Path="settings.cache_ttl_seconds" />
+                    </div>
+                    <div class="field">
+                        <label for="s-max">Cache max entries</label>
+                        <input id="s-max" class="input mono" type="number" min="1" disabled="@(!Editing)" @bind="st.CacheMaxEntries" @bind:after="Editor.Touch" />
+                        <FieldIssues Issues="@Editor.Issues" Path="settings.cache_max_entries" />
+                    </div>
+                    <div class="field">
+                        <label for="s-prev">Prompt preview retained in evidence (characters, 0–500)</label>
+                        <input id="s-prev" class="input mono" type="number" min="0" max="500" disabled="@(!Editing)" @bind="st.PromptPreviewChars" @bind:after="Editor.Touch"
+                               aria-describedby="s-prev-h" aria-invalid="@(st.PromptPreviewChars is < 0 or > 500 ? "true" : "false")" />
+                        <span id="s-prev-h" class="help @(st.PromptPreviewChars is > 0 ? "warn" : "")">
+                            @(st.PromptPreviewChars is > 0
+                                ? "Retention warning: the first " + (st.PromptPreviewChars ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters of EVERY prompt will be stored in the tamper-evident audit log and cannot be removed later. Use 0 unless your retention policy allows prompt content in evidence."
+                                : "0 = no prompt content in evidence (only a SHA-256 fingerprint and length).")
+                        </span>
+                        <FieldIssues Issues="@Editor.Issues" Path="settings.prompt_preview_chars" />
+                    </div>
+                    <div class="field">
+                        <label for="s-trace">Live trace retention (minutes, 1–1440)</label>
+                        <input id="s-trace" class="input mono" type="number" min="1" max="1440" disabled="@(!Editing)" @bind="st.TraceRetentionMinutes" @bind:after="Editor.Touch" />
+                        <span class="help">How long detailed stage events stay replayable. The compact trace summary is kept in the audit record.</span>
+                        <FieldIssues Issues="@Editor.Issues" Path="settings.trace_retention_minutes" />
+                    </div>
+                    <div class="field">
+                        <label for="s-rg">Rate limit — all traffic (requests/minute, 0 = off)</label>
+                        <input id="s-rg" class="input mono" type="number" min="0" disabled="@(!Editing)" @bind="st.RateLimitGlobalPerMinute" @bind:after="Editor.Touch" />
+                        <FieldIssues Issues="@Editor.Issues" Path="settings.rate_limit_global_per_minute" />
+                    </div>
+                    <div class="field">
+                        <label for="s-rt">Rate limit — per team (requests/minute, 0 = off)</label>
+                        <input id="s-rt" class="input mono" type="number" min="0" disabled="@(!Editing)" @bind="st.RateLimitPerTeamPerMinute" @bind:after="Editor.Touch" />
+                        <FieldIssues Issues="@Editor.Issues" Path="settings.rate_limit_per_team_per_minute" />
+                    </div>
+                </div>
+            }
+        </section>
+
+        <section class="panel" aria-labelledby="pref-h">
+            <div class="panel-head">
+                <h2 id="pref-h">Console preferences</h2>
+                <span class="panel-sub">This browser only · saved immediately · never sent to the server</span>
+            </div>
+            <div class="form-grid">
+                <div class="field">
+                    <span class="field-label" id="theme-l">Theme</span>
+                    <div class="seg" role="radiogroup" aria-labelledby="theme-l">
+                        <button type="button" role="radio" aria-checked="@(_theme == "dark" ? "true" : "false")" @onclick="@(() => SetThemeAsync("dark"))"><Icon Name="moon" Size="16" /> Dark</button>
+                        <button type="button" role="radio" aria-checked="@(_theme == "light" ? "true" : "false")" @onclick="@(() => SetThemeAsync("light"))"><Icon Name="sun" Size="16" /> Light</button>
+                    </div>
+                </div>
+                <div class="field">
+                    <span class="field-label" id="stream-l">Default response mode for new requests</span>
+                    <div class="seg" role="radiogroup" aria-labelledby="stream-l">
+                        <button type="button" role="radio" aria-checked="@(Pg.StreamingDefault ? "true" : "false")" @onclick="@(() => SetStreamingAsync(true))">Streamed</button>
+                        <button type="button" role="radio" aria-checked="@(!Pg.StreamingDefault ? "true" : "false")" @onclick="@(() => SetStreamingAsync(false))">Buffered</button>
+                    </div>
+                    <span class="help">Used when the composer starts empty; each run can still change it under Advanced.</span>
                 </div>
             </div>
+            @if (_prefNote is { } pn)
+            {
+                <span class="note" role="status">@pn</span>
+            }
+            <span class="note">Presentation mode follows the operating system's reduced-motion setting; open it from the Playground.</span>
+        </section>
 
-            <section class="panel flush" aria-labelledby="cfg-h">
+        @if (State.LastStatus is { } s)
+        {
+            <section class="panel" aria-labelledby="diag-h">
                 <div class="panel-head">
-                    <h2 id="cfg-h">Environment and configuration</h2>
-                    <span class="panel-sub">Managed by configuration; restart required</span>
+                    <h2 id="diag-h">Diagnostics</h2>
+                    <span class="panel-sub">Read-only · startup configuration · restart required to change</span>
                 </div>
-                <div class="table-wrap">
-                    <table>
-                        <tbody>
-                            @foreach (var row in Rows(s))
-                            {
-                                <tr>
-                                    <th scope="row" style="width:34%">@row.Key</th>
-                                    <td>
-                                        <div style="display:flex;flex-direction:column;gap:2px">
-                                            <span class="@(row.Mono ? "mono" : "")">@row.Value</span>
-                                            @if (row.Note is not null)
-                                            {
-                                                <span class="secondary subtle">@row.Note</span>
-                                            }
-                                        </div>
-                                    </td>
-                                </tr>
-                            }
-                        </tbody>
-                    </table>
-                </div>
+                <FactList Inline="true" Facts="@SummaryFacts(s)" />
+                <details class="tech">
+                    <summary>Technical details</summary>
+                    <FactList Facts="@DiagnosticFacts(s)" />
+                    <span class="note">Restart-only (never editable in the console): Admin:Token, secret values, Auth:Keys key values, Audit:*, Config:Path, Providers:ProbeAllowList (egress allow-list), Providers:LocalEndpoints. After configuration v1 exists, legacy routing keys (Providers:Mode, OpenAI:*, Local:*, Budget:*, Pricing:*, Routing:*) are ignored; the Host logs each ignored key at startup.</span>
+                </details>
             </section>
 
             <section class="panel" aria-labelledby="ses-h">
-                <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
+                <div class="panel-head">
                     <h2 id="ses-h">This console session</h2>
-                    <span class="panel-sub">Connected with the shared admin token, kept in this tab’s session storage. It administers the console only and never sends model requests. Disconnecting does not pause Covenant.</span>
+                    <span class="panel-sub">Shared admin token in this tab's session storage; disconnecting does not pause Covenant</span>
                 </div>
                 <FactList Facts="@SessionFacts()" />
                 <div class="btn-row">
@@ -61,59 +148,45 @@
                 </div>
             </section>
 
-            <section class="panel" aria-labelledby="mt-h" style="border-color:var(--amber)">
-                <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
-                    <h2 id="mt-h">Maintenance</h2>
-                    <span class="panel-sub">Separate from day-to-day settings. Not a way to start a demo, and not a fix for an exhausted budget.</span>
+            <section class="panel maintenance" aria-labelledby="mt-h">
+                <div class="panel-head">
+                    <h2 id="mt-h">Maintenance — archive the audit segment</h2>
+                    <span class="panel-sub">Separate from accounting · not a demo step · not a fix for an exhausted budget</span>
                 </div>
-                <div style="display:flex;flex-direction:column;gap:8px">
-                    <strong>Archive audit segment and reset spend accounting</strong>
-                    <ul class="plain-list secondary muted">
-                        <li>The current audit segment is closed and archived with a timestamp. Nothing is deleted; the archive stays independently verifiable.</li>
-                        <li>Spend counters reset to $0. Any reached budget reopens because accounting restarts, not because spend went away.</li>
-                        <li>Overview, Budgets and Requests then show only the new segment.</li>
-                    </ul>
-                </div>
-
-                @if (_resetError is not null)
-                {
-                    <ErrorBanner Title="Archive & reset failed" Message="@_resetError" />
-                }
+                <ul class="plain-list secondary muted">
+                    <li>The current audit segment is closed and archived beside the log with a timestamp. Nothing is deleted; the archive stays independently verifiable and browsable under Requests (segment selector).</li>
+                    <li>@AccountingImpact</li>
+                    <li>Budget period rollover is a different thing: it happens by UTC date and never archives evidence.</li>
+                </ul>
+                <ErrorBanner Title="Archive failed" Message="@_resetError" />
                 @if (_resetResult is { } done)
                 {
                     <div class="alert ok" role="status">
                         <div class="alert-text">
-                            <strong>Segment archived · accounting reset</strong>
-                            <span class="alert-body">
-                                @(done.ArchivedTo is { Length: > 0 } ? "Archived to " : "Nothing to archive (the segment was empty); ")
-                                @if (done.ArchivedTo is { Length: > 0 })
-                                {
-                                    <span class="mono">@done.ArchivedTo</span><span>. </span>
-                                }
-                                A new segment has started.
-                            </span>
+                            <strong>Audit segment archived (confirmed by the Host)</strong>
+                            <span class="alert-body">@(done.ArchivedTo is { Length: > 0 } ? "Archived to " + done.ArchivedTo + ". " : "The segment was empty; nothing to archive. ")A new segment has started.</span>
                         </div>
-                        <a class="btn" href="evidence">View in Evidence</a>
+                        <a class="btn" href="audit">Open Audit &amp; evidence</a>
                     </div>
                 }
-
                 @if (!s.ChainValid)
                 {
-                    <AlertCard Tone="bad" Title="Chain verification is failing — do not archive" Body="Investigate the current segment first (Evidence). Archiving now would move an unverifiable segment out of view." ActionText="Open evidence" ActionHref="evidence" />
+                    <AlertCard Tone="bad" Title="Chain verification is failing — do not archive" Body="Investigate the current segment first. Archiving would move an unverifiable segment out of the default view." ActionText="Open Audit & evidence" ActionHref="audit" />
                 }
                 else
                 {
                     <div class="btn-row">
-                        <Button Id="reset-open" Variant="danger" OnClick="@(() => { _confirmOpen = true; _typed = ""; })" Disabled="@_resetting">Archive and reset accounting…</Button>
+                        <Button Id="reset-open" Variant="danger" OnClick="OpenConfirm" Disabled="@_resetting">Archive audit segment…</Button>
                     </div>
                 }
             </section>
 
-            <Drawer Mode="dialog" Title="@("Confirm for environment " + State.EnvironmentLabel)" @bind-Open="_confirmOpen" OpenerId="reset-open">
-                <p class="secondary">This will <strong>archive the current audit segment</strong> (@Fmt.Int(s.AuditEntries) entries, since @SegmentStart(s)) and <strong>reset spend counters</strong> (@Fmt.Usd(s.Budget.GlobalSpendUsd) recorded against a @Fmt.UsdTotal(s.Budget.GlobalCapUsd) cap) — budgets reopen. The archived segment is kept and stays verifiable. Nothing is deleted.</p>
+            <Drawer Mode="dialog" Title="@("Archive the audit segment of " + State.EnvironmentLabel + "?")" @bind-Open="_confirmOpen" OpenerId="reset-open">
+                <p class="secondary">This archives the <strong>current audit segment</strong> of environment <span class="mono">@State.EnvironmentLabel</span> (@Fmt.Int(s.AuditEntries) entries) and starts a new one. Nothing is deleted.</p>
+                <p class="secondary">@AccountingImpact</p>
                 @if (State.Paused)
                 {
-                    <p class="secondary" style="color:var(--amber)">New provider calls are currently paused; resetting accounting does not resume them.</p>
+                    <p class="secondary note warn">New provider calls are paused; archiving does not resume them.</p>
                 }
                 <div class="field">
                     <label for="envname">Type the environment name (<span class="mono">@State.EnvironmentLabel</span>) to confirm</label>
@@ -121,68 +194,146 @@
                 </div>
                 <div class="btn-row" style="justify-content:flex-end">
                     <Button OnClick="@(() => _confirmOpen = false)" Disabled="@_resetting">Cancel</Button>
-                    <Button Variant="danger" OnClick="ResetAsync" Busy="@_resetting" BusyText="Archiving… (POST /admin/reset)" Disabled="@(!CanConfirm)">Archive and reset accounting</Button>
+                    <Button Variant="danger" OnClick="ResetAsync" Busy="@_resetting" BusyText="Archiving…" Disabled="@(!CanConfirm)">Archive segment</Button>
                 </div>
             </Drawer>
+        }
+        else
+        {
+            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
         }
     </RequiresConnection>
 </div>
 
 @code {
-    private sealed record Row(string Key, string Value, string? Note = null, bool Mono = false);
-
+    private string _theme = "dark";
+    private string? _prefNote;
     private bool _confirmOpen;
     private string _typed = "";
     private bool _resetting;
     private string? _resetError;
     private ResetResponse? _resetResult;
+    /// <summary>null = not checked yet; true = GET /admin/budgets answered (ADR-0014 ledger); false = 404 (pre-v2 counters).</summary>
+    private bool? _ledger;
 
+    private bool Editing => Editor.Editing && Editor.Owner == "settings";
     private bool CanConfirm => !_resetting && string.Equals(_typed.Trim(), State.EnvironmentLabel, StringComparison.Ordinal);
 
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    private string AccountingImpact => _ledger switch
+    {
+        true => "Budgets are NOT reopened and spend is NOT reset: spend and reservations live in the budget ledger, independent of audit segments (ADR-0014).",
+        false => "This Host has no budget ledger yet (GET /admin/budgets is missing): on it, archiving ALSO resets the pre-v2 spend counters, so reached budgets reopen.",
+        null => "Accounting impact is being checked (budget ledger present or not)…",
+    };
 
-    private static string NotReported => "Not reported by this Host";
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnChanged;
+        Editor.Changed += OnChanged;
+        Pg.Changed += OnChanged;
+        await Editor.EnsureLoadedAsync();
+        await CheckLedgerAsync();
+    }
 
-    private static List<Row> Rows(StatusReport s) =>
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        try { _theme = await Interop.GetThemeAsync(); } catch (JSException) { _theme = "dark"; }
+        StateHasChanged();
+    }
+
+    private async Task CheckLedgerAsync()
+    {
+        if (!State.Connected) return;
+        try
+        {
+            await Api.GetBudgetsAsync();
+            _ledger = true;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _ledger = false;
+        }
+        catch (Exception)
+        {
+            _ledger = null; // unknown: the confirmation keeps saying so
+        }
+    }
+
+    private async Task SetThemeAsync(string theme)
+    {
+        try
+        {
+            _theme = await Interop.SetThemeAsync(theme);
+            _prefNote = "Theme saved in this browser.";
+        }
+        catch (JSException)
+        {
+            _prefNote = "The browser refused to store the theme.";
+        }
+    }
+
+    private async Task SetStreamingAsync(bool streaming)
+    {
+        Pg.SetStreamingDefault(streaming);
+        bool stored;
+        try { stored = await Interop.PrefSetAsync("stream-default", streaming ? "true" : "false"); }
+        catch (JSException) { stored = false; }
+        _prefNote = stored ? "Default response mode saved in this browser." : "Applied for this session; the browser did not store it.";
+    }
+
+    private IReadOnlyList<FactList.Fact> SummaryFacts(StatusReport s) =>
     [
-        new("Environment", s.Environment ?? NotReported, "Shown in the header and in every confirmation", true),
-        new("Provider mode", s.Mode ?? NotReported, "Providers:Mode — cloud or local-only (ADR-0010)", true),
-        new("Covenant version", s.Version ?? NotReported, null, true),
-        new("Started", Fmt.Utc(s.StartedUtc), "Configuration is read once at start", true),
-        new("Audit log path", s.AuditPath ?? NotReported, "Audit:Path — the current segment; archives sit beside it", true),
-        new("Anchor", AnchorText(s), "Audit:AnchorPath / Audit:AnchorEvery — see Evidence for coverage"),
-        new("Cache TTL", s.CacheTtlSeconds is { } ttl ? (ttl == 0 ? "Disabled" : Fmt.Int(ttl) + " s") : NotReported, "Cache:TtlSeconds — identical governed requests are answered without a provider call", true),
-        new("Content-preview retention", s.PromptPreviewChars is { } pc ? (pc == 0 ? "No prompt preview stored" : Fmt.Int(pc) + " characters of each prompt") : NotReported, "Audit:PromptPreviewChars — the only prompt content the audit record holds", true),
-        new("Telemetry (OpenTelemetry)", s.OtelEnabled ? "Enabled — exporting to the configured in-perimeter collector" : "Disabled", "Otel:Endpoint; active only when configured (ADR-0003)"),
-        new("Routing threshold", Fmt.Int(s.RoutingThresholdTokens) + " estimated tokens", "Routing:ComplexityThresholdTokens — below: cheapest permitted route; above: escalate", true),
-        new("Application keys", Fmt.Int(s.Auth.KeyCount) + (s.Auth.KeyCount == 1 ? " key" : " keys") + (s.Auth.AllowAnonymous ? " · anonymous requests ALLOWED" : " · anonymous requests refused"), "Auth:Keys — count only; key values never leave the configuration", true),
-        new("Global budget cap", Fmt.UsdTotal(s.Budget.GlobalCapUsd), "Budget:GlobalCapUsd — team caps are listed under Budgets", true),
+        new("Environment", s.Environment ?? NotReported, true),
+        new("Mode", ShellStatus.Mode(Editor.Applied?.Config?.Mode ?? s.Mode).Label),
+        new("Active configuration", (Editor.AppliedVersion ?? s.ConfigVersion) is { } v ? "v" + v.ToString(System.Globalization.CultureInfo.InvariantCulture) : NotReported, true),
+        new("Started", Fmt.Utc(s.StartedUtc), true),
     ];
+
+    private IReadOnlyList<FactList.Fact> DiagnosticFacts(StatusReport s) =>
+    [
+        new("Covenant version", s.Version ?? NotReported, true),
+        new("Audit log path (Audit:Path)", s.AuditPath ?? NotReported, true),
+        new("Anchor (Audit:AnchorPath / AnchorEvery)", AnchorText(s)),
+        new("Configuration directory (Config:Path)", NotReported + " (default: beside the audit log, <audit>.config/)"),
+        new("Legacy keys ignored after import", NotReported + " — listed in the Host's startup log"),
+        new("Probe allow-list (Providers:ProbeAllowList ∪ Local:Endpoint)", State.Catalog?.ProbeAllowList is { Count: > 0 } pl ? string.Join(", ", pl) : NotReported, true),
+        new("Egress allow-list", Editor.Applied?.AllowList is { Count: > 0 } al ? string.Join(", ", al) : NotReported, true),
+        new("Telemetry (OpenTelemetry)", s.OtelEnabled ? "Enabled — in-perimeter collector" : "Disabled"),
+        new("Application keys (Auth:Keys)", Fmt.Int(s.Auth.KeyCount) + (s.Auth.AllowAnonymous ? " · anonymous requests ALLOWED" : " · anonymous requests refused"), true),
+    ];
+
+    private const string NotReported = "Not reported by this Host";
 
     private static string AnchorText(StatusReport s) => s.Anchor switch
     {
         null => NotReported,
         { Configured: false } => "Not configured",
-        { Configured: true, Every: { } every } => $"Configured · every {Fmt.Int(every)} entries",
+        { Configured: true, Every: { } every } => "Configured · every " + Fmt.Int(every) + " entries",
         _ => "Configured",
     };
 
-    private static string SegmentStart(StatusReport s)
-        => s.FinOps.Activity.Count > 0 ? Fmt.Utc(s.FinOps.Activity[0].T) : "start of segment (no entries yet)";
-
     private IReadOnlyList<FactList.Fact> SessionFacts() =>
     [
-        new("Credential", "Shared admin token (X-Covenant-Admin-Token)", true),
-        new("Stored in", "This tab’s sessionStorage only; cleared on disconnect or when the tab closes"),
-        new("Status feed", State.FeedMode switch { FeedMode.Stream => "Live stream (/admin/status/stream)", FeedMode.Polling => "Polling every 3 s (stream unavailable)", _ => "Not running" }, true),
+        new("Credential", "Shared admin token (X-Covenant-Admin-Token) — a shared console operator, not an individual identity", true),
+        new("Stored in", "This tab's sessionStorage only; cleared on disconnect or when the tab closes"),
+        new("Status feed", State.FeedMode switch { FeedMode.Stream => "Live stream", FeedMode.Polling => "Polling every 3 s (stream unavailable)", _ => "Not running" }),
         new("Application key", "Never held — console requests run as an authorized test application (ADR-0012)"),
-        new("Theme", "Stored in localStorage (the only value this console persists there)"),
     ];
+
+    private void OpenConfirm()
+    {
+        _confirmOpen = true;
+        _typed = "";
+        _resetError = null;
+    }
 
     private async Task ResetAsync()
     {
         if (!CanConfirm) return;
-        _resetting = true; _resetError = null; _resetResult = null;
+        _resetting = true;
+        _resetError = null;
+        _resetResult = null;
         try
         {
             _resetResult = await Api.ResetAsync();
@@ -198,7 +349,7 @@
             _resetting = false;
             _typed = "";
         }
-        // Never assume the outcome: re-sync the counters from the server either way.
+        // Never assume the outcome: re-sync from the server either way.
         await Session.TryRefreshAsync();
     }
 
@@ -209,5 +360,11 @@
     }
 
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
-    public void Dispose() => State.Changed -= OnChanged;
+
+    public void Dispose()
+    {
+        State.Changed -= OnChanged;
+        Editor.Changed -= OnChanged;
+        Pg.Changed -= OnChanged;
+    }
 }

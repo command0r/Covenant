@@ -1,0 +1,497 @@
+@inject AdminApi Api
+@inject CatalogState Catalog
+
+@* Add / edit one connection in a single form (spec §5 Models & connections). Ollama: endpoint → Test & discover
+   (bounded host-side probe) → choose exact tags (nothing selected by default) → price (explicit zero-marginal-local
+   basis, editable) → Preview impact (affected routes) → Save & apply. Cloud: provider kind, endpoint where supported,
+   a server-side secret REFERENCE (availability only, never a value), model ids and prices. The form changes only the
+   configuration draft; only the Host's 200 makes it a new active version. *@
+
+<div class="conn-form">
+    <fieldset>
+        <legend>1 · Connection</legend>
+        <div class="form-grid">
+            @if (Form.IsNew && !Form.IsOllama)
+            {
+                <div class="field">
+                    <label for="@(P + "-kind")">Provider</label>
+                    <select id="@(P + "-kind")" class="input" value="@Form.Kind" @onchange="OnKind">
+                        <option value="OpenAi">OpenAI</option>
+                        <option value="Anthropic">Anthropic</option>
+                        <option value="OpenAiCompatible">OpenAI-compatible (vLLM, gateway…)</option>
+                    </select>
+                </div>
+            }
+            else
+            {
+                <div class="field">
+                    <span class="field-label">Provider</span>
+                    <span class="static-value">@ConnectionRules.KindLabel(Form.Kind)</span>
+                </div>
+            }
+            <div class="field">
+                <label for="@(P + "-name")">Display name</label>
+                <input id="@(P + "-name")" class="input" type="text" @bind="Form.DisplayName" @bind:event="oninput" @bind:after="Changed" />
+            </div>
+            <div class="field">
+                <label for="@(P + "-id")">Connection id</label>
+                @if (Form.IsNew)
+                {
+                    <input id="@(P + "-id")" class="input mono" type="text" spellcheck="false" @bind="Form.Id" @bind:event="oninput" @bind:after="Changed"
+                           aria-describedby="@(P + "-id-h")" />
+                    <span id="@(P + "-id-h")" class="help">Stable id used by policies and evidence (letters, digits, . _ -). Cannot be changed later.</span>
+                }
+                else
+                {
+                    <span class="static-value mono">@Form.Id</span>
+                    <span class="help">Policies and evidence reference this id, so it cannot be renamed.</span>
+                }
+            </div>
+            <div class="field">
+                <span class="field-label" id="@(P + "-b-l")">Boundary</span>
+                @if (Form.Kind == "OpenAiCompatible")
+                {
+                    <div class="seg" role="radiogroup" aria-labelledby="@(P + "-b-l")">
+                        <button type="button" role="radio" aria-checked="@(Form.Boundary == "Cloud" ? "true" : "false")" @onclick="@(() => SetBoundary("Cloud"))">Cloud</button>
+                        <button type="button" role="radio" aria-checked="@(Form.Boundary == "Local" ? "true" : "false")" @onclick="@(() => SetBoundary("Local"))">Local (in perimeter)</button>
+                    </div>
+                    <span class="help">Local requires the endpoint's host:port in the startup list Providers:LocalEndpoints; a cloud host cannot be relabelled Local.</span>
+                }
+                else
+                {
+                    <span><BoundaryTag Boundary="@Form.Boundary" /> <span class="help">@(Form.IsOllama ? "Ollama runs inside the perimeter." : "OpenAI and Anthropic are always Cloud.")</span></span>
+                }
+                <FieldIssues Issues="@Issues" Path="@(Prefix + ".boundary")" />
+            </div>
+        </div>
+        <div class="field">
+            <label for="@(P + "-ep")">@(ConnectionRules.EndpointRequired(Form.Kind) ? "Endpoint (base URL as seen from the Covenant host)" : "Endpoint (optional — empty uses the provider default)")</label>
+            <input id="@(P + "-ep")" class="input mono" type="text" spellcheck="false"
+                   placeholder="@(Form.IsOllama ? "http://ollama-host:11434/v1" : Form.Kind == "OpenAiCompatible" ? "https://llm.internal:8000/v1" : "provider default")"
+                   value="@Form.Endpoint" @oninput="OnEndpointInput" aria-describedby="@(P + "-ep-h")"
+                   aria-invalid="@(EndpointProblem is not null || Issues.HasErrorAt(Prefix + ".endpoint") ? "true" : "false")" />
+            <span id="@(P + "-ep-h")" class="help @(EndpointProblem is not null ? "bad" : "")">
+                @(EndpointProblem ?? (Form.IsOllama ? "“localhost” means the machine running Covenant, not this browser. Point at Ollama itself, not at Open WebUI." : EgressNote))
+            </span>
+            @if (EndpointProblem is null && EgressWarning is { } ew)
+            {
+                <span class="help warn">@ew</span>
+            }
+            <FieldIssues Issues="@Issues" Path="@(Prefix + ".endpoint")" />
+        </div>
+        <div class="field-row">
+            <label class="switch"><input type="checkbox" @bind="Form.Enabled" @bind:after="Changed" /> Enabled (eligible for routes)</label>
+            <div class="field narrow">
+                <label for="@(P + "-to")">Timeout per attempt (s)</label>
+                <input id="@(P + "-to")" class="input mono" type="number" min="1" max="600" placeholder="120" @bind="Form.TimeoutSeconds" @bind:after="Changed" />
+            </div>
+        </div>
+    </fieldset>
+
+    @if (Form.Endpoint.Trim().Length > 0 || Form.IsOllama)
+    {
+        <fieldset>
+            <legend>2 · Test @(Form.IsOllama ? "& discover models" : "the endpoint")</legend>
+            <span class="secondary muted">Covenant probes from its own host: GET …/models, 5 s timeout, 64 KiB cap, no redirects, allow-listed destinations only. No Covenant credential is sent. Discovery never approves a model.</span>
+            <div class="btn-row">
+                <button type="button" class="btn" @onclick="ProbeAsync" disabled="@(_probing || EndpointProblem is not null || Form.Endpoint.Trim().Length == 0)" aria-busy="@(_probing ? "true" : null)">
+                    @(_probing ? "Testing…" : "Test connection")
+                </button>
+                @if (_probe is { } done)
+                {
+                    <span class="indicator" role="status">
+                        <span class="dot @(done.Allowed && done.Reachable ? "ok" : "bad")" aria-hidden="true"></span>
+                        @ProbeHeadline(done)
+                    </span>
+                }
+            </div>
+            <ErrorBanner Title="Test request failed" Message="@_probeError" />
+            @if (_probe is { Allowed: false })
+            {
+                <div class="alert bad" role="alert">
+                    <div class="alert-text">
+                        <strong>Destination not allowed</strong>
+                        <span class="alert-body">Covenant only probes and connects to host:port pairs approved in its startup configuration. The console cannot widen that list.</span>
+                    </div>
+                </div>
+                <details class="tech">
+                    <summary>Technical details</summary>
+                    <span class="note">
+                        Add <span class="mono">@(ConnectionLogic.Authority(Form.Endpoint) ?? "host:port")</span> to <span class="mono">Providers:ProbeAllowList</span>
+                        (environment: <span class="mono">Providers__ProbeAllowList=@(ConnectionLogic.Authority(Form.Endpoint) ?? "host:port")</span>, comma-separated) and, for a Local
+                        connection, to <span class="mono">Providers:LocalEndpoints</span> (<span class="mono">Providers__LocalEndpoints</span>). Restart Covenant, then test again.
+                    </span>
+                </details>
+            }
+            else if (_probe is { Reachable: false } unreachable)
+            {
+                <div class="alert bad" role="alert">
+                    <div class="alert-text">
+                        <strong>Unreachable from the Covenant host</strong>
+                        <span class="alert-body wrap-any">@(unreachable.Error ?? "No answer.") Check the address from the Covenant host's point of view (container networking, firewall), then test again.</span>
+                    </div>
+                </div>
+            }
+        </fieldset>
+    }
+
+    <fieldset>
+        <legend>@(Form.Endpoint.Trim().Length > 0 || Form.IsOllama ? "3" : "2") · Permitted models and prices</legend>
+        @if (Form.IsOllama)
+        {
+            <span class="secondary muted">Select the exact tags Covenant may route to. Discovered tags start unselected; nothing is approved automatically.</span>
+        }
+        else
+        {
+            <span class="secondary muted">Enter exact provider model ids. A paid cloud model needs input and output prices — an unknown price is never treated as $0.</span>
+            <div class="field-row">
+                <div class="field">
+                    <label for="@(P + "-newm")">Model id</label>
+                    <input id="@(P + "-newm")" class="input mono" type="text" spellcheck="false" @bind="_newModel" @bind:event="oninput" />
+                </div>
+                <button type="button" class="btn form" @onclick="AddModel" disabled="@string.IsNullOrWhiteSpace(_newModel)"><Icon Name="plus" Size="16" /><span>Add model</span></button>
+            </div>
+        }
+        @if (Form.Models.Count == 0)
+        {
+            <EmptyState Title="@(Form.IsOllama ? "No models yet" : "No model ids yet")"
+                        Body="@(Form.IsOllama ? "Test the endpoint to list its installed tags, then select the ones to permit." : "Add the exact model ids this connection may serve.")" />
+        }
+        else
+        {
+            <ul class="model-rows">
+                @foreach (var m in Form.Models)
+                {
+                    var row = m;
+                    var idx = Form.Models.IndexOf(row);
+                    var sent = Form.SentIndex(row);
+                    var mp = sent is { } si ? Prefix + ".models[" + si.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]" : null;
+                    <li class="@(row.Selected ? "selected" : "")">
+                        <label class="model-pick">
+                            <input type="checkbox" checked="@row.Selected" @onchange="@(e => SetSelected(row, e))" />
+                            <span class="mono wrap-any">@row.ModelId</span>
+                        </label>
+                        <span class="subtle secondary">@ModelNote(row)</span>
+                        @if (row.Selected)
+                        {
+                            <div class="price-grid">
+                                <label class="switch"><input type="checkbox" checked="@row.Priced" @onchange="@(e => SetPriced(row, e))" /> Priced</label>
+                                @if (row.Priced)
+                                {
+                                    <div class="field">
+                                        <label for="@(P + "-in-" + idx)">Input $ / 1M</label>
+                                        <input id="@(P + "-in-" + idx)" class="input mono" type="number" min="0" step="any" @bind="row.InputPer1M" @bind:after="Changed" />
+                                    </div>
+                                    <div class="field">
+                                        <label for="@(P + "-out-" + idx)">Output $ / 1M</label>
+                                        <input id="@(P + "-out-" + idx)" class="input mono" type="number" min="0" step="any" @bind="row.OutputPer1M" @bind:after="Changed" />
+                                    </div>
+                                    <div class="field">
+                                        <label for="@(P + "-basis-" + idx)">Price basis</label>
+                                        <select id="@(P + "-basis-" + idx)" class="input" value="@row.Basis" @onchange="@(e => SetBasis(row, e))">
+                                            <option value="">Choose…</option>
+                                            <option value="@ConnectionForm.BasisLocal">Zero marginal (local; infrastructure excluded)</option>
+                                            <option value="@ConnectionForm.BasisList">Provider list price</option>
+                                            <option value="@ConnectionForm.BasisContract">Contract price</option>
+                                            @if (row.Basis.Length > 0 && row.Basis is not (ConnectionForm.BasisLocal or ConnectionForm.BasisList or ConnectionForm.BasisContract))
+                                            {
+                                                <option value="@row.Basis">@row.Basis</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="field">
+                                        <label for="@(P + "-date-" + idx)">Effective date</label>
+                                        <input id="@(P + "-date-" + idx)" class="input mono" type="text" placeholder="YYYY-MM-DD" @bind="row.EffectiveDate" @bind:event="oninput" @bind:after="Changed" />
+                                    </div>
+                                }
+                                else
+                                {
+                                    <span class="note warn">Unpriced: cost is unknown (never $0). Not eligible as a paid target under a hard budget.</span>
+                                }
+                            </div>
+                            @if (mp is not null)
+                            {
+                                <FieldIssues Issues="@Issues" Path="@mp" />
+                            }
+                        }
+                        @if (!row.Configured && !row.Selected && !Form.IsOllama)
+                        {
+                            <button type="button" class="btn ghost sm" @onclick="() => RemoveRow(row)">Remove</button>
+                        }
+                    </li>
+                }
+            </ul>
+        }
+        @if (RemovedStillRouted.Count > 0)
+        {
+            <span class="note warn">Still named by enabled policies: <span class="mono">@string.Join(", ", RemovedStillRouted)</span>. Preview shows which requests would be refused.</span>
+        }
+    </fieldset>
+
+    @if (!Form.IsOllama || !string.IsNullOrWhiteSpace(Form.SecretRef))
+    {
+        <fieldset>
+            <legend>Credential (server-side secret reference)</legend>
+            <span class="secondary muted">Choose the configuration key that holds this provider's credential on the server. The console sees only whether it is set — never its value.</span>
+            <div class="field">
+                <label for="@(P + "-sec")">Secret reference</label>
+                <select id="@(P + "-sec")" class="input mono" value="@SecretSelectValue" @onchange="OnSecretChoice">
+                    <option value="">@(Form.IsOllama ? "None (no credential)" : "Choose…")</option>
+                    @foreach (var (r, available) in ConnectionRules.SecretChoices(Envelope?.Secrets))
+                    {
+                        <option value="@r">@(r + (available ? " · available" : " · NOT SET on the server"))</option>
+                    }
+                    <option value="@OtherValue">Other reference…</option>
+                </select>
+            </div>
+            @if (_otherSecret)
+            {
+                <div class="field">
+                    <label for="@(P + "-sec-o")">Reference name</label>
+                    <input id="@(P + "-sec-o")" class="input mono" type="text" spellcheck="false" placeholder="Secrets:openai" @bind="Form.SecretRef" @bind:event="oninput" @bind:after="Changed" />
+                    <span class="help">Secrets:&lt;name&gt; (or a legacy key: OpenAI:ApiKey, Anthropic:ApiKey, Local:ApiKey). Availability is checked by the Host when you preview.</span>
+                </div>
+            }
+            @if (SecretAvailability is false && Form.SecretRef is { } sr)
+            {
+                <div class="alert bad" role="alert">
+                    <div class="alert-text">
+                        <strong>Secret not set on the server — saving is blocked</strong>
+                        <span class="alert-body">Set <span class="mono">@sr</span> in the Host's environment or vault (environment variable <span class="mono">@ConnectionRules.EnvVarFor(sr)</span>) and restart Covenant. The console never handles the value.</span>
+                    </div>
+                </div>
+            }
+            <FieldIssues Issues="@Issues" Path="@(Prefix + ".secret_ref")" />
+        </fieldset>
+    }
+
+    <fieldset>
+        <legend>Review &amp; apply</legend>
+        @{ var problems = Form.Problems(OtherIds, Envelope?.Secrets); }
+        @if (problems.Count > 0)
+        {
+            <ul class="plain-list secondary problem-list">
+                @foreach (var pr in problems)
+                {
+                    <li>@pr</li>
+                }
+            </ul>
+        }
+        @if (Issues.ErrorsAt(Prefix).Count > 0 && DraftIndex is not null)
+        {
+            <span class="note bad">The Host reported problems with this connection — see the messages above and the preview below.</span>
+        }
+        <div class="btn-row">
+            <button type="button" class="btn" @onclick="() => OnPreview.InvokeAsync()" disabled="@(problems.Count > 0 || Validating || Saving)" aria-busy="@(Validating ? "true" : null)">
+                @(Validating ? "Previewing…" : "Preview impact on routes")
+            </button>
+            <button type="button" class="btn primary" @onclick="() => OnSave.InvokeAsync()" disabled="@(!CanSave || problems.Count > 0)" aria-busy="@(Saving ? "true" : null)">
+                @(Saving ? "Saving… (waiting for the Host)" : "Save & apply")
+            </button>
+        </div>
+        @if (Validation is { } v)
+        {
+            <ImpactPreview Result="@v" Current="@ValidationCurrent" ClaimedPaths="@(DraftIndex is null ? Array.Empty<string>() : new[] { Prefix })" />
+        }
+        <span class="note">Preview puts this connection into the configuration draft. Closing this panel keeps the draft; “Cancel” in the page bar discards it.</span>
+    </fieldset>
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ConnectionForm Form { get; set; } = default!;
+    [Parameter] public ConfigEnvelopeDto? Envelope { get; set; }
+    [Parameter] public IReadOnlyList<string> OtherIds { get; set; } = [];
+    /// <summary>Index of this connection in the draft once previewed (issue paths), else null.</summary>
+    [Parameter] public int? DraftIndex { get; set; }
+    [Parameter] public IssueIndex Issues { get; set; } = IssueIndex.Empty;
+    [Parameter] public ConfigValidationResultDto? Validation { get; set; }
+    [Parameter] public bool ValidationCurrent { get; set; }
+    [Parameter] public bool Validating { get; set; }
+    [Parameter] public bool Saving { get; set; }
+    [Parameter] public bool CanSave { get; set; }
+    [Parameter] public IReadOnlyList<string> RemovedStillRouted { get; set; } = [];
+    [Parameter] public EventCallback OnPreview { get; set; }
+    [Parameter] public EventCallback OnSave { get; set; }
+    /// <summary>Raised after every form edit (the page recomputes derived facts).</summary>
+    [Parameter] public EventCallback OnChanged { get; set; }
+    /// <summary>Raised with the probe result so the page can show it on the connection card.</summary>
+    [Parameter] public EventCallback<ProbeResponse> OnProbed { get; set; }
+
+    private const string OtherValue = "__other__";
+    private readonly string P = "cf-" + Guid.NewGuid().ToString("n")[..6];
+    private ProbeResponse? _probe;
+    private bool _probing;
+    private string? _probeError;
+    private string? _newModel;
+    private bool _otherSecret;
+
+    private string Prefix => DraftIndex is { } i ? IssueIndex.Connection(i) : "connections[?]";
+    private string? EndpointProblem => Form.Endpoint.Trim().Length == 0 ? null : ConnectionLogic.EndpointProblem(Form.Endpoint);
+
+    private string EgressNote => Form.Kind == "OpenAiCompatible"
+        ? "The host:port must be on the startup egress allow-list."
+        : "Empty uses the provider's default API endpoint.";
+
+    private string? EgressWarning
+    {
+        get
+        {
+            var authority = ConnectionRules.AuthorityOf(Form.Kind, Form.Endpoint);
+            if (authority is null || Envelope?.AllowList is not { } list) return null;
+            return list.Contains(authority, StringComparer.OrdinalIgnoreCase)
+                ? null
+                : authority + " is not on the startup egress allow-list (Providers:ProbeAllowList); the Host will refuse this connection until it is added and Covenant restarts.";
+        }
+    }
+
+    private bool? SecretAvailability
+        => Form.SecretRef is { Length: > 0 } r && Envelope?.Secrets is { } map && map.TryGetValue(r.Trim(), out var s) ? s.Available : null;
+
+    private string SecretSelectValue
+    {
+        get
+        {
+            if (_otherSecret) return OtherValue;
+            if (string.IsNullOrWhiteSpace(Form.SecretRef)) return "";
+            return Envelope?.Secrets?.ContainsKey(Form.SecretRef.Trim()) == true ? Form.SecretRef.Trim() : OtherValue;
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (!string.IsNullOrWhiteSpace(Form.SecretRef) && Envelope?.Secrets?.ContainsKey(Form.SecretRef.Trim()) != true) _otherSecret = true;
+    }
+
+    private Task Changed() => OnChanged.InvokeAsync();
+
+    private Task OnKind(ChangeEventArgs e)
+    {
+        Form.SetKind(e.Value?.ToString() ?? "OpenAi");
+        return Changed();
+    }
+
+    private Task SetBoundary(string b)
+    {
+        Form.Boundary = b;
+        return Changed();
+    }
+
+    private Task OnEndpointInput(ChangeEventArgs e)
+    {
+        var next = e.Value?.ToString() ?? "";
+        if (string.Equals(next, Form.Endpoint, StringComparison.Ordinal)) return Task.CompletedTask;
+        Form.Endpoint = next;
+        _probe = null;          // a probe of another address proves nothing about this one
+        _probeError = null;
+        foreach (var m in Form.Models) m.ReportedByEndpoint = null;
+        return Changed();
+    }
+
+    private async Task ProbeAsync()
+    {
+        if (_probing || EndpointProblem is not null) return;
+        var endpoint = Form.Endpoint.Trim();
+        _probing = true;
+        _probeError = null;
+        _probe = null;
+        try
+        {
+            var result = await Api.ProbeAsync(endpoint);
+            if (!string.Equals(Form.Endpoint.Trim(), endpoint, StringComparison.Ordinal)) return; // edited meanwhile
+            _probe = result;
+            if (result.Allowed && result.Reachable && Form.IsOllama) Form.ApplyDiscovery(result.Models);
+            await OnProbed.InvokeAsync(result);
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _probeError = "The probe endpoint is not available on this Host.";
+        }
+        catch (Exception ex)
+        {
+            _probeError = ex.Message;
+        }
+        finally
+        {
+            _probing = false;
+        }
+        await Catalog.RefreshAsync(); // a probe of an APPLIED endpoint updates its observed health on the server
+        await Changed();
+    }
+
+    private static string ProbeHeadline(ProbeResponse p)
+    {
+        if (!p.Allowed) return "Not allowed — destination not on the startup allow-list";
+        if (!p.Reachable) return "Unreachable" + (p.HttpStatus is { } s ? " (HTTP " + s.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")" : "");
+        var n = p.Models.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var ms = p.DurationMs is { } d ? " in " + Fmt.Ms(d) : "";
+        return "Reachable" + ms + " · " + n + (p.Models.Count == 1 ? " model reported" : " models reported");
+    }
+
+    private string ModelNote(ModelForm m)
+    {
+        var parts = new List<string>();
+        parts.Add(m.Configured ? "configured" : m.ReportedByEndpoint == true ? "discovered" : "added here");
+        if (m.ReportedByEndpoint == false) parts.Add("not reported by the endpoint now");
+        if (!m.Selected) parts.Add("not permitted");
+        return string.Join(" · ", parts);
+    }
+
+    private Task SetSelected(ModelForm row, ChangeEventArgs e)
+    {
+        row.Selected = e.Value is bool b && b;
+        return Changed();
+    }
+
+    private Task SetPriced(ModelForm row, ChangeEventArgs e)
+    {
+        row.Priced = e.Value is bool b && b;
+        if (row.Priced && row.Basis.Length == 0) row.Basis = Form.Boundary == "Local" ? ConnectionForm.BasisLocal : ConnectionForm.BasisList;
+        if (row.Priced && Form.Boundary == "Local" && row.InputPer1M is null && row.OutputPer1M is null)
+        {
+            row.InputPer1M = 0m;
+            row.OutputPer1M = 0m;
+        }
+        return Changed();
+    }
+
+    private Task SetBasis(ModelForm row, ChangeEventArgs e)
+    {
+        row.Basis = e.Value?.ToString() ?? "";
+        return Changed();
+    }
+
+    private Task AddModel()
+    {
+        if (string.IsNullOrWhiteSpace(_newModel)) return Task.CompletedTask;
+        var id = _newModel.Trim();
+        if (!Form.Models.Any(m => string.Equals(m.ModelId, id, StringComparison.Ordinal))) Form.AddModel(id);
+        _newModel = null;
+        return Changed();
+    }
+
+    private Task RemoveRow(ModelForm row)
+    {
+        Form.Models.Remove(row);
+        return Changed();
+    }
+
+    private Task OnSecretChoice(ChangeEventArgs e)
+    {
+        var v = e.Value?.ToString() ?? "";
+        if (v == OtherValue)
+        {
+            _otherSecret = true;
+            if (Envelope?.Secrets?.ContainsKey(Form.SecretRef ?? "") == true) Form.SecretRef = "";
+        }
+        else
+        {
+            _otherSecret = false;
+            Form.SecretRef = v.Length == 0 ? null : v;
+        }
+        return Changed();
+    }
+}

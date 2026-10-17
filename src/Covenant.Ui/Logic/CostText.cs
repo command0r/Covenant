@@ -11,7 +11,8 @@ public static class CostText
 
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    public static string Usd(decimal value) => "$" + value.ToString("F4", Inv);
+    /// <summary>Significant-digit USD (Logic/Money): a non-zero charge is never shown as $0.00.</summary>
+    public static string Usd(decimal value) => Money.Usd(value);
 
     public static string Cost(AuditEntryView r) => r.CostBasis switch
     {

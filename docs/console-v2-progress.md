@@ -461,3 +461,435 @@ dotnet test tests/Covenant.Tests -c Release --disable-build-servers     # full s
 Manual: `POST /admin/config/validate` with `"settings": null` → 200 `valid:false` path `settings`; `"mode": 999` →
 `invalid_enum` at `mode`; same bodies via PUT → 422; drop a fake `versions/v000002.json` into the config dir →
 `GET /admin/config/versions/2` 404, next apply becomes v3.
+
+---
+
+## T04/T05/T06 backend — budget periods + reservations, console inference + real trace, approved fallback / cache / cost / archive
+
+**Status: NOT EXECUTED — no .NET SDK in the authoring sandbox.** Nothing below has been compiled or run. Written for
+Nullable + TreatWarningsAsErrors + IsAotCompatible (source-generated JSON only; every new minimal-API async lambda is
+`async Task<IResult> (…) =>`). SDK exception types were verified against the referenced assemblies' metadata in the local
+build output (Anthropic 12.8.0: `Anthropic.Exceptions.AnthropicApiException.StatusCode : System.Net.HttpStatusCode`,
+`AnthropicIOException`; System.ClientModel 1.14.0: `ClientResultException.Status : int`), not compiled. Treat every claim
+as *implemented, unverified* until the verifier commands below pass.
+
+### What is implemented
+
+- **T04 budgets (ADR-0014).** `BudgetLedger` (Governance, pure) over `ILedgerStore`: append-only reserve / settle /
+  release / settle-recovered / legacy-import records keyed (requestId, attemptId) with the charged SCOPES (`global`,
+  `team:<t>`, `application:<a>`) and a UTC timestamp — never a budget id or period id. Spend per budget = settled amounts
+  of its scope in its current UTC window (none ⇒ all time), computed at read time from per-(scope, period-bucket) totals,
+  so renaming a budget / changing its period or cap never resets accrual. One lock; `spent + reserved + bound ≤ cap` for
+  every applicable HARD budget, all-or-none; the record is appended durably before memory changes. `FileLedgerStore`
+  (Host): `Budget:LedgerPath` (default `<Audit:Path>.ledger.jsonl`), JSONL, fsync per append, torn-tail quarantine
+  (`.torn-<utc>`) + atomic rewrite before any append, refuses to append onto an unterminated line, corrupt earlier line ⇒
+  refuse to start, failed append ⇒ `Environment.FailFast` (like a failed audit write). Boot: replay; open reservations ⇒
+  `settle-recovered` at the reserved amount + a `budget.recovered` audit event; no ledger file ⇒ the current audit
+  segment's spend is imported once (`legacy-import`, global + team scopes) and the file is created. The audit-replay
+  in-memory ledger is gone from the Host; `/admin/reset` no longer touches spend (an archive never reopens a budget).
+  `BudgetStage(killSwitch, BudgetLedger)` (configured requests): installs the per-request `BudgetAttemptGate` and reserves
+  attempt 1 for the primary candidate (refusal ⇒ 403 at stage `budget`, code `budget_exceeded`); the legacy constructor and
+  path are unchanged for pure compositions. Bound per attempt = (UTF-8 bytes of all contents + 16/message) × input price +
+  min(request max_tokens, application max_output_tokens, model max_output_tokens) × output price; that output bound is
+  now sent as `ChatOptions.MaxOutputTokens` (`RequestBounds`, Core). Settle exactly once with the attributed cost; usage
+  unreported ⇒ the reservation bound (`estimated_from_text`); reported cost above the reservation ⇒ settled in full,
+  `Overrun` in the attempt evidence and the ledger record; release of the remainder in the same durable write; failed /
+  cancelled attempts settle at their bound (`estimated_failed_call`); an admitted attempt that never started is released;
+  the budget stage's `finally` closes anything left open. Explicit $0 local prices reserve and write nothing. Warn-only
+  budgets never block; warnings are status only. Unpriced paid (cloud) targets under a hard budget: verified ineligible in
+  `PolicyEngineV2.Ineligibility` and a validation error (`unpriced_paid_target_under_hard_budget`) — no change needed.
+  APIs: `GET /admin/budgets`, `GET /admin/budgets/{id}/requests`; `/admin/status.budget` reads the ledger.
+- **T05 console inference (ADR-0012).** `POST /admin/playground/requests` (`PlaygroundApi`): admin auth; 400 before the
+  pipeline (no audit) for malformed/invalid bodies; `client_request_id` claimed atomically (`ConsoleSubmissions`, 10 min,
+  bounded) ⇒ 409 `duplicate_submission` with the original `request_id`; the application is resolved server-side and bound
+  with `ctx.BindConsoleIdentity(…, "shared-admin-token")`; the response is produced by `ChatCompletions.RunAsync`, the
+  former `/v1/chat/completions` handler body (now shared — `/v1` calls the same function); `X-Covenant-Request-Id` on every
+  answer; `RequestAborted` propagates. `GET /admin/applications` already existed (T03).
+- **T05 trace (ADR-0013).** Core: `PipelineTraceEvent`, `InferenceContext.TraceSink` / `Trace()` / `CompleteTrace()` /
+  `CompactTrace()`; `InferencePipeline.RunStageAsync` emits running → passed (Stopwatch duration at hand-over) / refused /
+  failed / cancelled with bounded reason codes (`ctx.Deny(…, code:)`), and `skipped` (`not_reached` | `cache_hit`) for
+  stages never entered; the audit stage is not traced. Provider attempts emit attempt events (`att_N`, target), fallback
+  pause/budget re-checks emit attempt-level `pause`/`budget` events. Host: `TraceHub` singleton (≤ 64 events/request,
+  ≤ 2 000 requests, retention `trace_retention_minutes` after completion, remembered expired ids ⇒ 410), buffer created
+  BEFORE the pipeline for `/v1/chat/completions`, `/v1/messages` and console inference; `GET /admin/requests/{id}/trace`
+  and `/trace/stream` (SSE `id:`/`data:`, replay then live, `Last-Event-ID`, `: keep-alive`, `event: end`, 404/410/400).
+  New `PauseStage` (Governance) between rate limit and budget gives the global pause its own trace stage (the budget
+  stage keeps its own check for legacy compositions).
+- **T05/T06 audit v3.** `AuditEntry` + `Attempts[]` (`AuditAttempt`: id, connection, model, outcome, error class,
+  duration, cost, basis, reserved, overrun), `Trace[]` (`AuditTraceStep`), `ReservedUsd`, `SettledUsd` (additive,
+  nullable, written only when a configuration is bound). `Usage.CostUsd` = total settled for the request.
+- **T06 fallback (ADR-0013).** `ProviderCallStage` iterates `PolicyOutcome.Candidates` when a configuration and a policy
+  retry block exist (legacy compositions: one attempt on `Route`, unchanged). Before EACH attempt the gate re-checks the
+  pause and reserves. Failure classes via `IProviderFailureClassifier` (Adapters interface, BCL default
+  `BclProviderFailureClassifier`; Host `SdkProviderFailureClassifier`: `ClientResultException.Status`,
+  `AnthropicApiException.StatusCode`, `AnthropicIOException` ⇒ connect, HttpRequestException status/connect,
+  SocketException ⇒ connect, TimeoutException / provider-side cancellation ⇒ timeout; 429 ⇒ `429`; 500/502/503/504 ⇒
+  `5xx`; anything else ⇒ `non_retryable`). Fallback only for classes in `retry.on`, within `max_attempts` and
+  `deadline_ms`, never after content was emitted, never on caller cancellation (rethrown), pause, policy denial or
+  non-retryable errors. Health per `connection:model` from every real attempt. `ServedTarget` drives attribution/pricing.
+  PII/PHI: verified cloud candidates are excluded by the engine in every mode (test added).
+- **T06 cache.** v2 key = SHA-256 over application, team, profile, FINAL classification, config version, the ordered
+  approved candidates (connection/model), the enforced output bound and the messages; hits after auth/shape/classify/
+  policy, before rate-limit/pause/budget/provider (a hit is served during a global pause), `no_call`, `CacheHit`, original
+  served model; only successful complete responses are stored.
+- **T06 savings.** `FinOps.Build(…, savingsBaseline)` + `FinOpsSummary.Savings` (`SavingsSummary`): present only when the
+  configuration's `savings_baseline` is a priced connection/model; route-avoided and cache-avoided reported separately;
+  estimated/unknown records excluded and counted. Without a baseline every savings figure is 0 and `savings` is null.
+  The 4-argument `FinOps.Build` keeps its pre-v2 behaviour (FinOpsTests unchanged).
+- **T06 archive.** `AuditSegments` + `ArchiveApi`: `GET /admin/audit/segments` (current + `<audit>.yyyyMMdd-HHmmss.archived`
+  siblings, opaque ids `current` / `a-<16 hex>`), `GET /admin/requests?limit=&cursor=&segment=` (moved out of Program;
+  same `RequestsPage` + `segment.id/label`, `next_cursor`; unknown segment / malformed cursor ⇒ 400),
+  `GET /admin/requests/{id}/export` (no `PromptPreview`, attempts, trace, config version, integrity with line + hashes).
+
+### Files
+
+```
+src/Covenant.Core/Execution.cs                 new  TraceStates, TraceReasons, PipelineTraceEvent, AttemptRecord, IAttemptGate,
+                                                    AttemptAdmission, AttemptCharge, RequestBounds
+src/Covenant.Core/InferenceContext.cs               DenialCode + Deny(code:), AttemptGate, Attempts, ServedTarget, Active/Reserved/
+                                                    SettledUsd, TraceSink, Trace(), StageOrder, CompleteTrace(), CompactTrace()
+src/Covenant.Core/Pipeline.cs                       per-stage trace instrumentation, TracedStages, CompleteTrace in ExecuteAsync
+src/Covenant.Core/Decisions.cs                      AuditEntry v3 Attempts/Trace/ReservedUsd/SettledUsd; AuditAttempt; AuditTraceStep;
+                                                    AuditEntryKinds.BudgetRecovered
+src/Covenant.Adapters/ProviderLayer.cs              IProviderFailureClassifier, BclProviderFailureClassifier, fallback loop
+src/Covenant.Governance/BudgetLedger.cs        new  LedgerOps, LedgerRecord, ILedgerStore, InMemoryLedgerStore, BudgetCheck,
+                                                    BudgetPeriods, BudgetLedger
+src/Covenant.Governance/BudgetGate.cs          new  BudgetScopes, ReservationEstimate, BudgetAttemptGate
+src/Covenant.Governance/Budget.cs                   PauseStage; BudgetStage v2 constructor + reservation path (legacy path kept)
+src/Covenant.Governance/Attribution.cs              served target; unreported usage ⇒ reservation bound under a v2 gate
+src/Covenant.Governance/Cache.cs                    v3 key (candidates + enforced output bound)
+src/Covenant.Governance/Audit.cs                    CompleteTrace before writing; Attempts/Trace/Reserved/Settled; Usage = settled
+src/Covenant.Host/BudgetLedgerStore.cs         new  FileLedgerStore, LedgerJsonContext, BudgetStateView & co, BudgetViews, BudgetApi
+src/Covenant.Host/Trace.cs                     new  TraceEventView/SnapshotView, TraceJsonContext, TraceBuffer, TraceHub, TraceApi,
+                                                    TraceCompletion
+src/Covenant.Host/InferenceEndpoints.cs        new  ChatCompletions (shared OpenAI wire + DenialResult), PlaygroundRequest,
+                                                    ConsoleSubmissions, PlaygroundApi
+src/Covenant.Host/AuditSegments.cs             new  AuditSegments, SegmentView, RequestExport, ExportIntegrity, ArchiveApi
+src/Covenant.Host/FailureClassifier.cs         new  SdkProviderFailureClassifier
+src/Covenant.Host/Program.cs                        ledger boot (open/legacy import/recovery), PauseStage + BudgetStage v2 + classifier,
+                                                    shared /v1 handler, /v1/messages trace, status from the ledger + savings,
+                                                    reset without ledger reset, /admin/requests moved, new Map* calls
+src/Covenant.Host/StatusContracts.cs                SavingsSummary, FinOpsSummary.Savings, FinOps.Build overload
+src/Covenant.Host/ConsoleBackend.cs                 RequestsPage.NextCursor, SegmentInfo.Id/Label
+src/Covenant.Host/OpenAiContracts.cs                CovenantJsonContext += PlaygroundRequest, List<BudgetStateView>, BudgetRequestsView
+src/Covenant.Host/FileAuditSink.cs                  AuditJsonContext += List<SegmentView>, RequestExport
+src/Covenant.Host/Evidence.cs                       LedgerReplay doc (no longer used by the Host)
+tests/Covenant.Tests/RuntimeV2TestKit.cs       new  SettableClock, StubChatClient, Failures, V2Rig (pure v2 pipeline), RestartableHybridFactory
+tests/Covenant.Tests/FallbackTests.cs          new  (+ ProviderFailureClassifierTests)
+tests/Covenant.Tests/BudgetLedgerTests.cs      new  (+ BudgetPipelineTests)
+tests/Covenant.Tests/CacheIsolationTests.cs    new
+tests/Covenant.Tests/ConsolePlaygroundTests.cs new  (+ Playground helpers)
+tests/Covenant.Tests/TraceTests.cs             new  (+ TraceHubTests)
+tests/Covenant.Tests/BudgetHostTests.cs        new
+tests/Covenant.Tests/ArchiveExportTests.cs     new  (+ SavingsTests)
+docs/ui-api-contract.md                             v2 "Implementation details" for console inference, trace, budgets, archive,
+                                                    audit v3; new "Status FinOps savings"
+```
+
+### Endpoints
+
+`POST /admin/playground/requests` · `GET /admin/requests/{id}/trace` · `GET /admin/requests/{id}/trace/stream` ·
+`GET /admin/budgets` · `GET /admin/budgets/{id}/requests` · `GET /admin/audit/segments` ·
+`GET /admin/requests?limit=&cursor=&segment=` (extended) · `GET /admin/requests/{id}/export`.
+
+### Tests (each fails if its guarantee is removed)
+
+- `BudgetLedgerTests` — 16 parallel contenders behind a `Barrier` for the last allowance ⇒ exactly one reserves;
+  all-or-none across global/team; settle/release exactly once (double settle ignored, release after settle ignored,
+  journal = reserve/settle/release); overrun settled in full + flagged; per-scope UTC periods (Sep vs Oct vs all-time,
+  daily) and a renamed budget sees the same accrual; month rollover; restart replay + `settle-recovered` + no double
+  recovery; torn tail quarantined and repaired, then two more appends + restarts; corrupt middle line refuses start;
+  legacy import once.
+- `BudgetPipelineTests` — bound = UTF-8 bytes + 16 and enforced output bound; reported settle by scope (global, team,
+  application); unreported ⇒ bound; overrun flagged in attempt evidence; hard cap ⇒ 403 at `budget` before any provider
+  call and zero-priced local still runs; warn-only never blocks; application-scope budget enforced; cancellation ⇒
+  reserve/settle/release exactly once, nothing open; unpriced cloud excluded under a hard budget (+ validator code).
+- `FallbackTests` — fallback on 429 / timeout / 500 / 502 / 503 / 504 / connect, both attempts charged (failed one at its
+  bound, `estimated_failed_call`), settled total = audit `Usage.CostUsd` = ledger spend, health per connection:model,
+  attempt-level pause/budget trace; no fallback on 400/401/403/404/422, on a class outside `retry.on`, beyond
+  `max_attempts`, past `deadline_ms` (hanging attempt ⇒ `timeout`), after the first streamed chunk (partial preserved,
+  failure recorded), on a pinned model override; streaming failure before any chunk may fall back; pause tripped between
+  attempts ⇒ refused at `pause`, first attempt still charged; pause / policy refusal ⇒ no attempt; caller cancellation ⇒
+  `cancelled`, no fallback, no health penalty, settled once; sensitive request whose local primary fails never reaches
+  cloud (even with a cloud target smuggled into the policy); enforced output bound sent to the provider.
+  `ProviderFailureClassifierTests` — status/transport/timeout/inner-exception mapping.
+- `CacheIsolationTests` — hit: no provider call, `no_call`, $0, `CacheHit`, original served model, no attempts, ledger
+  unchanged, later stages skipped `cache_hit`; isolation across applications/teams, profiles, configuration versions and
+  output bounds; hit served during a pause while a miss is refused at `pause`; current policy enforced before a hit;
+  failures and partial streams never stored.
+- `ConsolePlaygroundTests` — buffered run as demo-app (same wire as /v1, `EntryPoint=console`,
+  `OperatorRef=shared-admin-token`, application/team/profile/version, trace, attempts, reserved/settled, no key/admin
+  token/provider secret in the payload); streaming SSE; disabled / not-console-testable / ungranted / unknown application
+  ⇒ governed 403 at `auth` with audit and no provider call; 7 invalid bodies ⇒ 400 with no audit record (FIFO proof);
+  duplicate `client_request_id` ⇒ 409 with the original id and no second call; admin token required; `/v1` still needs a
+  key (admin token ⇒ 401) and records `EntryPoint=v1`; submission window/bound.
+- `TraceTests` — replay after completion (monotonic seq, all ten stages running→passed, attempt event with target, no
+  content), snapshot complete, compact audit `Trace[]`; `Last-Event-ID` resume; refusal at auth ⇒ every other stage
+  skipped `not_reached` (and in the audit summary); a subscriber joining mid-request gets seq 1 (`auth running`) then live
+  events until `event: end`; 404 unknown, 400 malformed, 401 without token. `TraceHubTests` — 410 after retention vs 404
+  unknown; 64-event and request-count bounds (oldest completed evicted ⇒ 410); completed buffer immutable, waiters woken.
+- `BudgetHostTests` — `/admin/budgets` + `/{id}/requests` (+404/401) and status from the ledger; `POST /admin/reset`
+  keeps spend; rename + period + cap-below-spend keeps accrual, blocks paid work at `budget`, local still served;
+  restart replays and recovers an open reservation (`budget.recovered` event); no ledger ⇒ one-time legacy import, not
+  repeated on the next boot.
+- `ArchiveExportTests` — segments current + archived (opaque ids, no paths), paging an archived segment by cursor,
+  current-segment default; unknown ids / paths / traversal rejected (requests and export); malformed cursors rejected;
+  export excludes the opted-in prompt preview and the response, carries version/attempts/trace/integrity and still works
+  after an archive. `SavingsTests` — hidden without a baseline; route vs cache split; estimates excluded.
+
+### Existing assertions changed
+
+None. No existing test file was edited. Behaviour changes that existing tests could observe (all spec-mandated):
+- Host pipeline gains a `pause` stage (`PauseStage`); the kill-switch denial text and `StoppedAtStage = "pause"` are
+  unchanged.
+- Configured requests now send `max_tokens` = the enforced output bound (default 1024) to providers.
+- `/admin/reset` no longer clears spend (ADR-0014 — archive never reopens a budget).
+- `Usage.CostUsd` of a configured request = total settled (equal to the old value for single-attempt requests; for
+  failed calls the estimate is now the reservation bound instead of chars/4 — both `estimated_failed_call`, both > 0).
+- `/admin/status.finops` savings figures are 0 (and `savings` null) when no priced `savings_baseline` is configured.
+
+### Decisions / deviations from the contract
+
+1. **Trace 404 vs 410:** the earlier v2 text said "404 unknown/expired"; implemented 404 = never traced, 410 = expired or
+   evicted (as the task and ADR-0013 require). Contract updated.
+2. **Every request is traced** (`/v1` too), not only console requests — same bounded hub.
+3. **Failed / cancelled attempts are charged their full reservation bound** (input bound + full output bound), the
+   conservative "possibly billed" estimate the task specifies — higher than the pre-v2 chars/4 estimate.
+4. **Deadline semantics:** no attempt starts after `deadline_ms`; an attempt still waiting for its response (or, streaming,
+   its first content) at the deadline is cancelled as `timeout`; once streamed content flows the deadline stops applying
+   (a delivered answer is not cut off; the connection timeout governs).
+5. **Cache key** includes the ordered approved candidate list (stricter than "connection + model": a response is reused only
+   for the same eligible route set). Keyed on the primary's enforced output bound.
+6. **Ledger file failure** halts the process (`Environment.FailFast`), consistent with the audit sink.
+7. `max_attempts` beyond the eligible candidates is simply bounded by the candidates (no repeated attempts on one target).
+8. `SegmentInfo.path` is still returned by `GET /admin/requests` (it was already there for the current segment); segment
+   ids in the archive APIs are opaque and caller paths are never accepted.
+
+### Risks
+
+- **Unbuilt.** Highest compile risk: RDG on the new lambdas (all typed `async Task<IResult>` or sync `IResult`);
+  source-gen for positional records with `IReadOnlyList<>` members in `AuditEntry`; `Anthropic.Exceptions` type names;
+  `ClientResultException(string, PipelineResponse?, Exception?)` in a test; collection expressions in tests.
+- Host tests boot real Hosts with fsync'd ledger writes (slower on CI disks).
+- The ledger keeps per-key idempotency for the last 200 000 closed attempts and the last 20 000 charges for drill-down.
+- Streaming fallback uses the same SSE response: only possible before the first delta, so headers are not yet committed.
+
+### Verifier commands (not executed)
+
+```
+dotnet build Covenant.sln -c Release --disable-build-servers
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers --filter "FullyQualifiedName~BudgetLedgerTests|FullyQualifiedName~BudgetPipelineTests|FullyQualifiedName~FallbackTests|FullyQualifiedName~ProviderFailureClassifierTests|FullyQualifiedName~CacheIsolationTests|FullyQualifiedName~ConsolePlaygroundTests|FullyQualifiedName~TraceTests|FullyQualifiedName~TraceHubTests|FullyQualifiedName~BudgetHostTests|FullyQualifiedName~ArchiveExportTests|FullyQualifiedName~SavingsTests"
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers     # full suite: all ~490 pre-existing tests unchanged and green
+dotnet test tests/Covenant.Tests -c Release -p:SkipConsolePublish=true -o <fresh-temp-output>
+```
+Manual (isolated port, `Config:Seed=demo-hybrid`, fresh `Audit:Path`): `POST /admin/playground/requests` with
+`{"application_id":"demo-app","profile_id":"public-demo","messages":[{"role":"user","content":"Reply OK."}],"max_tokens":5,"stream":true}`
+→ SSE + `X-Covenant-Request-Id`; `GET /admin/requests/<id>/trace/stream` → events then `event: end`;
+`GET /admin/budgets` → `spent_usd` > 0, `reserved_usd` 0; `POST /admin/reset` → budgets unchanged;
+`GET /admin/audit/segments` → `current` + one `a-…`; `GET /admin/requests/<id>/export` → no prompt text; restart →
+budgets unchanged; resubmit the same `client_request_id` → 409.
+
+---
+
+## T08 UI — editable admin pages and evidence workflows
+
+**Status: NOT EXECUTED.** Written without a .NET SDK (none in the authoring sandbox), so nothing below has been
+compiled, unit-tested or opened in a browser. The budget ledger, fallback/trace and audit-archive endpoints were being
+implemented concurrently by the backend agent (uncommitted at the time of writing); every UI call to them is
+**integration pending** until the verifier steps below pass. Do not cite T08 as complete before then (spec §7).
+
+### Files
+
+```
+src/Covenant.Ui/Logic/Money.cs              new  USD with significant digits for sub-cent charges ($0.000184, $1.23,
+                                                 "<$0.000001", never $0.00 for non-zero; null → "Not reported"); caps,
+                                                 per-1M prices, shares
+src/Covenant.Ui/Logic/ConfigDraft.cs        new  ConfigCopy (deep copy/canonical JSON via UiJsonContext), ConfigDraft (base
+                                                 version + ETag + draft, content-based dirty tracking, Reset), ChangeSummary
+                                                 (ids added/removed/changed per section — never values), EditOutcomes
+                                                 (HTTP status+body → Applied | Stale | Invalid | PreconditionRequired |
+                                                 Unauthorized | NotFound | Failed), IssueIndex (field-path lookup), IssueHelp
+src/Covenant.Ui/Logic/ImpactText.cs         new  impact preview wording (changed routes, headline, needs-attention)
+src/Covenant.Ui/Logic/PolicyRoutes.cs       new  PolicyText (labels, strategy names, pause semantics), PolicyRoutes
+                                                 (structural eligibility, definite summary lines, refusal conditions,
+                                                 add-target options, up/down reorder), HybridDefaults (legacy → hybrid draft)
+src/Covenant.Ui/Logic/BudgetView.cs         new  BudgetText (period/scope/warning/enforcement/thresholds), BudgetRequests
+                                                 (lenient parser for /admin/budgets/{id}/requests)
+src/Covenant.Ui/Logic/SegmentScope.cs       new  segment labels/coverage sentence; EvidenceCompleteness (pending /
+                                                 unavailable / recorded / verified / unverifiable)
+src/Covenant.Ui/Logic/ConnectionDrafts.cs   new  ConnectionForm/ModelForm (add/edit, discovery merge, inline problems,
+                                                 ToConnection/ApplyTo), ConnectionRules, ConnectionHealth (probe vs governed
+                                                 call, one summary + timestamps)
+src/Covenant.Ui/Logic/ConnectionLogic.cs         old wizard helpers removed (CheckApplied, ConfigBlock, RouteReview)
+src/Covenant.Ui/Logic/CostText.cs                Usd → Money.Usd
+src/Covenant.Ui/Logic/RequestFilter.cs           + Application filter / Applications(); time label "All loaded records"
+src/Covenant.Ui/Models/ConfigContracts.cs        + ConfigErrorResponseDto, ImpactRow.changed, ValidationResult.active_version,
+                                                 Simulate request.config / response dry_run, config_version, application_id,
+                                                 profile, explanation, eligible[].boundary; BudgetState period_start/end;
+                                                 BudgetRequestDto, AuditSegmentDto
+src/Covenant.Ui/Models/Contracts.cs              + status.config_version; requests.next_cursor; segment id/label/events;
+                                                 catalog config_version/connections[]/egress_allow_list (+ CatalogConnectionDto,
+                                                 CatalogConnectionModelDto); model connection_id/boundary/key; attempt
+                                                 ReservedUsd/Overrun; UiJsonContext registers ConfigErrorResponseDto,
+                                                 List<AuditSegmentDto>
+src/Covenant.Ui/Services/ConfigEditor.cs    new  shared editor service (load/version/ETag, draft, validate, save, conflict,
+                                                 compare, history, rollback, reload after activation)
+src/Covenant.Ui/Services/AdminApi.cs             + RawResponse/SendRawAsync, validate/put/rollback (raw), versions, version n,
+                                                 simulate, budget requests (raw JSON), segments, requests page, export
+src/Covenant.Ui/Services/RequestsViewState.cs    rewritten: one segment's pages, cursor, bounded (2 000), segments list
+src/Covenant.Ui/Services/Fmt.cs                  Usd/UsdTotal delegate to Money
+src/Covenant.Ui/Services/Interop.cs, wwwroot/js/interop.js   prefGet/prefSet for allow-listed console preferences
+src/Covenant.Ui/Services/PlaygroundState.cs      StreamingDefault (browser-local preference)
+src/Covenant.Ui/Layout/MainLayout.razor          applies the stored "stream-default" preference once
+src/Covenant.Ui/Program.cs                       registers ConfigEditor
+src/Covenant.Ui/Components/EditorBar.razor  new  View/Edit bar: "Applied version vN", history drawer + inline rollback
+                                                 confirm, Preview impact / Save & apply / Cancel, 412 conflict (Reload /
+                                                 Compare), 422 banner, discard dialog, unsaved-change guard
+src/Covenant.Ui/Components/ImpactPreview.razor new Host validation + impact rendering
+src/Covenant.Ui/Components/FieldIssues.razor new inline errors/warnings for a field path
+src/Covenant.Ui/Components/ConnectionEditor.razor new add/edit form (Ollama and cloud) with probe/discovery
+src/Covenant.Ui/Components/PolicySimulator.razor new dry-run simulator (applied or unsaved draft)
+src/Covenant.Ui/Pages/Connections.razor          rewritten (7-step "edit a file" wizard removed)
+src/Covenant.Ui/Pages/Policies.razor             rewritten (route view, editable list, mode, simulator)
+src/Covenant.Ui/Pages/Budgets.razor              rewritten (ledger state, edit, drill-down)
+src/Covenant.Ui/Pages/Settings.razor             rewritten (operational / preferences / diagnostics / maintenance)
+src/Covenant.Ui/Pages/Requests.razor             rewritten (segments, cursor pages, application filter, drawer, export)
+src/Covenant.Ui/Pages/Evidence.razor             rewritten (decisions + evidence completeness first, integrity separate)
+src/Covenant.Ui/wwwroot/css/app.css              T08 block (editor bar, impact, connection cards, route view, budgets, …)
+tests/Covenant.Tests/ConsoleLogicTests.cs        removed the three wizard tests; "$0.003" expectation; + MoneyTests,
+                                                 ConfigDraftTests, EditOutcomeTests, ImpactTextTests, PolicyRoutesTests,
+                                                 SegmentScopeTests, BudgetTextTests, ConnectionFormTests,
+                                                 ConnectionHealthTests, RequestFilterApplicationTests
+tests/Covenant.Tests/ContractRoundTripTests.cs   + validate request/response, write answers (412/422/200) → outcomes, version
+                                                 history + rollback body, simulator (with/without draft) + dry-run response,
+                                                 catalog connections, budget state + contributions, segments + cursor page
+```
+
+### Endpoint wiring
+
+| UI | Endpoint | Status |
+|---|---|---|
+| Every editor page: applied version, draft base, secrets availability, egress list | `GET /admin/config` (ETag) | backend T02 (committed) |
+| Preview impact | `POST /admin/config/validate` `{base_version, config}` (200 valid/invalid; `stale_base_version` warning → conflict banner) | backend T02 |
+| Save & apply | `PUT /admin/config` + `If-Match` = the draft's base ETag; 200 → reload config, workspace, catalog, status; 412/409 → conflict; 422 → field errors; 428 → reported | backend T02 |
+| Version history / rollback | `GET /admin/config/versions?limit=50`; `POST /admin/config/rollback {target_version, expected_active_version}` | backend T02 |
+| Conflict "Compare" | `GET /admin/config` (latest) — nothing merged | backend T02 |
+| Connections health, registration, allow-listing, secret availability | `GET /admin/catalog` (`connections[]`, model health = governed calls, `local.endpoint_health` = probes of an applied endpoint) | backend T02/T03 |
+| Connection Test / Ollama discovery | `POST /admin/providers/probe` | existing |
+| Policy simulator | `POST /admin/policies/simulate` (`config` = unsaved draft when chosen; 422 when it does not validate) | backend T03 |
+| Simulator applications | `GET /admin/applications` | backend T05 |
+| Budget state | `GET /admin/budgets` (404 → pre-v2 counters with an explicit note) | **integration pending (T04, uncommitted)** |
+| Budget drill-down | `GET /admin/budgets/{id}/requests` → `{items:[…]}` | **integration pending (T04)** |
+| Requests pages | `GET /admin/requests?limit=200&cursor=&segment=` (`segment.id` must echo an archived request, else nothing is shown) | **integration pending (T06)**; current segment works on the committed Host without paging |
+| Segment selector / Audit segments | `GET /admin/audit/segments` (404 → "Current segment only") | **integration pending (T06)** |
+| Request export | `GET /admin/requests/{id}/export[?segment=]` → raw JSON download | **integration pending (T06)** |
+| Archive (Settings → Maintenance) | `POST /admin/reset` (wording from `GET /admin/budgets` presence: ledger ⇒ "budgets NOT reopened") | existing; ledger semantics pending T04 |
+
+### Decisions
+
+- **One shared draft.** `ConfigEditor` holds one draft of the whole configuration, owned by one page at a time; a clean
+  draft is released when its page is left, a dirty one triggers the guard (in-app: `RegisterLocationChangingHandler` →
+  "Discard unsaved changes?"; reload/close: `NavigationLock ConfirmExternalNavigation`).
+- **Save needs a current preview.** "Save & apply" is enabled only when the last `validate` answer was for exactly the
+  current draft content, valid, and no conflict is open. No optimistic UI: the success line "Applied version vN" appears
+  only after the 200 carrying `version`, and after config/catalog/workspace/status were reloaded.
+- **Never overwrite.** A 412 (or the validator's `stale_base_version` warning) shows "Configuration changed since you
+  started editing (now vN)" with Reload (discard draft) and Compare (lists server-side vs draft changes). There is no
+  force-save.
+- **Field errors** are matched by the Host's paths (`connections[i]…`, `policies[i].targets[j]`, `budgets[i]…`,
+  `settings.*`) on member/element boundaries; anything no field claims stays visible in the preview list.
+- **Connections**: discovered tags start unselected; local prices default to an explicit, editable `zero-marginal-local`
+  0/0; cloud prices are never assumed (unpriced cloud ⇒ blocking problem). Secret references are chosen from the refs the
+  Host reports (availability only); a known-unavailable ref blocks the form with the server-side fix
+  (`Secrets__name` env var + restart). Not-on-allow-list probes explain `Providers:ProbeAllowList` /
+  `Providers:LocalEndpoints` under Technical details. Connection ids are immutable on edit. No delete action (not required;
+  avoids `unknown_connection` drafts). Cloud default endpoints are not probed (the probe is OpenAI-compatible GET /models).
+- **Health**: summary prefers the governed-call fact (newest of success/failure), then the probe; a reachable probe
+  without a governed success reads "Endpoint reachable … · no governed call observed yet" (never "ready").
+- **Policies**: the effective-route view and summary lines are computed from the configuration with the engine's
+  structural rules (paused, connection enabled, model permitted, local-only boundary, PII/PHI never cloud) and labelled
+  as configuration; the simulator (real engine) is the authority for a given request. Cloud models are offered disabled
+  with "PII/PHI never route to cloud destinations" for sensitive policies. Reorder is ↑/↓ buttons with aria-labels.
+- **Legacy cloud**: "Imported legacy rules" + "Move to Hybrid defaults…" builds a draft (Public → first enabled priced
+  cloud model + local fallback; Internal, PII, PHI → first enabled local model) and previews it; refused (draft untouched)
+  without a local model.
+- **Budgets**: the console never computes spend; all numbers are the ledger's. Zero spend everywhere ⇒ explanatory state
+  linking to Models & connections (no flat chart). Infrastructure cost is "not configured — none shown".
+- **Archive wording** follows the backend contract: with a ledger, archiving the audit segment never reopens budgets;
+  on a Host without `GET /admin/budgets` the dialog says archive ALSO resets pre-v2 counters. Typed environment name
+  required.
+- **Requests**: `segment=` is sent only when the Host listed segments, and an archived page is shown only if
+  `segment.id` echoes the request (an older Host would silently answer for the current segment). Bounded to 2 000 loaded
+  records. Rows of an archived segment open from the loaded page (the by-id lookup searches the current segment only).
+- **Console preferences**: theme (existing) and the default response mode (`localStorage covenant.pref.stream-default`,
+  JS-allow-listed key). Nothing else is persisted.
+
+### Risks / known gaps
+
+1. Not compiled. Highest-risk spots: Razor component parameter lambdas (`OnProbed="@(p => …)"`,
+   `OpenChanged="@(open => { … })"`), deconstruction in `@foreach (var (t, i) in …)`, `@bind` on `int?`/`decimal?`
+   DTO properties with `@bind:after="Editor.Touch"`, pattern variables in attribute expressions, collection expressions
+   in conditionals (`cond ? list : []`), `UiJsonContext.Default.ListConfigVersionDto` / `ListAuditSegmentDto`.
+2. The round-trip tests reference the backend's uncommitted T04/T06 types (`BudgetStateView`, `BudgetRequestsView`,
+   `BudgetContributionView`, `SegmentView`, `RequestsPage.NextCursor`, `SegmentInfo.Id/Label`,
+   `AuditJsonContext.Default.ListSegmentView`). If the backend renames them, fix the test, not the UI shape.
+3. Diagnostics shows "Not reported by this Host" for `Config:Path` and the ignored legacy keys (no status field exists;
+   the Host logs them at startup).
+4. The effective-route view does not know runtime availability or the hard-budget pricing rule beyond "unpriced";
+   the impact preview and the simulator (both Host-computed) are authoritative.
+5. Rollback's resulting version is predicted as active+1 "or the next free number"; the actual number is shown from the
+   Host's answer.
+
+### Verifier steps (not executed)
+
+```
+dotnet build Covenant.sln -c Release --disable-build-servers
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers --filter "FullyQualifiedName~MoneyTests|FullyQualifiedName~ConfigDraftTests|FullyQualifiedName~EditOutcomeTests|FullyQualifiedName~ImpactTextTests|FullyQualifiedName~PolicyRoutesTests|FullyQualifiedName~SegmentScopeTests|FullyQualifiedName~BudgetTextTests|FullyQualifiedName~ConnectionFormTests|FullyQualifiedName~ConnectionHealthTests|FullyQualifiedName~RequestFilterApplicationTests|FullyQualifiedName~ContractRoundTripTests|FullyQualifiedName~CostTextTests|FullyQualifiedName~ConnectionLogicTests"
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers     # full suite
+```
+
+Browser (isolated port, `Config:Seed=demo-hybrid` on a fresh `Audit:Path`; both themes; 1280×720 and 1920×1080, then
+~900 px):
+
+**H — policy editing**
+- [ ] Policies → Edit → on the Public policy press "Pause route" on the primary; summary line becomes
+      `Public → <fallback> · no fallback`; Preview impact shows Public before → after; Save & apply → "Applied version vN+1".
+- [ ] Playground preset A → served by the fallback; Requests drawer shows the attempts and config vN+1.
+- [ ] Pause the remaining route (or "Pause policy") → preview shows Public newly refused → save → preset A refused
+      at policy. Resume → save → new version vN+3; preset A served again.
+- [ ] Simulator: same prompt against "Unsaved draft" vs "Applied vN" differ while a pause is unsaved; label "Dry run —
+      no provider called, nothing recorded"; Requests shows no new record afterwards.
+- [ ] A PII/PHI policy never offers cloud models (disabled option with the reason); ↑/↓ reorder works by keyboard.
+
+**J — config recovery / conflicts**
+- [ ] Open Budgets → Edit in tab A and tab B; save a cap in B; save in A → banner "Configuration changed since you
+      started editing (now vN)"; A's draft kept; Compare lists both sides; Reload discards A's draft. Nothing overwritten.
+- [ ] Settings → Edit → prompt preview 900 → Preview shows the `settings.prompt_preview_chars` error inline; Save stays
+      disabled; `curl /admin/config` still reports the old version.
+- [ ] Version history → Roll back to an older version → confirmation names target and new version → success line shows
+      the new version number; history lists it as a rollback of the target.
+- [ ] Edit something, click another nav item → "Discard unsaved changes?"; Keep editing stays; Discard navigates. Reload
+      the tab with a dirty draft → browser leave-page prompt.
+- [ ] Restart the Host → pages show the same "Applied version"; Budgets spend unchanged.
+
+**K — evidence**
+- [ ] Audit & evidence: session runs show Pending → "Audit integrity verified (record present, chain consistent)" (or
+      Unavailable + Retry); integrity card separate from answers; recent decisions list who / rule+version /
+      selected→attempted→served / cost and why; chain/anchors/segments only under the disclosure.
+- [ ] Settings → Maintenance → archive (type the environment name) → dialog said budgets are NOT reopened → Budgets spend
+      unchanged afterwards; Requests segment selector lists the archived segment; selecting it shows "Archived segment …
+      read-only" and its records; "Load older" pages until "All records of this segment are loaded".
+- [ ] Request drawer → Export evidence (JSON) downloads `covenant-request-<id>.json` with `content_included:false` and no
+      `PromptPreview`.
+- [ ] Legacy (pre-v2) audit lines still verify and render "Not recorded" fields.
+
+**L — browser usability**
+- [ ] Models & connections → Add Ollama → endpoint → Test (allowed/unreachable/not-allowed messages as specified) →
+      tags unselected → select one → price shows zero-marginal-local 0/0 → Preview impact on routes → Save & apply →
+      card shows the new connection, "Applied version" bumped. Edit prefills actual values; Disable… → preview → save.
+- [ ] Add cloud provider with an unavailable secret ref → red "Secret not set on the server — saving is blocked".
+- [ ] Budgets: tiny charges render like `$0.000184`; local-only demo shows the explanatory no-spend state; Requests
+      drill-down links open the request drawer.
+- [ ] Every page: loading skeleton, error banner with Retry (stop the Host), empty states, disabled controls with reasons;
+      keyboard-only: Tab through editor bar, drawers trap focus, Esc closes, focus returns to the opener.
+- [ ] No horizontal page scroll at 1280×720 / ~900 px; long model ids and errors wrap.

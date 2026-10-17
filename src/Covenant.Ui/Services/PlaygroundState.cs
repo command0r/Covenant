@@ -88,6 +88,17 @@ public sealed class PlaygroundState : IDisposable
     /// <summary>Note from the last preset application ("No profile with a Public baseline …"), or null.</summary>
     public string? PresetNote { get; private set; }
 
+    /// <summary>Browser-local preference (Settings → Console preferences): the response mode a fresh form starts with.</summary>
+    public bool StreamingDefault { get; private set; } = true;
+
+    /// <summary>Applies the stored preference to the default and to the form while it holds no request yet.</summary>
+    public void SetStreamingDefault(bool streaming)
+    {
+        StreamingDefault = streaming;
+        if (!Running && string.IsNullOrEmpty(Form.Prompt)) Form.Streaming = streaming;
+        Notify();
+    }
+
     public string? Problem => ComposerRules.Problem(Form, _workspace.Applications);
     public bool CanRun => !Running && Problem is null;
 
@@ -280,6 +291,7 @@ public sealed class PlaygroundState : IDisposable
         _runs.Clear();
         Selected = null;
         Form.Clear();
+        Form.Streaming = StreamingDefault;
         PresetNote = null;
         _sequence = 0;
         Notify();

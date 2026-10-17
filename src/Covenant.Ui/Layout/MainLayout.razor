@@ -1,5 +1,7 @@
 @inherits LayoutComponentBase
 @inject AppState State
+@inject PlaygroundState Pg
+@inject Interop Interop
 @implements IDisposable
 
 <div class="shell">
@@ -23,6 +25,17 @@
 
 @code {
     protected override void OnInitialized() => State.Changed += OnChanged;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        // Browser-local console preference (Settings → Console preferences); absent = streaming.
+        try
+        {
+            if (await Interop.PrefGetAsync("stream-default") is "false") Pg.SetStreamingDefault(false);
+        }
+        catch (JSException) { /* storage unavailable: keep the default */ }
+    }
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
     public void Dispose() => State.Changed -= OnChanged;
 }

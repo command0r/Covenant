@@ -27,5 +27,6 @@ builder.Services.AddScoped<TraceClient>();
 builder.Services.AddScoped<WorkspaceConfig>();
 builder.Services.AddScoped<PlaygroundState>();
 builder.Services.AddScoped<RequestsViewState>();
+builder.Services.AddScoped<ConfigEditor>();
 
 await builder.Build().RunAsync();
