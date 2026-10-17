@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Covenant v2 demo launcher — isolated, reproducible, no terminal needed after it opens the console.
 #
-#   scripts/run-local-demo.sh                         # Local-only profile (Ollama only, no cloud credential)
+#   scripts/run-local-demo.sh                         # Resume saved config; Local-only seed on first run
 #   PROFILE=hybrid scripts/run-local-demo.sh          # Hybrid: Public → cloud (+ local fallback), everything else local
 #   MODEL=qwen3.8:27b-mlx PORT=5212 scripts/run-local-demo.sh
 #   SKIP_PUBLISH=1 scripts/run-local-demo.sh          # reuse the last publish
 #   FRESH=1 scripts/run-local-demo.sh                 # start this profile's isolated state from scratch
 #   OPEN_BROWSER=0 scripts/run-local-demo.sh          # headless; private connection files are listed below
 #
-# Isolation: Production environment (user-secrets NOT loaded), its own port and its own state directory
+# Saved Anthropic/Tavily keys are loaded explicitly from covenant-host user-secrets; env values win.
+# LOAD_SAVED_KEYS=0 disables that import. Runtime policy still controls external calls.
+# Isolation: Production environment, its own port and its own state directory
 # (/tmp/covenant-v2-demo-<profile>/: audit log, configuration repository, budget ledger). It never touches
 # another running instance (e.g. :5100 or :5201) or its files. State persists across runs of the same profile
 # so configuration versions, spend and evidence survive restarts; FRESH=1 moves the old state aside (renamed,
@@ -58,7 +60,7 @@ if sys.argv[1] not in ids:
 ' "$MODEL"
 echo "ok — $MODEL"
 
-if [[ "$PROFILE" == hybrid ]]; then
+if [[ "$PROFILE" == hybrid && ( "${FRESH:-}" == 1 || ! -f "$STATE/audit.log.config/active.json" ) ]]; then
   : "${OPENAI_API_KEY:?Hybrid needs OPENAI_API_KEY in the environment}"
   : "${CLOUD_PRICE_IN_1M:?Hybrid needs CLOUD_PRICE_IN_1M (USD per 1M input tokens, current provider list price)}"
   : "${CLOUD_PRICE_OUT_1M:?Hybrid needs CLOUD_PRICE_OUT_1M (USD per 1M output tokens)}"
@@ -107,7 +109,7 @@ env_args=(
   Auth__Keys__0__Application=demo-app
   Audit__Path="$STATE/audit.log"
 )
-if [[ "$PROFILE" == hybrid ]]; then
+if [[ "$PROFILE" == hybrid && ( "${FRESH:-}" == 1 || ! -f "$STATE/audit.log.config/active.json" ) ]]; then
   env_args+=(
     OpenAI__ApiKey="$OPENAI_API_KEY"
     OpenAI__ModelId="$CLOUD_MODEL"
@@ -118,7 +120,7 @@ if [[ "$PROFILE" == hybrid ]]; then
   [[ -n "${CLOUD_PRICE_DATE:-}" ]] && env_args+=("Pricing__${CLOUD_MODEL}__EffectiveDate=$CLOUD_PRICE_DATE")
 fi
 LOG="$STATE/server.log"
-env "${env_args[@]}" "$OUT/Covenant.Host" >"$LOG" 2>&1 &
+env "${env_args[@]}" python3 "$ROOT/scripts/demo-credentials.py" "$OUT/Covenant.Host" >"$LOG" 2>&1 &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT
 trap 'exit 130' INT
@@ -151,7 +153,7 @@ cat <<EOF
   Console:        http://localhost:$PORT/ui/
   Startup seed:   $SEED (only used on first run; saved console configuration takes precedence)
   Local model:    ollama/$MODEL
-  Run requests:   Playground → "Run as" demo-app → profile "Public demo" or "Internal" (no key needed)
+  Run requests:   Playground → choose an Example → Use example → Run (no application key needed)
   Private files: $CREDENTIALS/console-url (connected URL), application-key (/v1 clients only)
                   Files are owner-only. Do not share them or include their contents in logs/screenshots.
   State:          $STATE    (audit.log, audit.log.config/, audit.log.ledger.jsonl, server.log)

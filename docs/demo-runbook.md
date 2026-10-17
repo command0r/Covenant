@@ -7,13 +7,19 @@ not a record of a run — see `docs/console-v2-acceptance.md` for what has actua
 ## 1. Start an isolated demo profile
 
 ```
-scripts/run-local-demo.sh                    # Local-only: Ollama only, no cloud credential, port 5210
+scripts/run-local-demo.sh                    # Resume saved configuration on port 5210
 PROFILE=hybrid OPENAI_API_KEY=… CLOUD_PRICE_IN_1M=… CLOUD_PRICE_OUT_1M=… scripts/run-local-demo.sh
 ```
 The launcher checks Ollama and the model tag, publishes the self-contained binary, starts it on its own port with
 its own state directory (`/tmp/covenant-v2-demo-<profile>/`: audit log, configuration repository, budget ledger),
 and opens the console already connected. The token is read from the URL fragment and removed; it is not sent
 in the request URL or access logs, but is subsequently sent in the admin authentication header.
+The launcher imports only saved `Anthropic:ApiKey` and `Tavily:ApiKey` from the local
+`covenant-host` user-secret store. Explicit environment values take precedence; `LOAD_SAVED_KEYS=0`
+disables the import. No keys are printed. When no explicit probe allow-list is supplied, it includes
+the local endpoint and the standard Anthropic/Tavily destinations for the available keys. Saved
+policies, prices, budgets and audit history are preserved; the seed is used only for new state.
+
 Prerequisites: .NET 10 SDK (unless reusing a publish), Python 3, curl, OpenSSL and lsof.
 `OPEN_BROWSER=0` keeps startup headless. Normal output contains no credentials. Owner-only files under
 `$STATE/.launch-credentials/` hold the connected console URL and application key. Open the URL privately when
