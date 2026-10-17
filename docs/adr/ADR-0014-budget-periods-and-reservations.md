@@ -10,16 +10,25 @@ the audit segment. **Spec:** `docs/CONSOLE-V2-IMPLEMENTATION-SPEC.md` §4.5.
 `period` (`none` | `daily` | `monthly`, UTC boundaries; identity e.g. `2026-10`, `2026-10-16`, `all`),
 `warnAt` (default [0.80, 0.95]), `enforcement` (`hard` | `warn-only`).
 
-**Ledger** (`Budget:LedgerPath`, default `covenant-ledger.jsonl` beside the audit log): an append-only
-journal, independent of audit segments, of `reserve`/`settle`/`release` operations keyed by
-`(budgetId, periodId, requestId, attemptId)`, replayed at boot. **Audit archive never reopens a budget.**
+**Ledger** (`Budget:LedgerPath`, default `<Audit:Path>.ledger.jsonl`): an append-only journal, independent
+of audit segments, of `reserve`/`settle`/`release` operations keyed by `(requestId, attemptId)` and recording
+the **scopes charged** (`global`, `team:<t>`, `application:<a>`) with a UTC timestamp — **not** a budget id or
+a period id — replayed at boot. A budget's spend is computed at read time as the sum of settled amounts for its
+scope inside its current period window. Renaming a budget id, changing its period or editing its cap therefore
+never resets accrued usage; changing a budget's scope shows that scope's own accrued history. An attempt is
+charged to the scopes that applied **when it was reserved** (in-flight attempts across an activation settle
+against their original reservation). **Audit archive never reopens a budget.**
 Config apply never resets it. Boot recovery: a reservation with no settle/release is settled at its
 reserved amount (`settle-recovered`) — conservative, never free capacity.
 
-**Reservation.** Before each provider attempt, compute a conservative estimate: input = ceil(chars/4) at
-the target's input price + the **enforced** output bound (request `max_tokens`, capped by the application
+**Reservation.** Before each provider attempt, compute an upper-bound estimate: input tokens ≤ the prompt's
+**UTF-8 byte count** + 16 per message (byte-level tokenizers never produce more tokens than bytes; chars/4 is
+only an average and is never used for enforcement) at the target's input price + the **enforced** output bound (request `max_tokens`, capped by the application
 default `maxOutputTokens`, default 1024 — the bound is sent to the provider so it is real) at the output
-price. Under one ledger lock, check every applicable hard budget (`spent + reserved + estimate ≤ cap` for
+price. If reported usage exceeds the reservation (a provider ignoring the bound, tokenizer overhead), the full
+reported cost is settled anyway — spend is never truncated to the reservation — and the overrun is flagged in
+evidence; enforcement is therefore described as an **estimated** bound. Under one ledger lock, check every
+applicable hard budget (`spent + reserved + estimate ≤ cap` for
 global, team, application in the current period) and reserve in all or none. Refusal ⇒ governed denial at
 stage `budget`. **Settle** exactly once per attempt with the actual cost (reported usage) or the
 conservative estimate when usage is unavailable/failed (`estimated_*` basis), then **release** the

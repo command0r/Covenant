@@ -80,7 +80,7 @@ v2 supersedes the read-only parts above. Everything above stays valid unless res
 `Impact` = `{ "classifications": [{ "classification","profile","before":"<route summary>|refused","after":… }],
 "applications_affected":[…], "unavailable_destinations":[…], "pricing_gaps":[…], "newly_refused":[…] }`.
 Validation codes include: `duplicate_id`, `unknown_connection`, `unknown_model`, `endpoint_not_allow_listed`,
-`secret_unavailable`, `cloud_in_local_only`, `sensitive_cloud_without_ack` (warning), `ambiguous_policy_overlap`,
+`secret_unavailable`, `cloud_in_local_only`, `sensitive_cloud_target` (error), `ambiguous_policy_overlap`,
 `no_route_for_classification` (warning), `unpriced_paid_target_under_hard_budget`, `invalid_budget_scope`,
 `profile_not_found`, `default_profile_not_granted`.
 

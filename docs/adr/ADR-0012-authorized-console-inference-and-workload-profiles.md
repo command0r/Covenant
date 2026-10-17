@@ -12,8 +12,10 @@ public.
 ## Decision
 **Applications** are configuration entities: `id`, `team`, `enabled`, `consoleTesting`, `grantedProfiles`,
 `defaultProfile`. `/v1` keys (`Auth:Keys:N:Key`, startup secrets) bind to an application via
-`Auth:Keys:N:Application` (default: the key's `Principal`, preserving existing keys). A key whose
-application is absent from configuration behaves as before (team from the key, `legacy` profile).
+`Auth:Keys:N:Application` (default: the key's `Principal`, preserving existing keys). Legacy import creates
+one application per existing key **once**. After that, a key whose application is missing from the active
+configuration (removed, renamed, never added) is **refused** (403, stopped at `auth`, "application not
+configured") — fail-closed; there is no implicit legacy fallback.
 
 **Workload profiles** carry a **trusted baseline classification** and are granted to applications. A
 request selects a profile (`X-Covenant-Profile` on `/v1`, `profileId` on the console endpoint); an ungranted
@@ -27,7 +29,7 @@ baseline. Evidence records `ProfileId`, `BaselineClassification`, detected escal
 **Console inference.** `POST /admin/playground/requests` (admin token) with `applicationId`, `profileId`,
 canonical input, optional model override / max tokens / stream / workflow / use case / `clientRequestId`.
 The Host resolves the application server-side and runs **the same `InferencePipeline`** with a
-pre-resolved identity; the auth stage enforces `enabled`, `consoleTesting` and the profile grant (governed
+pre-resolved identity (a server-side field the `/v1` ingress can never set); the auth stage enforces `enabled`, `consoleTesting` and the profile grant (governed
 refusals, audited). Body validation failures are 400 **before** the pipeline (no audit record; the response
 says so). Evidence records `EntryPoint = console`, `OperatorRef = shared-admin-token` (honest: one shared
 admin credential cannot attribute an individual), `ApplicationId`, `Team`. Application credentials are never

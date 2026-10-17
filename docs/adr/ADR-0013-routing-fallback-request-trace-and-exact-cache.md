@@ -10,15 +10,17 @@ A **policy**: `id`, `name`, `enabled`, `paused`, applicability (`classifications
 `profiles[]`), ordered `targets[]` (each `{connectionId, modelId, paused}`), `strategy`
 (`fixed` = primary then ordered fallback; `length-heuristic` = targets[0] when the chars/4 estimate ≤
 `thresholdTokens`, else the last target, remaining targets as ordered fallback — named honestly, not
-"quality-aware"), `retry` (`maxAttempts` ≤ 3, `deadlineMs`, `on` ⊆ {`connect`,`timeout`,`429`,`5xx`}),
-`allowSensitiveCloud` (default false). **Precedence:** a policy naming the request's profile beats one
+"quality-aware"), `retry` (`maxAttempts` ≤ 3, `deadlineMs`, `on` ⊆ {`connect`,`timeout`,`429`,`5xx`}). **Precedence:** a policy naming the request's profile beats one
 that names only classifications; two enabled policies at the same specificity covering the same
 (classification, profile) pair are a **validation error** (no arbitrary winner). No match ⇒ refusal.
 Paused policy ⇒ refuses its matching traffic. Paused target ⇒ removed from eligibility; the next approved
 target may serve. Eligibility also requires: connection enabled; model permitted on the connection;
-mode allows the boundary (local-only ⇒ cloud targets never eligible); PII/PHI ⇒ cloud targets ineligible
-unless the policy sets `allowSensitiveCloud` (validation warns loudly; demo seeds never set it); priced for
-paid targets under a hard budget. A model override must name an eligible target and pins it (no fallback).
+mode allows the boundary (local-only ⇒ cloud targets never eligible); **PII/PHI ⇒ cloud targets are never
+eligible** (no escape hatch in v2; a policy listing a cloud target for PII/PHI is a validation error); priced
+for paid targets under a hard budget. A **paused policy refuses** its traffic — it never falls through to a
+less specific policy. A model override must resolve to exactly one eligible target: `connection/model`, or a
+bare model id only when exactly one eligible target has it (ambiguous bare ids are refused); it pins that
+target (no fallback).
 **Modes:** `local-only` and `hybrid` (and `legacy-cloud` for imported pre-v2 configurations).
 
 ## Decision — fallback
