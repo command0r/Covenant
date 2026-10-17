@@ -25,4 +25,12 @@
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.11" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Console view-model logic is plain C# (no Blazor/JS types): compiled in here by link so ConsoleLogicTests run
+         without referencing the Blazor WebAssembly project. Ui types live in Covenant.Ui.* namespaces — qualify
+         them in tests where Covenant.Host has a same-named type (ErrorResponse, StatusReport, …). -->
+    <Compile Include="..\..\src\Covenant.Ui\Logic\*.cs" Link="UiLogic\%(Filename)%(Extension)" />
+    <Compile Include="..\..\src\Covenant.Ui\Models\Contracts.cs" Link="UiLogic\Contracts.cs" />
+  </ItemGroup>
+
 </Project>

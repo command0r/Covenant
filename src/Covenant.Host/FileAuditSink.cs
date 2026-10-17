@@ -122,4 +122,5 @@ public sealed class FileAuditSink(string path, string? anchorPath = null, int an
 
 [JsonSourceGenerationOptions(Converters = [typeof(JsonStringEnumConverter<DataClassification>), typeof(JsonStringEnumConverter<PolicyEffect>)])]
 [JsonSerializable(typeof(AuditEntry))]
+[JsonSerializable(typeof(RequestsPage))]
 public partial class AuditJsonContext : JsonSerializerContext;

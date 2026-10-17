@@ -1,0 +1,17 @@
+<div class="empty" role="status">
+    <h2>@Title</h2>
+    @if (Body is not null)
+    {
+        <p class="secondary">@Body</p>
+    }
+    @if (ChildContent is not null)
+    {
+        <div class="btn-row">@ChildContent</div>
+    }
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "Nothing here yet";
+    [Parameter] public string? Body { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

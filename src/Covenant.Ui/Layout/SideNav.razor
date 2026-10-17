@@ -1,0 +1,77 @@
+@inject AppState State
+@inject ConsoleSession Session
+@inject Interop Interop
+@inject NavigationManager Nav
+@implements IDisposable
+
+<nav class="shell-nav" aria-label="Primary">
+    <div class="shell-brand">
+        <span class="name">Covenant</span>
+        <span class="descriptor">AI governance workspace</span>
+    </div>
+
+    <NavLink class="nav-link" href="" Match="NavLinkMatch.All">Overview</NavLink>
+    <NavLink class="nav-link" href="playground">Playground</NavLink>
+    <NavLink class="nav-link" href="requests">Requests</NavLink>
+    <NavLink class="nav-link" href="connections">
+        <span>Models &amp; connections</span>
+        @if (LocalRouteMissing)
+        {
+            <span class="dot warn" role="img" aria-label="Needs attention"></span>
+        }
+    </NavLink>
+    <NavLink class="nav-link" href="policies">Policies</NavLink>
+    <NavLink class="nav-link" href="budgets">Budgets</NavLink>
+    <NavLink class="nav-link" href="evidence">Evidence</NavLink>
+
+    <div class="nav-spacer"></div>
+
+    <NavLink class="nav-link" href="settings">Settings</NavLink>
+
+    <div class="nav-session">
+        @if (State.Connected)
+        {
+            <span class="muted">Connected with admin token</span>
+            <span class="subtle">Environment: <span class="mono">@State.EnvironmentLabel</span></span>
+            <button type="button" class="btn ghost sm" style="align-self:flex-start" @onclick="DisconnectAsync">Disconnect</button>
+        }
+        else
+        {
+            <span class="muted">Not connected</span>
+            <a href="connect">Connect</a>
+        }
+        <div class="theme-row">
+            <span class="subtle">Theme</span>
+            <button type="button" class="btn ghost sm" @onclick="ToggleThemeAsync" aria-pressed="@(_theme == "light" ? "true" : "false")">
+                @(_theme == "light" ? "Light" : "Dark")
+            </button>
+        </div>
+    </div>
+</nav>
+
+@code {
+    private string _theme = "dark";
+
+    private bool LocalRouteMissing => RouteHealth.LocalRouteMissing(State.LastStatus, State.Catalog);
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnChanged;
+        try { _theme = await Interop.GetThemeAsync(); } catch (JSException) { _theme = "dark"; }
+    }
+
+    private async Task ToggleThemeAsync()
+    {
+        var next = _theme == "light" ? "dark" : "light";
+        try { _theme = await Interop.SetThemeAsync(next); } catch (JSException) { /* keep current */ }
+    }
+
+    private async Task DisconnectAsync()
+    {
+        await Session.DisconnectAsync("Disconnected");
+        Nav.NavigateTo("connect");
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnChanged;
+}

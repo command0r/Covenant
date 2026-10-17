@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk.BlazorWebAssembly">
+
+  <PropertyGroup>
+    <!-- ADR-0004: standalone Blazor WebAssembly, compiled to static assets and embedded in Covenant.Host
+         (see the PublishConsole target there). This project is never a server and never runs on the appliance's
+         .NET runtime — it runs in the operator's browser — so the Host's NativeAOT analyzers do not apply. -->
+    <IsAotCompatible>false</IsAotCompatible>
+    <RootNamespace>Covenant.Ui</RootNamespace>
+    <!-- Served under /ui/ by the Host; the publish output lands in wwwroot/ui/ (asset base path). -->
+    <StaticWebAssetBasePath>ui</StaticWebAssetBasePath>
+    <!-- Smaller bundle, English-only console; prices/dates are formatted by hand with the invariant culture. -->
+    <BlazorWebAssemblyLoadAllGlobalizationData>false</BlazorWebAssemblyLoadAllGlobalizationData>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- The Host serves the bytes from embedded resources, so no .br/.gz siblings are wanted. -->
+    <CompressionEnabled>false</CompressionEnabled>
+    <!-- Our DTOs go through the source-generated UiJsonContext (the publish trimmer may remove reflection
+         metadata). Reflection-based STJ is NOT disabled globally because the framework's JS interop relies on it. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Pinned against nuget.org 2026-10-16; audited per root CLAUDE.md, recorded in docs/PROVENANCE.md. -->
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.11" />
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.11" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Called by Covenant.Host's PublishConsole target through the MSBuild task (same project instance as the
+       solution build, so no parallel build of this project). Returns the absolute publish directory. -->
+  <!-- Start from an empty publish folder so stale fingerprinted assets are never embedded in the Host. -->
+  <Target Name="CleanConsolePublishDir">
+    <RemoveDir Directories="$(PublishDir)" Condition="'$(PublishDir)' != '' And Exists('$(PublishDir)')" />
+  </Target>
+
+  <Target Name="PublishConsoleForHost" DependsOnTargets="CleanConsolePublishDir;Publish"
+          Returns="$([MSBuild]::NormalizeDirectory('$(MSBuildProjectDirectory)', '$(PublishDir)'))" />
+
+</Project>

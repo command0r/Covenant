@@ -96,13 +96,13 @@ public sealed class InMemorySpendLedger : ISpendLedger
 
 /// <summary>Kill switch + budget enforcement, after policy and before the provider call (nothing that costs money runs past an exhausted cap); records actual attributed cost on the unwind.
 /// Check-then-spend: the last admitted request may overshoot by its own cost — deliberate first-slice trade-off (pre-call estimation needs a tokenizer).</summary>
-public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, BudgetConfig config) : IPipelineStage
+public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, BudgetConfig config, IPriceBook? prices = null) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
         if (killSwitch.IsTripped)
         {
-            ctx.Deny(killSwitch.Reason is { } r ? $"kill switch engaged: {r}" : "kill switch engaged");
+            ctx.Deny(killSwitch.Reason is { } r ? $"kill switch engaged: {r}" : "kill switch engaged", stage: "pause");
             return;
         }
 
@@ -119,10 +119,45 @@ public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, Bud
             return;
         }
 
-        await next(ctx, ct);
-
-        // Unwind: the attribution stage (inner) has priced the call by now.
-        if (ctx.Attribution is { } spent)
-            ledger.Record(spent.Tags.Team, spent.Usage.CostUsd);
+        try
+        {
+            await next(ctx, ct);
+        }
+        finally
+        {
+            // Unwind: the attribution stage (inner) has priced a served call by now.
+            if (ctx.Attribution is { } spent)
+                ledger.Record(spent.Tags.Team, spent.Usage.CostUsd);
+            else if (ctx.AttemptedModel is { } attempted && ctx.Response is null)
+                ChargeFailedCall(ctx, attempted);
+        }
     }
+
+    /// <summary>ADR-0009 fail-closed accounting: a provider call that was started but produced no
+    /// response (upstream failure, mid-stream failure, cancellation) may still be billed. It is never
+    /// recorded as $0: input (+ any streamed output) is estimated at chars/4 and charged when the model
+    /// is priced; otherwise it is flagged unknown.</summary>
+    private void ChargeFailedCall(InferenceContext ctx, string model)
+    {
+        if (prices is not null && prices.TryGetPrice(model, out var p))
+        {
+            long inTok = TokenEstimate.FromChars(ctx.Request.Messages.Sum(m => m.Content.Length));
+            long outTok = TokenEstimate.FromChars(ctx.PartialOutputChars);
+            var cost = inTok / 1000m * p.InputPer1K + outTok / 1000m * p.OutputPer1K;
+            ctx.FailedCallUsage = new Usage(0, 0, cost);   // tokens NOT reported; cost is an estimate
+            ctx.CostBasis = "estimated_failed_call";
+            if (cost > 0m) ledger.Record(ctx.Identity.Tags.Team, cost);
+        }
+        else
+        {
+            ctx.CostBasis = "unknown_failed_call";
+        }
+    }
+}
+
+/// <summary>Conservative token estimate for unreported usage: ceil(chars / 4). An estimate, labelled
+/// as such wherever it surfaces (CostBasis); never presented as provider-reported counts.</summary>
+public static class TokenEstimate
+{
+    public static long FromChars(long chars) => chars <= 0 ? 0 : (chars + 3) / 4;
 }

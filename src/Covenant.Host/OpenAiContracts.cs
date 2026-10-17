@@ -116,6 +116,8 @@ public static class WireLabels
 
 public sealed class OpenAiChatResponse
 {
+    /// <summary>The Covenant correlation id (ADR-0009) — also the audit record Id.</summary>
+    [JsonPropertyName("id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Id { get; set; }
     [JsonPropertyName("model")] public string Model { get; set; } = "";
     [JsonPropertyName("choices")] public List<OpenAiChoice> Choices { get; set; } = [];
     [JsonPropertyName("usage")] public OpenAiUsage Usage { get; set; } = new();
@@ -163,6 +165,8 @@ public sealed class ErrorResponse
 {
     [JsonPropertyName("error")] public string Error { get; set; } = "";
     [JsonPropertyName("reason")] public string Reason { get; set; } = "";
+    [JsonPropertyName("request_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? RequestId { get; set; }
+    [JsonPropertyName("scanned"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public int? Scanned { get; set; }
 }
 
 // Model listing (GET /v1/models) — real OpenAI-compatible clients call this to populate their model
@@ -212,6 +216,9 @@ public sealed class ResetResponse
 [JsonSerializable(typeof(ResetResponse))]
 [JsonSerializable(typeof(EvidenceReport))]
 [JsonSerializable(typeof(StatusReport))]
+[JsonSerializable(typeof(ProbeRequest))]
+[JsonSerializable(typeof(ProbeResult))]
+[JsonSerializable(typeof(CatalogReport))]
 // Anthropic dialect (types defined in AnthropicContracts.cs) — every [JsonSerializable] must live on
 // ONE partial declaration of the context; splitting them collides the source generator's hint names.
 [JsonSerializable(typeof(AnthropicMessagesRequest))]

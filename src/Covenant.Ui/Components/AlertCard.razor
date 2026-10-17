@@ -1,0 +1,29 @@
+@* One attention item: tone is "bad" (red), "warn" (amber), "info" (accent) or "ok". Action is a link
+   (ActionHref) or a callback (OnAction). *@
+<div class="alert @Tone" role="@(Tone == "bad" ? "alert" : "status")">
+    <div class="alert-text">
+        <strong>@Title</strong>
+        @if (Body is not null)
+        {
+            <span class="alert-body">@Body</span>
+        }
+    </div>
+    @if (ActionText is not null && ActionHref is not null)
+    {
+        <a class="btn @(Tone == "bad" ? "primary" : "")" href="@ActionHref">@ActionText</a>
+    }
+    else if (ActionText is not null && OnAction.HasDelegate)
+    {
+        <Button Variant="primary" Busy="@Busy" BusyText="Working…" OnClick="@(_ => OnAction.InvokeAsync())">@ActionText</Button>
+    }
+</div>
+
+@code {
+    [Parameter] public string Tone { get; set; } = "warn";
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string? Body { get; set; }
+    [Parameter] public string? ActionText { get; set; }
+    [Parameter] public string? ActionHref { get; set; }
+    [Parameter] public EventCallback OnAction { get; set; }
+    [Parameter] public bool Busy { get; set; }
+}

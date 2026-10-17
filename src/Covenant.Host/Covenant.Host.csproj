@@ -31,4 +31,50 @@
     <PackageReference Include="Anthropic" Version="12.8.0" />
   </ItemGroup>
 
+  <!--
+    ADR-0004: the console is a standalone Blazor WebAssembly app (src/Covenant.Ui) compiled to static assets and
+    embedded in this binary, so the appliance stays ONE artifact and the Host stays a minimal-API NativeAOT app
+    (no ProjectReference — the UI is never loaded into the Host process; only its bytes are).
+
+    The publish output of a Blazor WASM app with StaticWebAssetBasePath=ui lands in <out>/wwwroot/ui/**. Each file
+    becomes a manifest resource named console/<relative path>; ConsoleAssets serves them under /ui/.
+
+    EmbeddedResource items are declared INSIDE the target because the files do not exist at evaluation time; the
+    target runs before PrepareForBuild (and, for safety, before the resource targets that consume the items).
+    Set -p:SkipConsolePublish=true to build/test the Host without the UI (ConsoleAssets then answers 503).
+
+    The publish runs through the MSBuild task (not `Exec dotnet publish`): with the same global properties as the
+    solution's own build of Covenant.Ui, MSBuild reuses that ONE project instance, so a solution build never has two
+    builds of Covenant.Ui racing on its obj/. No extra global property is passed for that reason (the publish dir
+    comes back from the Ui's PublishConsoleForHost target instead). Host-only publish properties (RID, AOT,
+    single-file, output dirs) are removed so a `dotnet publish -r linux-x64` of the Host never leaks into the WASM
+    build. The Restore call (separate instance via MSBuildRestoreSessionId) covers `dotnet build src/Covenant.Host`
+    on its own, where the Ui is not in the restore graph; in a solution build it is a no-op.
+  -->
+  <PropertyGroup>
+    <ConsoleProject>$(MSBuildThisFileDirectory)../Covenant.Ui/Covenant.Ui.csproj</ConsoleProject>
+    <ConsoleRemoveProperties>TargetFramework;RuntimeIdentifier;SelfContained;PublishAot;PublishSingleFile;PublishTrimmed;PublishReadyToRun;PublishDir;PublishUrl;PublishProfile;_IsPublishing;OutDir;OutputPath</ConsoleRemoveProperties>
+  </PropertyGroup>
+
+  <Target Name="PublishConsole"
+          BeforeTargets="PrepareForBuild;AssignTargetPaths;PrepareResourceNames;PrepareEmbeddedResources"
+          Condition="'$(SkipConsolePublish)' != 'true' And '$(Configuration)' != '' And '$(DesignTimeBuild)' != 'true'">
+    <MSBuild Projects="$(ConsoleProject)" Targets="Restore"
+             Properties="MSBuildRestoreSessionId=$([System.Guid]::NewGuid())"
+             RemoveProperties="$(ConsoleRemoveProperties)" />
+    <MSBuild Projects="$(ConsoleProject)" Targets="PublishConsoleForHost" RemoveProperties="$(ConsoleRemoveProperties)">
+      <Output TaskParameter="TargetOutputs" PropertyName="ConsolePublishDir" />
+    </MSBuild>
+    <Error Condition="'$(ConsolePublishDir)' == '' Or !Exists('$(ConsolePublishDir)wwwroot/ui/index.html')"
+           Text="Covenant.Ui publish produced no wwwroot/ui/index.html under '$(ConsolePublishDir)'. Build with -p:SkipConsolePublish=true to skip the console." />
+    <ItemGroup>
+      <!-- Two steps: metadata expressions on the Include itself did not yield per-file names inside this
+           target (CS1508 'console/' used twice); Update over the same glob assigns them per item. -->
+      <EmbeddedResource Include="$(ConsolePublishDir)wwwroot/ui/**/*" WithCulture="false" />
+      <EmbeddedResource Update="$(ConsolePublishDir)wwwroot/ui/**/*">
+        <LogicalName>console/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+      </EmbeddedResource>
+    </ItemGroup>
+  </Target>
+
 </Project>

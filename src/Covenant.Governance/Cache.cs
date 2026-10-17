@@ -66,6 +66,7 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
         if (cache.TryGet(key, out var hit))
         {
             ctx.ServedFromCache = true;
+            ctx.CostBasis = "no_call";
             ctx.Response = hit with { Usage = hit.Usage with { CostUsd = 0m } };
             if (ctx.Request.Stream && ctx.DeltaSink is { } sink)
                 await sink(new ChatDelta(hit.Message.Content), ct); // one delta: the cached text

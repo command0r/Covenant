@@ -28,7 +28,8 @@ public sealed record InferenceRequest(
     bool Stream = false,
     string? Credential = null,
     int? MaxOutputTokens = null,
-    string? UnsupportedFeature = null);   // set by ingress when the wire carried something governance cannot see (images, tools) → denied in-pipeline, audited
+    string? UnsupportedFeature = null,    // set by ingress when the wire carried something governance cannot see (images, tools) → denied in-pipeline, audited
+    string? RequestId = null);            // server-generated correlation id (ADR-0009); never caller-supplied
 
 /// <summary>Who the pipeline decided the caller is: self-declared until the auth stage overwrites it
 /// on a valid key. Everything downstream reads THIS, never the raw request headers.</summary>
@@ -41,5 +42,6 @@ public sealed record Usage(long InputTokens, long OutputTokens, decimal CostUsd)
     public long TotalTokens => InputTokens + OutputTokens;
 }
 
-/// <summary>The canonical inference response.</summary>
-public sealed record InferenceResponse(ChatMessage Message, Usage Usage, string ServedByModel);
+/// <summary>The canonical inference response. UsageReported=false means the provider returned no (or
+/// partial) token counts: Usage tokens are then NOT a real zero (ADR-0009).</summary>
+public sealed record InferenceResponse(ChatMessage Message, Usage Usage, string ServedByModel, bool UsageReported = true);

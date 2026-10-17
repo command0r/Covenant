@@ -1,0 +1,32 @@
+@* Gate for every data page: while the tab's session is being restored show a skeleton; when not connected show
+   the connect prompt (never stale data); otherwise render the page. Re-renders on AppState changes. *@
+@inject AppState State
+@implements IDisposable
+
+@if (State.Restoring)
+{
+    <Skeleton Lines="4" Label="Restoring the console session" />
+}
+else if (!State.Connected)
+{
+    <EmptyState Title="Connect to the console"
+                Body="@PromptBody">
+        <a class="btn primary" href="connect">Connect</a>
+    </EmptyState>
+}
+else
+{
+    @ChildContent
+}
+
+@code {
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private string PromptBody => State.ConnectMessage is { Length: > 0 } m
+        ? m + ". This page shows live data only while connected with the admin token."
+        : "This page shows live data only while connected with the admin token.";
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnChanged;
+}

@@ -1,0 +1,219 @@
+@page "/evidence"
+@inject AppState State
+@inject AdminApi Api
+@inject Interop Interop
+@implements IDisposable
+
+<PageTitle>Evidence · Covenant</PageTitle>
+
+<div class="page">
+    <RequiresConnection>
+        <div class="page-head">
+            <div class="titles">
+                <h1>Evidence</h1>
+                <span class="lede">Hash-chained audit log for this environment. Every allow and every refusal is an entry.</span>
+            </div>
+            <Button OnClick="LoadAsync" Busy="@_loading" BusyText="Verifying…" Disabled="@_loading">@(_report is null ? "Verify now" : "Verify again")</Button>
+            <Button Variant="primary" OnClick="ExportAsync" Busy="@_exporting" BusyText="Preparing…" Disabled="@(_report is null || _exporting)">Export verification report</Button>
+        </div>
+
+        @if (_error is not null)
+        {
+            <ErrorBanner Title="Verification could not run" Message="@_error" OnRetry="LoadAsync" Busy="@_loading" />
+        }
+        @if (_exportError is not null)
+        {
+            <ErrorBanner Title="Export failed" Message="@_exportError" />
+        }
+
+        @if (_report is null && _error is null)
+        {
+            <section class="panel"><Skeleton Lines="4" Label="Running chain verification" /></section>
+        }
+        else if (_report is { } r)
+        {
+            <section class="panel" aria-labelledby="st-h" aria-live="polite" style="@(r.ChainValid ? "" : "border-color:var(--red);background:var(--red-bg)")">
+                <div style="display:flex;flex-direction:column;gap:4px">
+                    <h2 id="st-h" style="@(r.ChainValid ? "color:var(--green)" : "color:var(--red)")">
+                        @(r.ChainValid ? "Internal consistency verified" : "Chain verification FAILED")
+                    </h2>
+                    @if (r.ChainValid)
+                    {
+                        <span class="secondary muted">Internal consistency verified: every stored record hashes to the next; this does not prove completeness or independent anchoring.</span>
+                    }
+                    else
+                    {
+                        <span class="secondary"><strong style="color:var(--red)">@Fmt.OrNotRecorded(r.ChainFailure)</strong>@(r.FirstInvalidLine is { } line ? $" — first invalid line {line}." : "") Entries after the break are not trusted; the count below is the verified prefix.</span>
+                    }
+                </div>
+                <FactList Inline="true" Facts="@StatusFacts(r)" />
+                @if (!r.ChainValid)
+                {
+                    <div class="alert bad" role="alert">
+                        <div class="alert-text">
+                            <strong>What to do</strong>
+                            <span class="alert-body">Do not archive or reset this segment. Export the verification report and keep the raw log, keep the appliance running, and investigate who could write to the log file.</span>
+                        </div>
+                    </div>
+                }
+            </section>
+
+            <section class="panel two-col" aria-labelledby="mean-h">
+                <div>
+                    <h2 id="mean-h">A passing verification shows</h2>
+                    <ul class="plain-list secondary muted">
+                        <li>The current entries and their hash links are internally consistent: every stored record hashes to the next.</li>
+                        <li>When anchors exist: the history they cover matches those separately protected comparison points.</li>
+                    </ul>
+                </div>
+                <div>
+                    <h2>It does not show</h2>
+                    <ul class="plain-list secondary muted">
+                        <li>That history was never rewritten: anyone able to rewrite the log can recompute an unanchored chain.</li>
+                        <li>That every event was captured, or anything about traffic that bypassed Covenant.</li>
+                        <li>Regulatory compliance of any kind.</li>
+                    </ul>
+                </div>
+            </section>
+
+            <section class="panel" aria-labelledby="an-h">
+                <div class="panel-head">
+                    <h2 id="an-h">Anchor</h2>
+                    <span class="pill @AnchorPillKind(r)">@AnchorStatusText(r)</span>
+                </div>
+                <p class="secondary muted">An anchor written to separately protected storage gives verification a trusted comparison point for the history it covers. It is only as strong as the protection of that storage. “Configured” means the Host will write anchors; “Verified” means this verification compared the log against anchors that exist.</p>
+                <FactList Facts="@AnchorFacts(r)" />
+            </section>
+
+            <section class="panel flush" aria-labelledby="sg-h">
+                <div class="panel-head">
+                    <h2 id="sg-h">Segments</h2>
+                    <span class="panel-sub">Archived segments are kept on the appliance and remain verifiable outside the console</span>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th scope="col">Segment</th><th scope="col">Period</th><th scope="col" class="num">Entries</th><th scope="col">Status</th></tr></thead>
+                        <tbody>
+                            <tr>
+                                <td>Current</td>
+                                <td class="mono secondary">@(r.FirstEntryUtc is null ? "No entries yet" : Fmt.Utc(r.FirstEntryUtc) + " → " + Fmt.Utc(r.LastEntryUtc))</td>
+                                <td class="num mono">@Fmt.Int(r.Entries)</td>
+                                <td>@(r.ChainValid ? "Verified" : "FAILED")</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="secondary subtle" style="padding:12px 18px">Archived segments are not browsable from the console in this release; verify them from the appliance with the exported report as reference.</p>
+            </section>
+        }
+    </RequiresConnection>
+</div>
+
+@code {
+    private EvidenceReport? _report;
+    private bool _loading;
+    private bool _exporting;
+    private string? _error;
+    private string? _exportError;
+    private DateTimeOffset? _verifiedAt;
+    private bool _started;
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (State.Connected && !_started) await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (_loading) return;
+        _started = true;
+        _loading = true; _error = null;
+        StateHasChanged();
+        try
+        {
+            _report = await Api.GetEvidenceAsync();
+            _verifiedAt = DateTimeOffset.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+            _report = null; // never show a previous green state against a failed check
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ExportAsync()
+    {
+        _exporting = true; _exportError = null;
+        try
+        {
+            var json = await Api.GetEvidenceJsonAsync();
+            var name = $"covenant-evidence-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}Z.json";
+            await Interop.DownloadTextAsync(name, "application/json", json);
+        }
+        catch (Exception ex)
+        {
+            _exportError = ex.Message;
+        }
+        finally
+        {
+            _exporting = false;
+        }
+    }
+
+    private IReadOnlyList<FactList.Fact> StatusFacts(EvidenceReport r) =>
+    [
+        new("Last verification", _verifiedAt is { } v ? Fmt.Utc(v) : "—", true),
+        new("Scope", "Current segment"),
+        new("Entries checked", Fmt.Int(r.Entries), true),
+        new("Allowed / refused", $"{Fmt.Int(r.Allowed)} / {Fmt.Int(r.Denied)}", true),
+        new("First entry", Fmt.Utc(r.FirstEntryUtc), true),
+        new("Last entry", Fmt.Utc(r.LastEntryUtc), true),
+        new("Source", "GET /admin/evidence", true),
+    ];
+
+    private bool? AnchorConfigured(EvidenceReport r) => r.AnchorConfigured ?? State.LastStatus?.Anchor?.Configured;
+    private long? AnchorCount(EvidenceReport r) => r.AnchorCount ?? State.LastStatus?.Anchor?.AnchorsWritten;
+    private DateTimeOffset? LastAnchor(EvidenceReport r) => r.LastAnchorUtc ?? State.LastStatus?.Anchor?.LastAnchorUtc;
+
+    private string AnchorStatusText(EvidenceReport r)
+    {
+        var configured = AnchorConfigured(r);
+        if (configured is null) return "Not reported by this Host";
+        if (configured == false) return "Not configured";
+        var count = AnchorCount(r);
+        if (count is null) return "Configured · coverage not reported";
+        if (count == 0) return "Configured · no anchor written yet";
+        return r.ChainValid ? $"Configured · {Fmt.Int(count.Value)} anchors compared" : $"Configured · {Fmt.Int(count.Value)} anchors";
+    }
+
+    private string AnchorPillKind(EvidenceReport r)
+    {
+        var configured = AnchorConfigured(r);
+        if (configured != true) return "unknown";
+        var count = AnchorCount(r);
+        return count is > 0 && r.ChainValid ? "served" : "refused";
+    }
+
+    private IReadOnlyList<FactList.Fact> AnchorFacts(EvidenceReport r) =>
+    [
+        new("Audit:AnchorPath", AnchorConfigured(r) switch { true => "Configured (path not exposed)", false => "Not set", null => "Not reported" }),
+        new("Audit:AnchorEvery", State.LastStatus?.Anchor?.Every is { } every ? $"every {Fmt.Int(every)} entries" : "Not reported", true),
+        new("Anchors written", AnchorCount(r) is { } n ? Fmt.Int(n) : "Not reported", true),
+        new("Last anchor written", LastAnchor(r) is { } t ? Fmt.Utc(t) : "Not reported", true),
+    ];
+
+    private void OnChanged()
+    {
+        if (State.Connected && !_started) _ = InvokeAsync(LoadAsync);
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => State.Changed -= OnChanged;
+}

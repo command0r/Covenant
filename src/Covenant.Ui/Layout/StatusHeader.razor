@@ -1,0 +1,106 @@
+@inject AppState State
+@inject ConsoleSession Session
+@inject CatalogState Catalog
+@implements IDisposable
+
+@* Slim status header. Shows only what is actually known: "Console connected" means the admin API answered,
+   not that providers are available or that anything is "serving". Freshness comes from the status feed. *@
+<header class="status-header">
+    <span class="env" title="Environment">@(State.Connected ? State.EnvironmentLabel : "—")</span>
+
+    <span class="indicator" aria-live="polite">
+        <span class="dot @(State.Connected ? (State.IsStale ? "warn" : "ok") : "bad")" aria-hidden="true"></span>
+        @(State.Connected ? "Console connected" : "Console disconnected")
+    </span>
+
+    @if (State.Connected)
+    {
+        <span class="indicator" aria-live="polite">
+            <span class="dot @(State.IsStale ? "warn" : "hollow")" aria-hidden="true"></span>
+            @if (State.FeedError is not null)
+            {
+                <span>@State.FeedError</span>
+            }
+            else if (State.IsStale)
+            {
+                <span>Stale · last update @Fmt.Ago(State.LastUpdatedUtc, DateTimeOffset.UtcNow)</span>
+            }
+            else
+            {
+                <span>Updated @Seconds s ago</span>
+                if (State.FeedMode == FeedMode.Polling)
+                {
+                    <span class="subtle">· polling</span>
+                }
+            }
+        </span>
+
+        <span class="indicator" aria-live="polite">
+            <span class="dot @(State.Paused ? "warn" : "hollow")" aria-hidden="true"></span>
+            @(State.Paused ? "New provider calls paused" : "New provider calls accepted")
+        </span>
+
+        var local = RouteHealth.LocalRoute(State.Catalog, DateTimeOffset.UtcNow);
+        <a class="indicator header-link" href="connections" title="@(local.LastError is { Length: > 0 } e ? "Last error: " + e : "Open Models & connections")">
+            <span class="dot @local.Tone" aria-hidden="true"></span>
+            @local.Text
+        </a>
+    }
+
+    <span class="grow"></span>
+
+    @if (State.Connected)
+    {
+        if (_error is not null)
+        {
+            <span class="indicator" role="alert" style="color:var(--red)">@_error</span>
+        }
+        if (State.Paused)
+        {
+            <Button Variant="primary" Busy="@_busy" BusyText="Resuming…" OnClick="ResumeAsync" Id="pause-toggle">Resume new provider calls</Button>
+        }
+        else
+        {
+            <Button Busy="@_busy" BusyText="Pausing…" OnClick="PauseAsync" Id="pause-toggle">Pause new provider calls</Button>
+        }
+    }
+</header>
+
+@code {
+    private bool _busy;
+    private string? _error;
+    private System.Threading.Timer? _timer;
+
+    private int Seconds => Math.Max(0, State.SecondsSinceUpdate(DateTimeOffset.UtcNow));
+
+    protected override void OnInitialized()
+    {
+        State.Changed += OnChanged;
+        // Re-render once a second so "Updated n s ago" counts; AppState.Tick handles the stale flip itself.
+        _timer = new System.Threading.Timer(_ => OnChanged(), null, 1000, 1000);
+    }
+
+    private async Task PauseAsync()
+    {
+        _busy = true; _error = null;
+        var err = await Session.SetPausedAsync(true, "paused from console");
+        _busy = false;
+        _error = err is null ? null : "Pause failed — " + err;
+    }
+
+    private async Task ResumeAsync()
+    {
+        _busy = true; _error = null;
+        var err = await Session.SetPausedAsync(false, null);
+        _busy = false;
+        _error = err is null ? null : "Resume failed — " + err;
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        State.Changed -= OnChanged;
+        _timer?.Dispose();
+    }
+}

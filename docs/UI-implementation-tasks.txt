@@ -1,0 +1,305 @@
+COVENANT UI + BACKEND IMPLEMENTATION TASKS
+Implementation brief for Claude — 16 October 2026
+
+START HERE
+
+Implement the revised Covenant design in the existing .NET repository. This is
+an implementation assignment, not another design exercise. Preserve its visual
+direction and make the controls operate the real governed pipeline.
+
+Design reference:
+/Users/commandor/Library/CloudStorage/OneDrive-Personal/Projects/My docs/Topics/VSLive!/2026/covenant-prototype
+
+Read README.md, Handoff.dc.html, the relevant page sources and tokens.css there.
+Read the repository CLAUDE.md files and accepted ADRs first. ADR-0004 already
+selects standalone Blazor WebAssembly embedded as assets in the minimal-API host.
+The request/evidence browser triggers that migration. Do not introduce React,
+Blazor Server, a second production server, or ship the prototype runtime.
+
+Work through the numbered tasks in dependency order. Use small reviewable
+changes with meaningful tests. Do not commit or publish unless separately asked.
+Do not overwrite unrelated local work. The existing UI-redesign-brief.txt is
+user work to preserve. Significant contract/storage decisions need an ADR before
+code, as required by the repository. Routine choices do not need another round
+of user approval. Keep a short progress record with task status and test results.
+
+The source code is authoritative about existing behaviour. Handoff is useful
+but not a complete API specification. Do not copy fixture claims into real UI.
+The existing audit already contains Signal; don't declare it universally absent.
+
+DELIVERY SCOPE
+
+First deliver a working vertical slice: real sign-in, real request, real result,
+matching audit evidence, and one working Ollama/Qwen route. Then complete the
+remaining read-only pages and harden the demo. No policy/budget editor, multiple
+local models, full archive search, model downloading, or provider proliferation
+in this slice. Open WebUI is an optional client of Covenant, not a new backend.
+
+TASK 01 — UI shell and appliance packaging
+Dependencies: none.
+
+Create a standalone Blazor WASM UI project. Build and embed its production assets
+in Covenant.Host using ADR-0004. Serve the UI through the existing appliance;
+retain the inference and admin APIs. Provide reliable nested-route reloads,
+correct MIME types and WASM loading from the published artifact.
+
+Port the shared shell, navigation, colour/type tokens, dark/light themes and
+locally bundled fonts. Record font licences/provenance. Use shared components
+for statuses, buttons, drawers, request facts and errors. No external CDNs.
+
+Implement Connect/disconnect against the real admin API. Keep admin credentials
+separate from application credentials. An application key stays in UI memory;
+never persist it, prompts or responses in localStorage. Preserve the established
+tab-scoped admin-token behaviour, clear it on disconnect, and never display/log
+secrets. Remove seeded keys and identity claims. Identity is server-resolved.
+
+Use one application state service for status, pause state and freshness across
+navigation. Read real status updates, handle reconnect/401/staleness, and render
+mutation failures without falsely claiming success. Disconnecting the console
+does not pause Covenant. Data pages must not remain falsely authenticated.
+
+Acceptance:
+- Published single appliance serves the UI and assets without a separate server.
+- Invalid token, disconnect, API outage and reconnect have correct visible states.
+- Pause/resume uses POST /admin/kill-switch and stays consistent across pages.
+- No fixture runtime, canned results or external font requests ship.
+- Keyboard focus, labels, drawer close/Escape and focus restoration work.
+
+TASK 02 — Stable request identity and exact evidence lookup
+Dependencies: none; finish before wiring Playground evidence.
+
+Choose and document one server-generated request correlation ID, created before
+pipeline execution and returned even for governed refusals. Propagate it through
+the canonical context, buffered responses, streaming response headers and audit.
+Keep the existing audit-record identity if useful; define the mapping explicitly.
+Do not trust a caller-supplied ID as unique or use timestamps to join records.
+
+Add an admin-authenticated exact lookup API. The UI needs pending/not-yet-found,
+found, unavailable/error and retry behaviour. Do not claim an audit write failed
+merely because a bounded lookup timed out. Define lookup retention/snapshot
+limits explicitly; full historical search is outside this task.
+
+Add explicit audit metadata needed by these screens: classification evaluated
+state, structured final outcome/denial kind, selected versus attempted versus
+served model, and stopping stage where actually known. Keep measured stage
+timings deferred. Never infer a complete measured trace from a reason string.
+Preserve the restrictive default classification used for enforcement.
+
+IMPORTANT: adding fields can change serialized bytes used by audit hashing.
+Document a versioned/backward-compatible approach before implementation. Existing
+logs and anchors must still verify without rewriting history. Legacy missing
+fields display 'Not recorded', not fabricated facts. Check audit enqueue on client
+cancellation: cancellation must not silently prevent the required audit record.
+Define what happens to malformed requests rejected before canonical execution.
+
+Acceptance:
+- Concurrent requests, identical prompts and equal timestamps resolve correctly.
+- Allow, auth denial, policy denial, pause, missing adapter, rate limit, upstream
+  failure and cancellation carry the right identity/outcome wherever supported.
+- Mid-stream failure retains transport HTTP 200 but final outcome is failure.
+- Existing audit fixtures, anchors and ledger replay still verify correctly.
+- Lookup is admin-only, bounded and never exposes unconfigured prompt content.
+
+TASK 03 — Honest usage and estimated cost
+Dependencies: coordinate audit schema with 02.
+
+Preserve the distinction between unreported token usage and a real zero through
+adapter, attribution, audit, API and UI. The current provider adapter replaces
+missing counts with zero. Do not copy that ambiguity into the new screens.
+Use explicit availability metadata or a compatible nullable representation.
+
+Show 'Estimated provider cost' using configured prices and reported usage.
+Show 'Not reported' for unknown billable usage. A refused request with no call
+can legitimately show zero; a failed or cancelled provider call may not.
+Local zero-priced inference is not free infrastructure.
+
+Define and document a fail-closed accounting response to unpriced/unknown usage;
+do not silently let unknown billable calls escape budget enforcement. Keep the
+decision narrow, test it, and expose any resulting uncertainty or blocking state.
+Maintain pre-call threshold semantics and explain concurrent overshoot. Do not
+claim that this budget is a guaranteed provider invoice ceiling.
+
+Acceptance:
+- Tests cover complete, partial and missing usage, local zero price, no call,
+  cache hit, interrupted stream and provider failure.
+- Unknown cost cannot become a false $0 or false saving in any aggregate.
+- Ledger replay and old records remain compatible with the chosen representation.
+
+TASK 04 — Real Playground and presentation mode
+Dependencies: 01, 02, 03.
+
+Reproduce Main.dc.html's normal and presentation layouts with real API calls.
+Presets A–D populate inputs only. The actual pipeline decides the outcome.
+Use an application key with POST /v1/chat/completions, never the admin token or
+a direct provider call. Support buffered and streaming responses.
+
+Start empty; freeze a submitted request snapshot. Editing the form cannot
+relabel its result. Prevent overlapping runs for this first version. Use the
+server correlation ID, show asynchronous audit arrival with bounded retries,
+and open the exact request in Requests. Add that same navigation action to the
+presentation-mode evidence drawer, not just normal mode.
+
+Capture errors from both transport and stream termination. Cancellation means
+'stopped waiting/incomplete' where appropriate, never a guarantee of rollback
+or zero charge. Use the real model catalog and allow explicit test overrides
+without suggesting that selecting a model grants permission.
+
+Correct a residual design issue: a route selected before a pause refusal or a
+cache hit is not a model actually attempted. Display Selected model separately
+from Provider attempted/Served model using observed backend facts.
+
+Scenario D needs a fresh value on every run or verified disabled caching. The
+system's pause scope remains new provider calls; cache hits and in-flight work
+are not retroactively stopped. No invented pipeline timings or checks.
+
+Acceptance:
+- A succeeds; B refuses the unapproved model without a provider call.
+- C fails closed without local registration and succeeds locally when configured.
+- D refuses while paused, then succeeds after resume, repeatedly.
+- Empty key yields real auth failure and 'classification not evaluated'.
+- At 1280x720 and 1920x1080, prompt, Run, result, model, cost and evidence action
+  fit presentation mode without page scrolling; long output scrolls inside it.
+- No prompts/responses or application keys persist after reload/disconnect.
+
+TASK 05 — Requests browser and evidence detail
+Dependencies: 01, 02, 03; use the same view models as 04.
+
+Implement the full-width recent list and detail drawer from Requests.dc.html.
+Filter the actual available snapshot; label its coverage and never imply full
+audit history. Use stable IDs and retain filters/selection on navigation.
+Exact deep links must open their record even when the current filter excludes
+it: explain that condition rather than silently opening another request.
+
+Display recorded historical facts. Today's pause, policy or model health must
+not recolour a past decision. Separate optional console-only response content
+from persisted audit evidence. Show the existing Signal when present; legacy
+missing classification-evaluated/stage data stays unknown.
+
+Acceptance:
+- Open from Playground selects the same correlation/audit record every time.
+- Filters, empty results, clear filters, row selection, close and keyboard work.
+- Long model names/IDs remain readable at 1280px, without squeezing the table.
+- Raw JSON agrees with visible facts and follows prompt-retention configuration.
+- Removing a row from the recent window produces a clear unavailable state.
+
+TASK 06 — One real Ollama/Qwen connection
+Dependencies: 02, 04; 01 for wizard UI.
+
+Extend the existing Local:Endpoint/Local:ModelId OpenAI-compatible adapter rather
+than introducing another inference path. Support one exact installed Qwen tag.
+Do not guess the user's host or tag, pull models automatically or change Ollama's
+network exposure. Keep endpoint/tag inputs explicit and configurable.
+
+Add admin-authenticated, host-side probe and model discovery operations with
+timeouts, response-size limits and an explicit operator-configured destination
+allow-list. Validate scheme/host/port and redirects/resolution; this must not
+become an arbitrary server-side URL fetcher. Allow intentionally approved local
+addresses; localhost refers to Covenant's host/container, not the browser.
+Never forward the Covenant admin/application token to Ollama. Provider secrets
+remain server-side and are never returned to the browser.
+
+Expose applied configuration and an operational model catalog distinguishing
+configured, registered, permitted, last successful observation, latest failure
+and stale/unknown reachability. GET /v1/models alone is not a health check.
+
+Port the wizard gates: valid endpoint → successful probe → discovery → exact
+single tag → route review → manual config/restart → read back applied config →
+governed inference test. Generate safe configuration guidance without embedding
+secrets. Runtime apply/edit is deferred. Make it explicit in the UI.
+
+The governed test must use an application key through the same pipeline as
+Playground. The current design lacks that key flow: reuse the in-memory key or
+ask for one; never treat admin sign-in as inference authorization. Link its real
+request/evidence just like any other Playground request.
+
+Fix the residual stale-success problem: after a successful test, a later failed
+test must update shared health to failed/degraded. Preserve last success time,
+but don't leave the header green. A paused test is not proof the provider is
+unreachable. Draft endpoint changes invalidate draft probe results; they must
+not silently change or erase the applied running configuration.
+
+Provide explicit local-only startup configuration without requiring a cloud
+key. Define routes deliberately; do not quietly reroute configured cloud traffic
+or relax sensitive-data policy. Missing/invalid required configuration remains
+fail-closed. Record an ADR for new startup/routing mode semantics before code.
+
+Acceptance:
+- Mock contract tests cover reachable/refused/timeout/empty discovery/tag mismatch,
+  unauthorized destinations, redirects, stale results and response failures.
+- A real smoke test with Alex's actual Ollama/tag proves buffered and streaming
+  inference, audit correlation, and no cloud fallback for protected content.
+- Failed probe blocks progression; changing endpoint invalidates its draft checks.
+- Applied config is read back; a checkbox is never proof of registration.
+- Successful test followed by failure updates all pages consistently.
+- Local-only mode starts without cloud secrets; incomplete mode configuration fails.
+- Optional Open WebUI instructions use Covenant /v1 and an application key.
+
+TASK 07 — Overview, read-only controls and evidence pages
+Dependencies: 01–03, 06 catalog/status.
+
+Implement Overview, Policies, Budgets, Evidence and Settings against real data.
+Do not port the fixture store, hardcoded times, chart bars, default green statuses,
+sample counters or fabricated hashes. If data is unavailable, show that state.
+Charts must state their actual retained window; no synthetic history.
+
+Policies: show applied routes and actual processing order; no disabled editor
+teasers. Budgets: cap, recorded spend, remaining, team attribution and uncertainty.
+Keep savings secondary and show the baseline only if it is computable.
+
+Evidence: use existing chain verification and anchoring. Expose actual anchor
+configuration/coverage/status without secrets. 'Configured' is not 'verified'.
+Use the revised internal-consistency wording. Do not invent an independent anchor
+or archived-segment browser. Export real verification data.
+
+Settings: read-only applied values; isolate archive/reset in Maintenance with
+explicit confirmation of environment, segment and budget reopening. Do not use
+reset as the fix for a reached budget or silently clear evidence for the demo.
+
+Acceptance:
+- Pages agree on current environment, pause, health, counts and accounting scope.
+- Failed verification, stale data, unknown usage and missing configuration are
+  represented accurately, not as normal green states.
+- Archive/reset retains old evidence and behaves exactly as described.
+- No destructive maintenance is invoked by normal navigation or scenario selection.
+
+TASK 08 — Automated validation, publish checks and conference handoff
+Dependencies: all above.
+
+Run the repository test suite and targeted new integration tests. Automated tests
+use fake adapters, never live paid providers. Run a real Ollama smoke separately
+with supplied deployment inputs and synthetic data. Record it as blocked if the
+endpoint/tag is unavailable; do not substitute fixtures and call it passed.
+
+Publish using the repo's supported deployment path. Check the NativeAOT path
+explicitly and report any pre-existing limitations separately from regressions.
+Prove the actual published binary serves UI/WASM/fonts and reloads nested routes.
+Do not mark packaging done because dotnet run works.
+
+Prepare a short demo runbook: startup, preflight, A/B/C/D sequence, expected
+outcomes, model warm-up, prompt retention, connectivity checks, and recovery from
+provider outage. Keep demo.sh as an optional diagnostic/smoke tool; the normal
+demo must be operable from the browser after startup.
+
+Provide the reviewer with:
+- Baseline and final commit IDs plus uncommitted-file summary; no secrets.
+- Completed task list and any explicit deferrals.
+- Commands run, exit status and meaningful test output summaries.
+- Run/publish instructions and required configuration NAMES only.
+- Screenshots at 1280x720 and 1920x1080, light and dark; no visible credentials.
+- Evidence IDs from the synthetic live smoke and whether it was truly live.
+- Known limitations and any architecture decisions added.
+
+CODEX VERIFICATION ORDER AFTER CLAUDE IMPLEMENTS
+
+1. Inspect diff/ADRs for scope, dependency/provenance and audit compatibility.
+2. Run unit/integration tests, especially fail-closed and audit-history tests.
+3. Verify admin/app credential separation and authorized provider-probe boundary.
+4. Run the published appliance; check navigation, no external assets and staleness.
+5. Exercise real A/B/C/D, auth failure, provider outage, stream failure and cancel.
+6. Match responses to exact audit records, including concurrent requests.
+7. Check unknown usage, budget threshold, cache/pause and restart behaviour.
+8. Check Ollama failure after success, draft versus applied config and key flow.
+9. Review projection screenshots and rehearse without a terminal interaction.
+
+The reviewer independently verifies the implementation. Claude's 'done' summary
+and passing fixture UI alone are not evidence of a working governed system.

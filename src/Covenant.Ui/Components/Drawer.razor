@@ -1,0 +1,82 @@
+@* Right-hand detail drawer (or centred dialog with Mode="dialog"). Escape and the scrim close it; focus moves
+   into the panel on open, Tab is trapped inside, and focus returns to the element that opened it
+   (OpenerId) on close. *@
+@inject Interop Interop
+@implements IAsyncDisposable
+
+@if (Open)
+{
+    <div class="scrim" @onclick="RequestClose" aria-hidden="true"></div>
+    <div class="@(Mode == "dialog" ? "dialog" : "")" @onkeydown="OnKeyDown">
+        <div id="@_id" class="@(Mode == "dialog" ? "dialog-box" : "drawer")" role="dialog" aria-modal="true"
+             aria-labelledby="@(_id + "-title")" tabindex="-1">
+            <div class="drawer-head">
+                <h2 id="@(_id + "-title")">@Title</h2>
+                <button type="button" class="btn ghost sm" aria-label="Close" @onclick="RequestClose">Close</button>
+            </div>
+            <div class="drawer-body">
+                @ChildContent
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public bool Open { get; set; }
+    [Parameter] public EventCallback<bool> OpenChanged { get; set; }
+    [Parameter] public string Title { get; set; } = "";
+    /// <summary>"drawer" (default, right side) or "dialog" (centred).</summary>
+    [Parameter] public string Mode { get; set; } = "drawer";
+    /// <summary>Element id to return focus to on close.</summary>
+    [Parameter] public string? OpenerId { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private readonly string _id = "drawer-" + Guid.NewGuid().ToString("n")[..8];
+    private bool _wasOpen;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (Open && !_wasOpen)
+        {
+            _wasOpen = true;
+            try
+            {
+                await Interop.FocusElementAsync(_id);
+                await Interop.TrapFocusAsync(_id);
+            }
+            catch (JSException) { /* focus management is best effort */ }
+        }
+        else if (!Open && _wasOpen)
+        {
+            _wasOpen = false;
+            await ReleaseAsync();
+        }
+    }
+
+    private async Task RequestClose()
+    {
+        if (!Open) return;
+        Open = false;
+        await OpenChanged.InvokeAsync(false);
+    }
+
+    private Task OnKeyDown(KeyboardEventArgs e) => e.Key == "Escape" ? RequestClose() : Task.CompletedTask;
+
+    private async Task ReleaseAsync()
+    {
+        try
+        {
+            await Interop.ReleaseFocusAsync(_id);
+            if (OpenerId is not null) await Interop.FocusElementAsync(OpenerId);
+        }
+        catch (JSException) { /* page may be unloading */ }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_wasOpen)
+        {
+            try { await Interop.ReleaseFocusAsync(_id); } catch (Exception) { /* disposing */ }
+        }
+    }
+}

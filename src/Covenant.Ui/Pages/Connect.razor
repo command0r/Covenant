@@ -1,0 +1,143 @@
+@page "/connect"
+@layout BareLayout
+@inject AppState State
+@inject ConsoleSession Session
+@inject NavigationManager Nav
+@implements IDisposable
+
+<PageTitle>Connect · Covenant</PageTitle>
+
+<div class="connect-wrap">
+    <main class="connect">
+        <div class="brand">
+            <span class="name">Covenant</span>
+            <span class="subtle secondary">AI governance workspace</span>
+        </div>
+
+        @if (Banner is { } b)
+        {
+            <div class="alert @b.Tone" role="@(b.Tone == "bad" ? "alert" : "status")">
+                <div class="alert-text">
+                    <strong>@b.Title</strong>
+                    <span class="alert-body">@b.Body</span>
+                </div>
+            </div>
+        }
+
+        <form @onsubmit="ConnectAsync" @onsubmit:preventDefault="true">
+            <h1 style="font-size:20px">Connect to the console</h1>
+
+            @if (State.Connected)
+            {
+                <div class="field">
+                    <span class="secondary subtle">Environment</span>
+                    <span class="mono">@State.EnvironmentLabel</span>
+                </div>
+                <p class="secondary muted">Connected with the admin token held in this tab.</p>
+                <div class="btn-row">
+                    <a class="btn primary form" href="playground">Go to Playground</a>
+                    <a class="btn form" href="">Go to Overview</a>
+                    <Button Variant="ghost" Size="form" OnClick="DisconnectAsync">Disconnect</Button>
+                </div>
+            }
+            else
+            {
+                <div class="field">
+                    <label for="tok">Admin token</label>
+                    <input id="tok" class="input mono" type="password" autocomplete="off" spellcheck="false"
+                           @bind="_token" @bind:event="oninput" aria-invalid="@(_invalid ? "true" : "false")"
+                           aria-describedby="tok-help" disabled="@_busy" />
+                    <span id="tok-help" class="help @(_invalid ? "bad" : "")">@Help</span>
+                </div>
+                <Button Type="submit" Variant="primary" Size="form" Busy="@_busy" BusyText="Checking the token…"
+                        Disabled="@(string.IsNullOrWhiteSpace(_token))">Connect</Button>
+            }
+        </form>
+
+        <div class="secondary muted" style="display:flex;flex-direction:column;gap:6px">
+            <span>This is a shared admin token, not a personal account. It administers the console only — it never authorizes model requests. Applications send their own keys.</span>
+            <span class="subtle">Kept in this tab’s session storage; closing the tab disconnects.</span>
+        </div>
+    </main>
+</div>
+
+@code {
+    private sealed record BannerInfo(string Tone, string Title, string Body);
+
+    private string _token = "";
+    private bool _busy;
+    private bool _invalid;
+    private string? _error;
+
+    private string Help => _invalid && _error is not null
+        ? _error
+        : "Validated against GET /admin/status. Nothing is stored until the Host accepts it.";
+
+    private BannerInfo? Banner
+    {
+        get
+        {
+            if (State.Connected) return null;
+            if (_invalid && _error is not null) return new("bad", "Could not connect", _error);
+            var m = State.ConnectMessage;
+            if (m is null) return null;
+            if (m.StartsWith("Token rejected", StringComparison.Ordinal))
+                return new("bad", "Token rejected", "The Host refused the admin token. Enter the current token to reconnect.");
+            if (m.StartsWith("Connection lost", StringComparison.Ordinal))
+                return new("warn", "Connection lost", m + ". The Host did not answer; try again when it is reachable.");
+            return new("info", "Disconnected", "The token and any application key were cleared from this tab. Covenant itself keeps running — disconnecting never pauses it.");
+        }
+    }
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    // One-click launch from scripts/run-local-demo.sh: read credentials from the URL fragment once, wipe the
+    // fragment from the address bar/history immediately, then connect exactly as if they had been typed.
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || LaunchLink.Parse(Nav.Uri) is not { } launch) return;
+        Nav.NavigateTo("connect", forceLoad: false, replace: true);
+        if (launch.ApplicationKey is { } key) State.SetApplicationKey(key);
+        if (launch.AdminToken is { } token && !State.Connected)
+        {
+            _token = token;
+            await ConnectAsync();
+            StateHasChanged();
+        }
+    }
+
+    private async Task ConnectAsync()
+    {
+        if (_busy || string.IsNullOrWhiteSpace(_token)) return;
+        _busy = true; _invalid = false; _error = null;
+        try
+        {
+            await Session.ConnectAsync(_token.Trim());
+            _token = "";
+            Nav.NavigateTo("");
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            _invalid = true;
+            _error = "Token rejected by the Host. Check the Admin:Token value in the appliance configuration.";
+        }
+        catch (Exception ex)
+        {
+            _invalid = true;
+            _error = "The Host did not answer: " + ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    private async Task DisconnectAsync()
+    {
+        await Session.DisconnectAsync("Disconnected");
+        _token = "";
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnChanged;
+}
