@@ -12,7 +12,12 @@ PROFILE=hybrid OPENAI_API_KEY=… CLOUD_PRICE_IN_1M=… CLOUD_PRICE_OUT_1M=… s
 ```
 The launcher checks Ollama and the model tag, publishes the self-contained binary, starts it on its own port with
 its own state directory (`/tmp/covenant-v2-demo-<profile>/`: audit log, configuration repository, budget ledger),
-and opens the console already connected (admin token in the URL fragment, read once, never sent to the server).
+and opens the console already connected. The token is read from the URL fragment and removed; it is not sent
+in the request URL or access logs, but is subsequently sent in the admin authentication header.
+Prerequisites: .NET 10 SDK (unless reusing a publish), Python 3, curl, OpenSSL and lsof.
+`OPEN_BROWSER=0` keeps startup headless. Normal output contains no credentials. Owner-only files under
+`$STATE/.launch-credentials/` hold the connected console URL and application key. Open the URL privately when
+needed; do not copy it into chat, logs or screenshots. Credentials rotate on every launcher run.
 It never touches another instance (e.g. :5100, :5201). State persists per profile; `FRESH=1` moves it aside
 (renamed, not deleted).
 
@@ -66,12 +71,13 @@ and **Evidence recorded** → *Open in Requests* for the exact record.
 | **B** Sensitive → local | Preset B (synthetic SSN 078-05-1120), profile Public demo | classify: **PII (baseline Public, escalated: US SSN pattern)**; policy → ollama only | zero-priced local; evidence shows the signal, never the prompt |
 | **B′** cloud override refused | B with Advanced → model `openai/<model>` | policy refused: target not eligible for PII; provider **skipped** | no provider call, $0, audited refusal |
 | **C** missing local | Models & connections → disable the Ollama connection → Preview → Save (new version) → run B | policy refused: no eligible destination; provider skipped; **no cloud call** | re-enable afterwards (another new version) |
-| **D** approved fallback | (fixture) Policies → pause the primary route **or** stop the primary provider → run A | provider attempt 1 failed/paused-skipped → attempt 2 on the approved fallback | both attempts in the drawer; failed attempt charged its estimate, never $0 |
-| **F** budget | Budgets → lower the cap below spend → Preview → Save → run A | budget refused ("would exceed cap") | spend preserved across the edit; raise the cap again (audited new version) |
+| **D** transient-failure fallback | Use an isolated approved failing provider fixture plus a healthy fallback; run A | first attempted provider fails transiently, then the approved fallback serves | two actual attempts in the drawer; failed attempt charged an estimate, plus the fallback charge |
+| **D′** skip a paused route | Hybrid: Policies → pause the primary route → Save → run A | primary is skipped without being called; local fallback serves | one actual provider attempt; no charge for the skipped route |
+| **F** budget | Requires a nonzero-priced route: real cloud (opt-in) or an isolated fixture with explicitly synthetic prices. First incur spend, then lower cap below spend → Preview → Save → run a fresh uncached request | budget refused ("would exceed cap") | spend preserved; restore cap afterwards. Default zero-priced Local-only cannot demonstrate this spending scenario |
 | **G** exact cache | Settings → cache TTL 60 → Save; run the same request twice | 2nd run: cache passed, rate limit/pause/budget/provider **skipped (cache_hit)** | $0 no provider call; drawer names the original served connection/model; any config change invalidates |
 | **H** policy editing | Policies → pause the primary route → Save; run A; pause the whole policy → Save; run A; resume → Save | route paused → fallback serves; policy paused → refused; resumed → primary again | each change is a new version (history + rollback available) |
 | **Pause** | Header → Pause new provider calls → run D (fresh nonce) → Resume → run D | pause stage refused → then served | cache hits are not stopped by the pause (documented) |
-| **Auth** | Applications & workload profiles → disable console testing for demo-app → Save → Run | auth refused (governed 403, audited) | re-enable afterwards |
+| **Auth** | Applications & workload profiles → disable console testing for demo-app → Save → Playground | application is unavailable for console selection; Run cannot submit as it | re-enable afterwards. A separate direct API negative test verifies 403 for an unauthorized submission |
 
 Stage timings are measured by the server; skipped stages are shown as skipped, never animated as if they ran.
 
@@ -88,6 +94,6 @@ Stage timings are measured by the server; skipped stages are shown as skipped, n
 | Startup refused | The launcher prints Covenant's reason (e.g. missing hybrid prices, corrupt journal — never auto-repaired silently) |
 
 ## 5. Optional: Open WebUI as a client
-Base URL `http://localhost:<PORT>/v1`, API key = the launcher's **/v1 app key** (never the admin token); optional
+Base URL `http://localhost:<PORT>/v1`, API key = the owner-only `$STATE/.launch-credentials/application-key` file (never the admin token); optional
 header `X-Covenant-Profile` selects a granted profile. Text chat only; streaming supported. Pointing Open WebUI at
 Ollama directly bypasses Covenant.

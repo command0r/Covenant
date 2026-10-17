@@ -6,6 +6,7 @@
 #   MODEL=qwen3.8:27b-mlx PORT=5212 scripts/run-local-demo.sh
 #   SKIP_PUBLISH=1 scripts/run-local-demo.sh          # reuse the last publish
 #   FRESH=1 scripts/run-local-demo.sh                 # start this profile's isolated state from scratch
+#   OPEN_BROWSER=0 scripts/run-local-demo.sh          # headless; private connection files are listed below
 #
 # Isolation: Production environment (user-secrets NOT loaded), its own port and its own state directory
 # (/tmp/covenant-v2-demo-<profile>/: audit log, configuration repository, budget ledger). It never touches
@@ -20,6 +21,7 @@
 #   CLOUD_MODEL            default gpt-4o-mini;  CLOUD_PRICE_DATE (yyyy-MM-dd) optional
 # Covenant refuses to start the hybrid seed without explicit prices — no default price is ever assumed.
 set -euo pipefail
+umask 077
 
 PROFILE="${PROFILE:-local-only}"
 PORT="${PORT:-5210}"
@@ -40,11 +42,20 @@ esac
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
 say "1/5 Checking Ollama at $OLLAMA"
-models="$(curl -sS --max-time 5 "$OLLAMA/models")" || { echo "Ollama is not reachable at $OLLAMA (ollama serve, or set OLLAMA=...)"; exit 1; }
-if ! grep -q "\"id\":\"$MODEL\"" <<<"$models"; then
-  echo "Model '$MODEL' is not installed. Installed tags:"; grep -o '"id":"[^"]*"' <<<"$models" | cut -d'"' -f4 | sed 's/^/  /'
-  echo "Re-run with MODEL=<one of the above>."; exit 1
-fi
+command -v python3 >/dev/null || { echo "Python 3 is required to parse the model catalog."; exit 1; }
+models="$(curl -fsS --max-time 5 "$OLLAMA/models")" || { echo "Ollama is not reachable at $OLLAMA (ollama serve, or set OLLAMA=...)"; exit 1; }
+printf '%s' "$models" | python3 -c '
+import json, sys
+try:
+    models = json.load(sys.stdin)["data"]
+    ids = [m["id"] for m in models if isinstance(m, dict) and isinstance(m.get("id"), str)]
+except (ValueError, KeyError, TypeError):
+    sys.exit("Invalid model catalog: expected an OpenAI-compatible JSON data array.")
+if sys.argv[1] not in ids:
+    print("Requested model is not installed. Installed tags:")
+    print("\n".join("  " + model for model in ids))
+    sys.exit("Re-run with MODEL=<exact installed tag>.")
+' "$MODEL"
 echo "ok — $MODEL"
 
 if [[ "$PROFILE" == hybrid ]]; then
@@ -109,7 +120,9 @@ fi
 LOG="$STATE/server.log"
 env "${env_args[@]}" "$OUT/Covenant.Host" >"$LOG" 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null || true' INT TERM
+trap 'kill "$PID" 2>/dev/null || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 say "4/5 Waiting for the console"
 code=""
@@ -122,14 +135,25 @@ done
 [[ "$code" == "200" ]] || { echo "No answer on /ui/ (last HTTP '$code'). Log:"; cat "$LOG"; kill $PID; exit 1; }
 
 LAUNCH="http://localhost:$PORT/ui/connect#token=$ADMIN"
-say "5/5 Running — opening the console (already connected)"
-command -v open >/dev/null && open "$LAUNCH" || true
+CREDENTIALS="$STATE/.launch-credentials"
+mkdir -p "$CREDENTIALS"
+chmod 700 "$CREDENTIALS"
+printf '%s\n' "$LAUNCH" > "$CREDENTIALS/console-url"
+printf '%s\n' "$APPKEY" > "$CREDENTIALS/application-key"
+chmod 600 "$CREDENTIALS/console-url" "$CREDENTIALS/application-key"
+say "5/5 Running"
+if [[ "${OPEN_BROWSER:-1}" == "1" ]]; then
+  if command -v open >/dev/null; then open "$LAUNCH" || true
+  elif command -v xdg-open >/dev/null; then xdg-open "$LAUNCH" >/dev/null 2>&1 || true
+  fi
+fi
 cat <<EOF
-  Console:        $LAUNCH
+  Console:        http://localhost:$PORT/ui/
   Profile:        $PROFILE  (seed $SEED; Local-only never calls a cloud provider)
   Local model:    ollama/$MODEL
   Run requests:   Playground → "Run as" demo-app → profile "Public demo" or "Internal" (no key needed)
-  /v1 app key:    $APPKEY   (only for Open WebUI / curl: base URL http://localhost:$PORT/v1)
+  Private files: $CREDENTIALS/console-url (connected URL), application-key (/v1 clients only)
+                  Files are owner-only. Do not share them or include their contents in logs/screenshots.
   State:          $STATE    (audit.log, audit.log.config/, audit.log.ledger.jsonl, server.log)
 
   Ctrl+C stops Covenant. Credentials are new on every run; state persists per profile (FRESH=1 to restart it).
