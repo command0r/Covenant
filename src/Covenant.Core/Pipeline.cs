@@ -98,7 +98,8 @@ public sealed class InferencePipeline
                 // A stage that had nothing to do (e.g. web search Off / not triggered) reports "skipped" with its reason,
                 // never a misleading "passed".
                 var skip = c.TakeStageSkip();
-                c.Trace(stageName, skip is null ? TraceStates.Passed : TraceStates.Skipped, watch.Elapsed.TotalMilliseconds, skip);
+                var pass = c.TakeStagePass();
+                c.Trace(stageName, skip is null ? TraceStates.Passed : TraceStates.Skipped, watch.Elapsed.TotalMilliseconds, skip ?? pass);
             }
             return next(c, t);
         };
@@ -132,8 +133,9 @@ public sealed class InferencePipeline
         else
         {
             var skip = ctx.TakeStageSkip();
+            var pass = ctx.TakeStagePass();
             ctx.Trace(stageName, skip is null ? TraceStates.Passed : TraceStates.Skipped, watch.Elapsed.TotalMilliseconds,
-                skip ?? (ctx.ServedFromCache && stageName == "cache" ? TraceReasons.CacheHit : null));
+                skip ?? pass ?? (ctx.ServedFromCache && stageName == "cache" ? TraceReasons.CacheHit : null));
         }
     }
 

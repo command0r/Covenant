@@ -293,6 +293,8 @@ public static class ConfigValidator
                     Err($"{p}.default_profile", "default_profile_not_granted", $"default profile '{def}' is not granted to '{app.Id}'");
             }
             if (app.MaxOutputTokens < 1) Err($"{p}.max_output_tokens", "invalid_setting", "max output tokens must be ≥ 1");
+            if (app.DisplayName is { Length: > 100 }) Err($"{p}.display_name", "invalid_setting", "display name must be at most 100 characters");
+            if (app.Description is { Length: > 300 }) Err($"{p}.description", "invalid_setting", "description must be at most 300 characters");
         }
 
         // ---- budgets ----

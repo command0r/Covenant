@@ -97,6 +97,16 @@
 
     <SearchEvidence Record="rec" Status="@Run.WebSourcesStatus" />
 
+    <section class="drawer-section" aria-label="Who requested and who pays">
+        <h3>Who requested and who pays</h3>
+        <dl class="facts">
+            <dt>Assigned before the call</dt><dd>@Ownership.Assigned(rec)</dd>
+            <dt>Finalized after execution</dt><dd>@Ownership.Finalized(rec)</dd>
+            <dt>Cache</dt><dd>@Ownership.Cache(rec)</dd>
+        </dl>
+        <span class="note">The application, team and workload are attached when the request arrives, so refused requests are attributed too. The charge is settled once the provider (and any web search) finished, then the audit record is written.</span>
+    </section>
+
     <section class="drawer-section" aria-label="Usage and cost">
         <h3>Usage and cost</h3>
         <dl class="facts">

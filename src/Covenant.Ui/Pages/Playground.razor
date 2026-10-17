@@ -25,9 +25,9 @@
         <div class="present-root" id="pg-present-root" tabindex="-1" role="region" aria-label="Playground presentation mode">
             <header class="present-head">
                 <span class="brand">Covenant</span>
-                <span class="env" title="Environment">@State.EnvironmentLabel</span>
-                @{ var mode = ShellStatus.Mode(State.LastStatus?.Mode); }
-                <span class="mode-badge @mode.Tone">@mode.Label</span>
+                @{ var mode = ShellStatus.Mode(State.LastStatus?.Mode); var penv = ShellStatus.Environment(State.LastStatus?.Environment, State.LastStatus?.ConfigVersion, State.LastStatus?.Version, State.LastStatus?.StartedUtc); }
+                <span class="mode-badge @mode.Tone" title="@mode.Description">@ShellStatus.ModeWithVersion(State.LastStatus?.Mode, State.LastStatus?.ConfigVersion)</span>
+                <span class="env" title="@penv.Details">@penv.Label</span>
                 @if (State.Paused)
                 {
                     <span class="indicator"><span class="dot warn" aria-hidden="true"></span>New provider calls paused</span>
@@ -75,7 +75,8 @@
                 <section class="present-trace" aria-label="Trace">
                     @if (Pg.Selected is { } trun)
                     {
-                        <TraceBar Trace="trun.CurrentTrace" FeedState="trun.TraceState" Message="@trun.TraceMessage" />
+                        <TraceWithReplay Trace="trun.CurrentTrace" FeedState="trun.TraceState" Message="@trun.TraceMessage"
+                                         Events="trun.RecordedEvents" RequestKey="@trun.Snapshot.ClientRequestId" Busy="@(trun.InFlight || Pg.Running)" />
                     }
                     else
                     {
@@ -142,7 +143,8 @@ else
                         </div>
                         <WebSourcesPanel Run="run" />
                         <RunSummary Run="run" OnDetails="OpenDetails" DetailsButtonId="pg-details-open" />
-                        <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" />
+                        <TraceWithReplay Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage"
+                                         Events="run.RecordedEvents" RequestKey="@run.Snapshot.ClientRequestId" Busy="@(run.InFlight || Pg.Running)" />
                     }
                 </section>
             </div>
@@ -298,7 +300,11 @@ else
         // applications endpoint still gets the prompt filled.
         if (Ws.Applications is null && (Ws.Loading || State.Restoring || (State.Connected && Ws.LoadedUtc is null))) return;
         _appliedScenario = Scenario;
-        if (!Pg.Running && ScenarioPresets.Find(Scenario) is { } preset) Pg.ApplyPreset(preset);
+        if (Pg.Running) return;
+        // /playground/<example-id> fills a ready example (never runs); legacy /playground/A–D fill the old presets.
+        if (Pg.Examples.FirstOrDefault(e => string.Equals(e.Example.Id, Scenario, StringComparison.Ordinal)) is { Ready: true } example)
+            _ = Pg.ApplyExampleAsync(example);
+        else if (ScenarioPresets.Find(Scenario) is { } preset) Pg.ApplyPreset(preset);
     }
 
     private Task RunAsync()

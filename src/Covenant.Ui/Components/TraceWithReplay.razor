@@ -1,0 +1,113 @@
+@implements IDisposable
+
+@* The real trace (live or recorded) plus an explicit, clearly labelled "Replay trace" for presenting a request whose stages
+   completed too fast to watch. Replay re-reveals the RECORDED events at a chosen pace: it never calls a provider, never
+   changes a record and never re-runs the request; durations and the final outcome are the recorded ones. A new run, a
+   different request, navigation or Stop cancels it, so traces never mix. Live requests animate from real events only. *@
+
+<div class="trace-replay-wrap">
+    @if (_playing && _frame is { } frame)
+    {
+        <div class="replay-banner" role="status">
+            <Icon Name="play" Size="16" />
+            <strong>Replay</strong>
+            <span>step @_revealed / @_script.Count · pacing is for explanation; the durations shown are the recorded ones</span>
+            <span class="grow"></span>
+            <button type="button" class="btn ghost sm" @onclick="Stop">Stop replay</button>
+        </div>
+        <TraceBar Trace="frame" FeedState="TraceFeedState.Complete" Compact="Compact" Replaying="true" />
+    }
+    else
+    {
+        <TraceBar Trace="Trace" FeedState="FeedState" Message="@Message" Compact="Compact" />
+    }
+    @if (CanReplay)
+    {
+        <div class="btn-row tight replay-controls">
+            <button type="button" class="btn sm" disabled="@(Busy || _playing)" @onclick="StartAsync" title="Re-reveal the recorded stages step by step (no request is sent)">
+                <Icon Name="play" Size="16" /><span>Replay trace</span>
+            </button>
+            <span class="seg" role="radiogroup" aria-label="Replay pace">
+                @foreach (var sp in TraceReplay.Speeds)
+                {
+                    var speed = sp;
+                    <button type="button" role="radio" aria-checked="@(_speed == speed.Speed ? "true" : "false")" @onclick="() => _speed = speed.Speed">@speed.Label</button>
+                }
+            </span>
+        </div>
+    }
+</div>
+
+@code {
+    /// <summary>The live/recorded view shown when not replaying.</summary>
+    [Parameter] public TraceView Trace { get; set; } = TraceView.Empty;
+    [Parameter] public TraceFeedState FeedState { get; set; }
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public bool Compact { get; set; }
+    /// <summary>The recorded events of THIS request (live accumulator or audit summary). Read only when replay starts.</summary>
+    [Parameter] public Func<IReadOnlyList<TraceEventDto>>? Events { get; set; }
+    /// <summary>Identity of the request shown; a change cancels any replay of the previous one.</summary>
+    [Parameter] public string? RequestKey { get; set; }
+    /// <summary>A request is in flight: replay is not offered and any replay stops (no mixing with live events).</summary>
+    [Parameter] public bool Busy { get; set; }
+
+    private CancellationTokenSource? _cts;
+    private IReadOnlyList<TraceEventDto> _script = [];
+    private TraceView? _frame;
+    private int _revealed;
+    private bool _playing;
+    private double _speed = 1.0;
+    private string? _key;
+
+    private bool CanReplay => !Busy && Events is not null && Trace.Complete && Trace.HasEvents;
+
+    protected override void OnParametersSet()
+    {
+        if (!string.Equals(_key, RequestKey, StringComparison.Ordinal) || Busy)
+        {
+            _key = RequestKey;
+            Stop();
+        }
+    }
+
+    private async Task StartAsync()
+    {
+        if (Events is null || Busy) return;
+        Stop();
+        _script = TraceReplay.Script(Events());
+        if (_script.Count == 0) return;
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        _playing = true;
+        try
+        {
+            for (_revealed = 0; _revealed <= _script.Count; _revealed++)
+            {
+                _frame = TraceReplay.Frame(_script, _revealed, Trace.ConfigVersion);
+                StateHasChanged();
+                if (_revealed == _script.Count) break;
+                await Task.Delay(TraceReplay.DelayMs(_speed), cts.Token);
+            }
+            // Hold the final (recorded) frame briefly, then return to the live/recorded view.
+            await Task.Delay(TraceReplay.DelayMs(_speed) * 3, cts.Token);
+        }
+        catch (OperationCanceledException) { return; }
+        finally
+        {
+            if (ReferenceEquals(_cts, cts)) { _playing = false; _frame = null; _cts = null; }
+            cts.Dispose();
+        }
+        StateHasChanged();
+    }
+
+    private void Stop()
+    {
+        var cts = _cts;
+        _cts = null;
+        _playing = false;
+        _frame = null;
+        if (cts is not null) { try { cts.Cancel(); } catch (ObjectDisposedException) { } }
+    }
+
+    public void Dispose() => Stop();
+}

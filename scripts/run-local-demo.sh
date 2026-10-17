@@ -94,7 +94,7 @@ say "3/5 Starting Covenant ($PROFILE) on http://localhost:$PORT  (state: $STATE)
 env_args=(
   ASPNETCORE_ENVIRONMENT=Production
   ASPNETCORE_URLS="http://localhost:$PORT"
-  Covenant__Environment="demo-$PROFILE"
+  Covenant__Environment="${ENV_NAME:-local-demo-$PORT}"
   Config__Seed="$SEED"
   Local__Endpoint="$OLLAMA"
   Local__ModelId="$MODEL"

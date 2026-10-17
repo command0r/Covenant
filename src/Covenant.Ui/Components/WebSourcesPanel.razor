@@ -6,7 +6,16 @@
 @if (Run.Snapshot.WebSources != WebSourcesMode.Off)
 {
     <div class="web-sources" role="region" aria-label="Web sources retrieved by Covenant">
-        <span class="note @(Tone)">@Run.WebSourcesStatus</span>
+        @{ var kind = WebSourcesText.Kind(Run.Search?.ReasonCode); }
+        <span class="note @(Tone)">
+            @if (kind != SearchProblemKind.None) { <strong>@WebSourcesText.KindLabel(kind):</strong> }
+            @Run.WebSourcesStatus
+        </span>
+        @if (kind != SearchProblemKind.None && Run.Result?.ErrorReason is { Length: > 0 } serverReason)
+        {
+            @* The Host's specific reason for THIS request (e.g. "web search is disabled in configuration v3"), not a generic list. *@
+            <span class="secondary">Server: <span class="wrap-any">@serverReason</span></span>
+        }
         @if (Run.Search is { Outcome: "passed", Sources.Count: > 0 } s)
         {
             <ol class="plain-list secondary">

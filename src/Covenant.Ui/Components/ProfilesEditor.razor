@@ -181,10 +181,65 @@
     </ul>
 
     @* ---- Applications (existing only) ---- *@
-    <div class="sub-head pad">
+    <div class="sub-head pad" id="applications-list" tabindex="-1">
         <h3 id="apps-h">Applications</h3>
-        <span class="secondary subtle">Existing applications only — keys are startup secrets (Auth:Keys).</span>
+        <span class="secondary subtle">The calling systems. Each belongs to a team that pays for its requests.</span>
+        <span class="grow"></span>
+        @if (Editing && _newApp is null)
+        {
+            <button type="button" class="btn sm" @onclick="StartCreateApp">Add application…</button>
+        }
     </div>
+    <div class="pad"><span class="secondary muted">@ProfileEditing.ApplicationKeysExplained</span></div>
+    @if (Editing && _newApp is { } na)
+    {
+        var naProblems = ProfileEditing.Problems(na, Cfg);
+        <div class="policy-create pad" role="group" aria-labelledby="naf-h">
+            <h3 id="naf-h">New application (draft)</h3>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="naf-name">Name</label>
+                    <input id="naf-name" class="input" maxlength="100" placeholder="e.g. Support portal" @bind="na.DisplayName" @bind:event="oninput" />
+                </div>
+                <div class="field">
+                    <label for="naf-id">Application id</label>
+                    <input id="naf-id" class="input mono" @bind="na.Id" @bind:event="oninput" spellcheck="false" />
+                    <span class="help">Used in evidence and by its startup key.</span>
+                </div>
+                <div class="field">
+                    <label for="naf-team">Owning team (pays)</label>
+                    <input id="naf-team" class="input mono" @bind="na.Team" @bind:event="oninput" spellcheck="false" placeholder="e.g. support" />
+                    <span class="help">Team budgets and attribution use this.</span>
+                </div>
+                <div class="field">
+                    <label for="naf-desc">What it does (optional)</label>
+                    <input id="naf-desc" class="input" maxlength="300" @bind="na.Description" @bind:event="oninput" />
+                </div>
+            </div>
+            <fieldset class="inline-fieldset">
+                <legend class="field-label">Allowed workloads (granted profiles)</legend>
+                @foreach (var pid in Cfg.Profiles.Select(x => x.Id))
+                {
+                    var gid = pid;
+                    <label class="switch">
+                        <input type="checkbox" checked="@na.GrantedProfiles.Contains(gid)" @onchange="@(e => ToggleNewGrant(na, gid, e))" />
+                        @ProfileEditing.Label(Cfg, gid)
+                    </label>
+                }
+            </fieldset>
+            <label class="switch"><input type="checkbox" @bind="na.ConsoleTesting" /> Console testing allowed (the Playground may run as this application)</label>
+            @if (naProblems.Count > 0)
+            {
+                <ul class="plain-list secondary warn-text" aria-live="polite">
+                    @foreach (var pp in naProblems) { <li>@pp</li> }
+                </ul>
+            }
+            <div class="btn-row">
+                <button type="button" class="btn primary" disabled="@(naProblems.Count > 0)" @onclick="() => AddAppAsync(na)">Add to draft and preview impact</button>
+                <button type="button" class="btn" @onclick="() => _newApp = null">Cancel</button>
+            </div>
+        </div>
+    }
     @if (Cfg.Applications.Count == 0)
     {
         <div class="pad"><span class="secondary muted">No applications are configured. Applications and their keys are defined at startup.</span></div>
@@ -199,8 +254,12 @@
             <li class="policy-item">
                 <div class="policy-head">
                     <div class="conn-title">
-                        <strong class="mono wrap-any">@app.Id</strong>
-                        <span class="secondary subtle">team <span class="mono">@app.Team</span> · max output @(app.MaxOutputTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "server default") tokens</span>
+                        <strong class="wrap-any">@ProfileEditing.ApplicationName(app.Id, app.DisplayName)</strong>
+                        @if (!string.IsNullOrWhiteSpace(app.Description))
+                        {
+                            <span class="secondary">@app.Description</span>
+                        }
+                        <span class="secondary subtle"><span class="mono">@app.Id</span> · team <span class="mono">@app.Team</span> · max output @(app.MaxOutputTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "server default") tokens</span>
                     </div>
                     <StatusPill Kind="@(app.Enabled ? "served" : "unknown")" Text="@(app.Enabled ? "Enabled" : "Disabled")" />
                     <StatusPill Kind="@(app.ConsoleTesting ? "served" : "unknown")" Text="@(app.ConsoleTesting ? "Console testing allowed" : "No console testing")" />
@@ -214,7 +273,15 @@
                 {
                     <div class="form-grid">
                         <div class="field">
-                            <label for="@("at-" + app.Id)">Team</label>
+                            <label for="@("an-" + app.Id)">Name</label>
+                            <input id="@("an-" + app.Id)" class="input" maxlength="100" value="@app.DisplayName" placeholder="@app.Id" @onchange="@(e => SetAppName(app, e))" />
+                        </div>
+                        <div class="field">
+                            <label for="@("ads-" + app.Id)">What it does</label>
+                            <input id="@("ads-" + app.Id)" class="input" maxlength="300" value="@app.Description" @onchange="@(e => SetAppDescription(app, e))" />
+                        </div>
+                        <div class="field">
+                            <label for="@("at-" + app.Id)">Owning team (pays)</label>
                             <input id="@("at-" + app.Id)" class="input mono" value="@app.Team" @onchange="@(e => SetTeam(app, e))" spellcheck="false" />
                         </div>
                         <div class="field">
@@ -275,6 +342,36 @@
     private readonly Dictionary<string, string> _errors = new(StringComparer.Ordinal);
     private NewProfileForm? _newProfile;
     private string? _removeAsk;
+
+    private NewApplicationForm? _newApp;
+
+    private void StartCreateApp()
+    {
+        _newApp = new NewApplicationForm { Id = ConnectionRules.UniqueId("app", Cfg.Applications.Select(a => a.Id)) };
+        _newProfile = null;
+    }
+
+    private static void ToggleNewGrant(NewApplicationForm f, string profileId, ChangeEventArgs e)
+    {
+        bool on = e.Value is bool b && b;
+        f.GrantedProfiles.Remove(profileId);
+        if (on) f.GrantedProfiles.Add(profileId);
+        if (f.DefaultProfile is { } d && !f.GrantedProfiles.Contains(d)) f.DefaultProfile = null;
+        f.DefaultProfile ??= f.GrantedProfiles.FirstOrDefault();
+    }
+
+    private async Task AddAppAsync(NewApplicationForm f)
+    {
+        if (!Editing || Editor.Draft is not { } d) return;
+        if (ProfileEditing.AddApplication(d, f).Count > 0) return;
+        _newApp = null;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void SetAppName(ApplicationDto a, ChangeEventArgs e) => Result("a:" + a.Id, ProfileEditing.SetDisplayName(a, e.Value?.ToString()));
+
+    private void SetAppDescription(ApplicationDto a, ChangeEventArgs e) => Result("a:" + a.Id, ProfileEditing.SetApplicationDescription(a, e.Value?.ToString()));
 
     private void StartCreate()
     {

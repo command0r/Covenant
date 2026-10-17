@@ -93,7 +93,9 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 ServedConnectionId: v3 && served ? ctx.ServedTarget?.AdapterKey : null,
                 // ADR-0015: bounded search metadata (no query, location or snippets) and the separate tool-call charges.
                 WebSearch: v3 ? ctx.WebSearch?.ToAudit() : null,
-                ToolCalls: v3 && ctx.ToolCalls.Count > 0 ? ctx.ToolCalls.Select(t => t.ToAudit()).ToList() : null);
+                ToolCalls: v3 && ctx.ToolCalls.Count > 0 ? ctx.ToolCalls.Select(t => t.ToAudit()).ToList() : null,
+                PolicyId: v3 ? ctx.Policy?.PolicyId : null,
+                CacheOutcome: v3 ? ctx.CacheOutcome ?? CacheOutcomes.NotReached : null);
 
             // CancellationToken.None: a cancelled request must still produce its audit record.
             await sink.EnqueueAsync(entry, CancellationToken.None);

@@ -6,32 +6,45 @@
 @* The shared request composer (Playground and the Overview compact composer bind the SAME PlaygroundState form).
    "Run as" lists GET /admin/applications: only enabled + console-testing applications are selectable; the others
    stay visible, disabled, with the reason. The profile select offers ONLY the application's granted profiles.
-   Presets populate; Run is always explicit; nothing here submits on render, on preset click or on reload. *@
+   Examples populate; Run is always explicit; nothing here submits on render, on example click or on reload. *@
 
 <div class="composer @(Compact ? "compact" : "")">
     <div class="composer-grid">
         <div class="field">
-            <label for="@(IdPrefix + "-app")">Run as</label>
-            <select id="@(IdPrefix + "-app")" class="input" value="@(Pg.Form.ApplicationId ?? "")" @onchange="OnApplication"
-                    disabled="@(Pg.Running || Ws.Applications is null)" aria-describedby="@(AppHelp is null ? null : IdPrefix + "-app-help")"
-                    title="Identity and team come from this application; its credential never reaches the browser.">
-                <option value="" disabled>@(Ws.Applications is null ? (Ws.Loading ? "Loading applications…" : "Applications unavailable") : "Choose an application…")</option>
-                @foreach (var c in ComposerRules.Applications(Ws.Applications))
-                {
-                    <option value="@c.App.Id" disabled="@(!c.Selectable)">@(c.Selectable ? c.App.Id : c.Label)</option>
-                }
-            </select>
-            @if (AppHelp is { } ah)
+            @{ var only = ComposerRules.OnlySelectable(Ws.Applications); var current = ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId); }
+            @if (only is not null && string.Equals(only.Id, Pg.Form.ApplicationId, StringComparison.Ordinal))
             {
-                <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@ah</span>
+                <span class="field-label" id="@(IdPrefix + "-app-l")">Run as (calling application)</span>
+                <div class="static-value" aria-labelledby="@(IdPrefix + "-app-l")">
+                    <strong>@ComposerRules.ApplicationName(only)</strong>
+                    @if (!string.IsNullOrWhiteSpace(only.DisplayName)) { <span class="subtle mono">&nbsp;@only.Id</span> }
+                </div>
+                <span class="help">The only application allowed to run console requests. <a href="policies#applications-list">Add or manage applications</a></span>
+            }
+            else
+            {
+                <label for="@(IdPrefix + "-app")">Run as (calling application)</label>
+                <select id="@(IdPrefix + "-app")" class="input" value="@(Pg.Form.ApplicationId ?? "")" @onchange="OnApplication"
+                        disabled="@(Pg.Running || Ws.Applications is null)" aria-describedby="@(IdPrefix + "-app-help")"
+                        title="Identity and team come from this application; its credential never reaches the browser.">
+                    <option value="" disabled>@(Ws.Applications is null ? (Ws.Loading ? "Loading applications…" : "Applications unavailable") : "Choose an application…")</option>
+                    @foreach (var c in ComposerRules.Applications(Ws.Applications))
+                    {
+                        <option value="@c.App.Id" disabled="@(!c.Selectable)">@c.Label</option>
+                    }
+                </select>
+                <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@(AppHelp ?? "The system this request comes from.") <a href="policies#applications-list">Add or manage applications</a></span>
+            }
+            @if (current is not null)
+            {
+                <span class="help"><span class="mono">@current.Id</span> · @ComposerRules.PayerText(current)@(string.IsNullOrWhiteSpace(current.Description) ? "" : " · " + current.Description)</span>
             }
         </div>
         <div class="field">
-            <label for="@(IdPrefix + "-profile")">Workload profile</label>
-            @{ var app = ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId); var granted = ComposerRules.GrantedProfiles(app); }
+            <label for="@(IdPrefix + "-profile")">Workload (profile)</label>
+            @{ var app = current; var granted = ComposerRules.GrantedProfiles(app); }
             <select id="@(IdPrefix + "-profile")" class="input" value="@(Pg.Form.ProfileId ?? "")" @onchange="OnProfile"
-                    disabled="@(Pg.Running || app is null || granted.Count == 0)"
-                    title="@(ComposerRules.ProfileLabel(Ws.Profiles, Pg.Form.ProfileId ?? "") + " — detection can only raise this classification.")">
+                    disabled="@(Pg.Running || app is null || granted.Count == 0)" aria-describedby="@(IdPrefix + "-profile-help")">
                 @if (granted.Count == 0)
                 {
                     <option value="">@(app is null ? "Choose an application first" : "No profile granted — server default")</option>
@@ -41,25 +54,20 @@
                     <option value="@p">@(ComposerRules.Profile(Ws.Profiles, p)?.Name ?? p)</option>
                 }
             </select>
+            @{ var selectedProfile = ComposerRules.Profile(Ws.Profiles, Pg.Form.ProfileId); }
+            <span id="@(IdPrefix + "-profile-help")" class="help">
+                @if (selectedProfile is not null)
+                {
+                    <span>Baseline <strong>@PolicyText.ClassificationLabel(selectedProfile.Baseline)</strong>@(string.IsNullOrWhiteSpace(selectedProfile.Description) ? "" : " · " + selectedProfile.Description). </span>
+                }
+                Policy routes by this workload; detection can only raise the classification.
+            </span>
         </div>
     </div>
-    <details class="demo-presets">
-        <summary>Demo presets</summary>
-    <div class="preset-row" role="group" aria-label="Scenario presets — fill the composer; only Run sends">
-        <span class="preset-label">Presets</span>
-        @foreach (var p in ScenarioPresets.All)
-        {
-            var preset = p;
-            <button type="button" class="preset-chip" aria-pressed="@(Pg.Form.Scenario == preset.Letter && preset.StillMatches(Pg.Form) ? "true" : "false")"
-                    disabled="@Pg.Running" title="@preset.Hint" @onclick="() => Pg.ApplyPreset(preset)">
-                <span class="mono">@preset.Letter</span> @preset.Title
-            </button>
-        }
-    </div>
-    </details>
-    @if (CurrentPreset is { } cur)
+
+    @if (!Compact)
     {
-        <span class="note"><strong>Expected:</strong> @cur.Expectation</span>
+        <ExamplePicker IdPrefix="@IdPrefix" />
     }
     @if (Pg.PresetNote is { } pn)
     {
@@ -77,32 +85,53 @@
         }
     </div>
 
-    @* Search options stay visible in both composers; never silently reuse a hidden egress setting. *@
-        @* ADR-0015: governed web sources. The Host decides (cue, permissions, budget) and reports what actually happened. *@
-        <div class="composer-grid">
-            <div class="field">
-                <span id="@(IdPrefix + "-ws-l")" class="field-label">Web sources</span>
-                <div class="seg" role="radiogroup" aria-labelledby="@(IdPrefix + "-ws-l")" aria-describedby="@(IdPrefix + "-ws-help")">
-                    @foreach (var m in new[] { WebSourcesMode.Off, WebSourcesMode.Auto, WebSourcesMode.Required })
-                    {
-                        var mode = m;
-                        <button type="button" role="radio" aria-checked="@(Pg.Form.WebSources == mode ? "true" : "false")" disabled="@Pg.Running"
-                                @onclick="() => SetWebSources(mode)">@WebSourcesText.Label(mode)</button>
-                    }
-                </div>
-                <span id="@(IdPrefix + "-ws-help")" class="help">@WebSourcesText.Help(Pg.Form.WebSources)</span>
+    @* ADR-0015: governed web sources. The Host decides (cue, permissions, budget) and reports what actually happened; the
+       console only refuses to OFFER a mode the current server setup cannot run, with ONE cause and its fix. The form is never
+       changed behind the operator's back: a blocked Required stays Required (Run is blocked with the cause). *@
+    @{ var ready = Pg.SearchReadiness; }
+    <div class="composer-grid">
+        <div class="field">
+            <span id="@(IdPrefix + "-ws-l")" class="field-label">Web sources</span>
+            <div class="seg" role="radiogroup" aria-labelledby="@(IdPrefix + "-ws-l")" aria-describedby="@(IdPrefix + "-ws-help")">
+                @foreach (var m in new[] { WebSourcesMode.Off, WebSourcesMode.Auto, WebSourcesMode.Required })
+                {
+                    var mode = m;
+                    var blocked = mode != WebSourcesMode.Off && ready is { Known: true, Possible: false } && Pg.Form.WebSources != mode;
+                    <button type="button" role="radio" aria-checked="@(Pg.Form.WebSources == mode ? "true" : "false")" disabled="@(Pg.Running || blocked)"
+                            title="@(blocked ? ready.Cause : null)" @onclick="() => SetWebSources(mode)">@WebSourcesText.Label(mode)</button>
+                }
             </div>
-            @if (Pg.Form.WebSources != WebSourcesMode.Off)
+            @if (ready is { Known: true, Possible: false })
             {
-                <div class="field">
-                    <label for="@(IdPrefix + "-loc")">Location (optional)</label>
-                    <input id="@(IdPrefix + "-loc")" class="input" type="text" maxlength="@WebSourcesText.MaxLocationChars" placeholder="e.g. Toronto"
-                           @bind="Pg.Form.Location" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running"
-                           aria-describedby="@(IdPrefix + "-loc-help")" autocomplete="off" />
-                    <span id="@(IdPrefix + "-loc-help")" class="help">@WebSourcesText.LocationHelp</span>
-                </div>
+                <span id="@(IdPrefix + "-ws-help")" class="help warn">
+                    @(ready.Cause + " " + ready.Fix + (ready.Href is null ? "" : " "))@if (ready.Href is { } href) { <a href="@href">@ready.HrefLabel</a> }
+                </span>
+                @if (ready.SwitchToProfile is { } alt)
+                {
+                    <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="() => Pg.SelectProfile(alt)">Switch to @ComposerRules.ProfileLabel(Ws.Profiles, alt)</button>
+                }
+            }
+            else
+            {
+                <span id="@(IdPrefix + "-ws-help")" class="help">@WebSourcesText.Help(Pg.Form.WebSources)@(ready.Known ? "" : " (" + ready.Cause + ")")</span>
             }
         </div>
+        @if (Pg.Form.WebSources != WebSourcesMode.Off)
+        {
+            <div class="field">
+                <label for="@(IdPrefix + "-loc")">Location (optional)</label>
+                <input id="@(IdPrefix + "-loc")" class="input" type="text" maxlength="@WebSourcesText.MaxLocationChars" placeholder="e.g. Toronto"
+                       @bind="Pg.Form.Location" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running"
+                       aria-describedby="@(IdPrefix + "-loc-help")" autocomplete="off" />
+                <span id="@(IdPrefix + "-loc-help")" class="help">@WebSourcesText.LocationHelp</span>
+            </div>
+        }
+    </div>
+
+    @if (!Compact)
+    {
+        <RoutePreviewPanel />
+    }
 
     @if (!Compact)
     {
@@ -112,6 +141,7 @@
         <details class="about">
             <summary>About this</summary>
             <ul class="plain-list secondary">
+                <li>An application is the calling system (for example a support portal). It belongs to a team, which pays for its requests through the team's and the application's budgets, and it may only use the workload profiles granted to it.</li>
                 <li>Identity and team come from the selected application; its credential never reaches the browser. The admin token runs the request as that application.</li>
                 <li>Only profiles granted to the application are offered. Each profile's baseline is a trusted, server-side classification; detection can only escalate it. There is no client-side classification control.</li>
                 <li>Response text is console-only: kept in this tab's memory, never persisted. The audit record holds a prompt fingerprint, not the response.</li>
@@ -194,6 +224,8 @@
 
     private ScenarioPreset? CurrentPreset => ScenarioPresets.Find(Pg.Form.Scenario) is { } p && p.StillMatches(Pg.Form) ? p : null;
 
+    private DemoExample? CurrentExample => DemoExamples.Find(Pg.Form.ExampleId) is { } e && DemoExamples.StillMatches(e, Pg.Form) ? e : null;
+
     private IReadOnlyList<OverrideOption> Overrides => ComposerRules.EligibleOverrides(Ws.Config?.Config, Pg.Form.ProfileId, State.Catalog);
 
     private string RunLabel
@@ -201,6 +233,7 @@
         get
         {
             if (Pg.Running) return "Running…";
+            if (CurrentExample is not null) return "Run example";
             return CurrentPreset is { } p && ScenarioPresets.IsReady(p, Pg.Form, Ws.Applications)
                 ? "Run preset " + p.Letter
                 : "Run";

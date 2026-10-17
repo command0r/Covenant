@@ -13,6 +13,20 @@ public sealed class NewProfileForm
     public string Description { get; set; } = "";
 }
 
+/// <summary>The "Add application" form. An application is the CALLING SYSTEM: it owns a team (who pays), its budgets apply,
+/// and it is granted the workload profiles it may use. The console runs requests on its behalf (ADR-0012). Creating it
+/// here adds it to the configuration DRAFT only; a /v1 client additionally needs a startup key (Auth:Keys) bound to it.</summary>
+public sealed class NewApplicationForm
+{
+    public string Id { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string Team { get; set; } = "";
+    public string Description { get; set; } = "";
+    public bool ConsoleTesting { get; set; } = true;
+    public List<string> GrantedProfiles { get; set; } = [];
+    public string? DefaultProfile { get; set; }
+}
+
 /// <summary>One profile row of the editor: who is granted it, whose default it is, which policies are scoped to it.</summary>
 public sealed record ProfileUsage(string ProfileId, IReadOnlyList<string> GrantedTo, IReadOnlyList<string> DefaultOf, IReadOnlyList<string> ScopedPolicies);
 
@@ -37,7 +51,68 @@ public static class ProfileEditing
         "The Playground can only run with a profile granted to the chosen application; there is no client-side classification control.";
 
     public const string ApplicationsExplained =
-        "Applications are created at startup (their keys are startup secrets, Auth:Keys). Here you edit an existing application's team, state, console testing, profile grants and output bound.";
+        "An application is the calling system (for example a support portal or a coding assistant). It belongs to a team — that team and its budgets pay for its requests — and it is granted the workload profiles it may use. The console runs requests on its behalf; nothing here bypasses its grants.";
+
+    public const string ApplicationKeysExplained =
+        "Adding an application here lets the console run as it. A real client calling /v1 also needs an application key, which is a startup secret (Auth:Keys with Application set to this id) — keys are never created or shown in the console.";
+
+    public const int MaxDisplayNameChars = 100;
+    public const int MaxDescriptionChars = 300;
+
+    /// <summary>"Support portal" — or the id when no display name is configured.</summary>
+    public static string ApplicationName(string id, string? displayName) => string.IsNullOrWhiteSpace(displayName) ? id : displayName.Trim();
+
+    public static IReadOnlyList<string> Problems(NewApplicationForm f, CovenantConfigDto cfg)
+    {
+        var p = new List<string>();
+        var id = f.Id.Trim();
+        if (!ConnectionRules.IsValidId(id)) p.Add("Application id must be 1–64 characters of letters, digits, '.', '_' or '-'.");
+        else if (FindApplication(cfg, id) is not null) p.Add("An application with id '" + id + "' already exists.");
+        if (string.IsNullOrWhiteSpace(f.Team)) p.Add("Enter the owning team (it pays for the application's requests).");
+        else if (!ConnectionRules.IsValidId(f.Team.Trim())) p.Add("Team must be 1–64 characters of letters, digits, '.', '_' or '-'.");
+        if (f.DisplayName.Trim().Length > MaxDisplayNameChars) p.Add("Display name must be at most 100 characters.");
+        if (f.Description.Trim().Length > MaxDescriptionChars) p.Add("Description must be at most 300 characters.");
+        foreach (var g in f.GrantedProfiles.Where(g => !Exists(cfg, g))) p.Add("Profile '" + g + "' does not exist.");
+        if (f.DefaultProfile is { Length: > 0 } d && !f.GrantedProfiles.Contains(d, StringComparer.Ordinal))
+            p.Add("The default profile must also be granted.");
+        return p;
+    }
+
+    /// <summary>Adds the application to <paramref name="draft"/> (enabled). Returns the problems (draft untouched) or empty.</summary>
+    public static IReadOnlyList<string> AddApplication(CovenantConfigDto draft, NewApplicationForm f)
+    {
+        var problems = Problems(f, draft);
+        if (problems.Count > 0) return problems;
+        draft.Applications.Add(new ApplicationDto
+        {
+            Id = f.Id.Trim(),
+            Team = f.Team.Trim(),
+            Enabled = true,
+            ConsoleTesting = f.ConsoleTesting,
+            MaxOutputTokens = 1024, // Match the Host default; serializing an unset nullable DTO otherwise yields an invalid zero bound.
+            GrantedProfiles = f.GrantedProfiles.Distinct(StringComparer.Ordinal).ToList(),
+            DefaultProfile = string.IsNullOrWhiteSpace(f.DefaultProfile) ? null : f.DefaultProfile,
+            DisplayName = string.IsNullOrWhiteSpace(f.DisplayName) ? null : f.DisplayName.Trim(),
+            Description = string.IsNullOrWhiteSpace(f.Description) ? null : f.Description.Trim(),
+        });
+        return problems;
+    }
+
+    public static string? SetDisplayName(ApplicationDto app, string? name)
+    {
+        var v = (name ?? "").Trim();
+        if (v.Length > MaxDisplayNameChars) return "Display name must be at most 100 characters.";
+        app.DisplayName = v.Length == 0 ? null : v;
+        return null;
+    }
+
+    public static string? SetApplicationDescription(ApplicationDto app, string? description)
+    {
+        var v = (description ?? "").Trim();
+        if (v.Length > MaxDescriptionChars) return "Description must be at most 300 characters.";
+        app.Description = v.Length == 0 ? null : v;
+        return null;
+    }
 
     public static bool IsDeclared(CovenantConfigDto cfg, string? id)
         => id is not null && cfg.Profiles.Any(p => string.Equals(p.Id, id, StringComparison.Ordinal));

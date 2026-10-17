@@ -32,6 +32,11 @@ code, .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
 /* Focus: one visible ring everywhere, in the accent colour. */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--radius-control); }
 button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
+/* Route change focuses the page <h1> (FocusOnNavigate sets tabindex=-1) so screen readers announce the new page. That
+   heading is not an interactive control, so it never shows a focus outline — on mouse OR keyboard navigation. Tab moves
+   on to real controls, which keep the :focus-visible ring above. */
+h1[tabindex="-1"]:focus, h1[tabindex="-1"]:focus-visible { outline: none; box-shadow: none; }
+.page-head h1, .titles > h1 { align-self: flex-start; max-width: 100%; }
 
 /* ---- Boot placeholder (replaced when the runtime mounts) ---- */
 .boot { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: var(--muted); }
@@ -74,13 +79,15 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
 }
 .nav-disconnect { align-self: flex-start; }
 
-.shell-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+/* One horizontal gutter for header, banners and page body so their content edges line up at every width. */
+.shell-main { --gutter: 28px; flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
 .status-header {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 24px; min-height: 56px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px var(--gutter); min-height: 56px;
   border-bottom: 1px solid var(--border); background: var(--surface); font-size: var(--text-secondary);
   position: relative; z-index: 20;
 }
-.status-header .env { font-family: var(--font-mono); padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; overflow-wrap: anywhere; }
+.status-header .env { display: inline-flex; align-items: baseline; gap: 6px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; overflow-wrap: anywhere; color: var(--text); text-decoration: none; }
+.status-header a.env:hover { border-color: var(--accent); }
 .status-header .grow, .present-head .grow, .panel-head .grow { flex-grow: 1; }
 .indicator { display: inline-flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 4px; background: var(--subtle); flex: 0 0 auto; display: inline-block; }
@@ -96,7 +103,10 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
 .mode-badge.hybrid { background: var(--cloud-bg); color: var(--cloud); border-color: transparent; }
 .mode-badge.legacy { background: var(--amber-bg); color: var(--amber); border-color: transparent; }
 .mode-badge.unknown { color: var(--muted); }
-.icon-btn { padding: 0 8px; min-width: 32px; }
+/* Icon-only buttons: fixed square, icon centred on the same baseline as neighbouring buttons. */
+.btn.icon-btn { padding: 0; width: var(--target-min); min-width: var(--target-min); height: var(--target-min); min-height: var(--target-min); flex: 0 0 auto; }
+.btn.sm.icon-btn { width: 32px; min-width: 32px; height: 32px; min-height: 32px; }
+.btn .icon { display: block; }
 .pause-control { position: relative; display: inline-flex; align-items: center; gap: 4px; }
 .popover {
   position: absolute; top: calc(100% + 6px); right: 0; z-index: 40; width: min(360px, 90vw);
@@ -107,12 +117,12 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible) { outline: none; }
 .icon { flex: 0 0 auto; vertical-align: middle; }
 
 .pause-banner {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 28px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px var(--gutter);
   background: var(--amber-bg); border-bottom: 1px solid var(--amber); font-size: var(--text-secondary);
 }
 .pause-banner strong { color: var(--amber); }
 
-.page { padding: 22px 28px 48px; display: flex; flex-direction: column; gap: 18px; max-width: 1400px; width: 100%; }
+.page { padding: 22px var(--gutter) 48px; display: flex; flex-direction: column; gap: 18px; width: 100%; }
 .page-head { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
 .page-head .titles { display: flex; flex-direction: column; flex: 1 1 320px; min-width: 0; }
 .page-head .lede { font-size: var(--text-secondary); color: var(--muted); }
@@ -363,7 +373,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
   border: 1px solid var(--border); background: var(--surface2); color: var(--text); font: inherit; cursor: pointer;
 }
 .trace-chip .icon { grid-row: 1 / span 3; }
-.trace-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.trace-name { font-size: 13px; font-weight: 600; white-space: normal; overflow-wrap: anywhere; }
 .trace-meta, .trace-dur { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
 .trace-dur { color: var(--text); }
 @media (min-width: 1441px) {
@@ -392,10 +402,28 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .trace-step.s-skipped .trace-name { font-weight: 500; text-decoration: line-through; text-decoration-color: var(--border); }
 .trace-step.s-pending .trace-chip, .trace-step.s-notreported .trace-chip { background: transparent; color: var(--subtle); }
 .trace-step.open .trace-chip { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* §7: real-event animation. A state change swaps the class → a different animation-name → it plays once. Running pulses.
+   Replay (.trace.replaying) uses the same states, revealed from recorded events at a presenter-chosen pace. */
+.trace-chip { transition: background-color .3s ease, border-color .3s ease, box-shadow .3s ease, color .3s ease; }
 @media (prefers-reduced-motion: no-preference) {
   .trace-step.s-running .icon { animation: trace-spin 1.6s linear infinite; }
+  .trace-step.s-running .trace-chip { animation: trace-pulse 1.1s ease-in-out infinite; }
+  .trace-step.s-passed .trace-chip { animation: trace-arrive-ok .55s ease-out 1; }
+  .trace-step.s-refused .trace-chip { animation: trace-arrive-stop .6s ease-out 1; }
+  .trace-step.s-failed .trace-chip { animation: trace-arrive-fail .6s ease-out 1; }
+  .trace-step.s-skipped .trace-chip { animation: trace-arrive-skip .45s ease-out 1; }
   @keyframes trace-spin { to { transform: rotate(360deg); } }
+  @keyframes trace-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--accent); } 50% { box-shadow: 0 0 0 4px transparent; transform: translateY(-1px); } }
+  @keyframes trace-arrive-ok { from { transform: scale(.96); box-shadow: 0 0 0 3px var(--green); } to { transform: none; box-shadow: none; } }
+  @keyframes trace-arrive-stop { 0% { transform: translateX(0); box-shadow: 0 0 0 3px var(--amber); } 30% { transform: translateX(-3px); } 60% { transform: translateX(3px); } 100% { transform: none; box-shadow: none; } }
+  @keyframes trace-arrive-fail { 0% { transform: translateX(0); box-shadow: 0 0 0 3px var(--red); } 30% { transform: translateX(-3px); } 60% { transform: translateX(3px); } 100% { transform: none; box-shadow: none; } }
+  @keyframes trace-arrive-skip { from { opacity: .3; } to { opacity: 1; } }
 }
+.trace.replaying { outline: 1px dashed var(--accent); outline-offset: 4px; border-radius: var(--radius-control); }
+.trace-replay-wrap { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.replay-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; border-radius: var(--radius-control); background: var(--blue-bg); font-size: var(--text-secondary); }
+.replay-banner .grow { flex-grow: 1; }
+.replay-controls { font-size: var(--text-secondary); }
 .trace-pop {
   display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; font-size: var(--text-secondary);
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-inner); box-shadow: var(--shadow);
@@ -459,7 +487,9 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .present-prompt .btn { font-size: 18px; min-height: 48px; }
 .present-response .response { flex: 1 1 auto; max-height: none; min-height: 100px; font-size: 19px; }
 .present-response .outcome { font-size: 30px; }
-.present-response .run-facts { font-size: 16px; }
+.present-response .run-facts { font-size: 14px; }
+.present-response .presentation-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 16px; }
+.present-response .run-summary { flex: 0 0 auto; }
 .present-trace .trace-name { font-size: 15px; }
 .present-trace .trace-meta, .present-trace .trace-dur { font-size: 13px; }
 
@@ -520,7 +550,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
 @media (max-width: 900px) {
   .shell { flex-direction: column; }
   .shell-nav { flex: none; border-right: 0; border-bottom: 1px solid var(--border); }
-  .page, .status-header, .pause-banner { padding-left: 16px; padding-right: 16px; }
+  .shell-main { --gutter: 16px; }
   .shell-nav { flex-direction: row; flex-wrap: wrap; padding: 8px; gap: 2px; }
   .shell-brand { padding: 0 8px 4px; flex-basis: 100%; }
   .nav-link.active::before { display: none; }
@@ -559,7 +589,13 @@ details.tech[open] > summary { margin-bottom: 6px; }
 
 .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); gap: 12px 16px; align-items: start; }
 .form-grid > *, .price-grid > * { min-width: 0; }
-.form-grid > .field > label, .form-grid > .field > .field-label { min-height: 2.8em; display: flex; align-items: flex-end; }
+/* Rows, not label heights: each field spans five shared rows (label · control · help · issues · extra) via subgrid, so the
+   controls of one visual row line up even when one label or help text wraps to several lines. */
+@supports (grid-template-rows: subgrid) {
+  .form-grid { row-gap: 6px; }
+  .form-grid > .field { display: grid; grid-template-rows: subgrid; grid-row: span 5; row-gap: 6px; margin-bottom: 10px; align-content: start; }
+  .form-grid > .field > label:first-child, .form-grid > .field > .field-label:first-child { align-self: end; }
+}
 .static-value { min-height: var(--target-form); display: flex; align-items: center; overflow-wrap: anywhere; }
 .field.narrow { flex: 0 1 200px; }
 .conn-form { display: flex; flex-direction: column; gap: 14px; }
@@ -664,3 +700,21 @@ details[open] > summary::before { transform: rotate(45deg); }
   .present-trace .trace-steps { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 }
 .present-response { overflow-y: auto; }
+
+/* ---- Demo examples (named, meaningful; fill only) ---- */
+.examples { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.example-bar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.example-bar .field-label { white-space: nowrap; }
+.example-summary { display: flex; flex-direction: column; gap: 4px; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--surface2); border-radius: 0 var(--radius-control) var(--radius-control) 0; }
+.example-summary .facts { grid-template-columns: minmax(0, max-content) minmax(0, 1fr); margin-top: 6px; }
+@media (max-width: 640px) { .example-bar { grid-template-columns: minmax(0, 1fr); } }
+.missing-list li { color: var(--muted); overflow-wrap: anywhere; }
+.sub-head .grow { flex-grow: 1; }
+
+/* ---- Route preview (Host dry run, before Run) ---- */
+.route-preview { display: flex; flex-direction: column; gap: 8px; }
+.route-result { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius-inner); background: var(--surface2); overflow-wrap: anywhere; }
+.route-result.refused { border-left-color: var(--amber); }
+.route-result.stale { opacity: .7; border-style: dashed; }
+.workload-route { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-inner); background: var(--bg); }
+.inline-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }

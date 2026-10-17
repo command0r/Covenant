@@ -283,6 +283,10 @@ public sealed class AuditEntryView
     [JsonPropertyName("WebSearch")] public AuditWebSearchView? WebSearch { get; set; }
     /// <summary>ADR-0015: non-inference tool calls with their own charges, separate from provider Attempts.</summary>
     [JsonPropertyName("ToolCalls")] public List<AuditToolCallView>? ToolCalls { get; set; }
+    /// <summary>The policy that decided the route (null on older records, or when no policy matched).</summary>
+    [JsonPropertyName("PolicyId")] public string? PolicyId { get; set; }
+    /// <summary>hit | miss | bypass_web_search | disabled | not_reached (null on older records).</summary>
+    [JsonPropertyName("CacheOutcome")] public string? CacheOutcome { get; set; }
 }
 
 /// <summary>Core AuditWebSearch.</summary>
