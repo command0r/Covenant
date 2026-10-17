@@ -1,0 +1,19 @@
+@* Local vs cloud destination tag — always text + colour + icon, never colour alone. Unknown boundary is said
+   explicitly ("Boundary not reported"), never guessed from a model name. *@
+@switch (Boundary)
+{
+    case "Local":
+        <span class="tag local"><Icon Name="local" Size="14" />Local</span>
+        break;
+    case "Cloud":
+        <span class="tag cloud"><Icon Name="cloud" Size="14" />Cloud</span>
+        break;
+    default:
+        <span class="tag unknown">Boundary not reported</span>
+        break;
+}
+
+@code {
+    /// <summary>"Local", "Cloud" or null.</summary>
+    [Parameter] public string? Boundary { get; set; }
+}

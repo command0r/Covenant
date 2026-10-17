@@ -1,16 +1,17 @@
 @page "/evidence"
+@page "/audit"
 @inject AppState State
 @inject AdminApi Api
 @inject Interop Interop
 @implements IDisposable
 
-<PageTitle>Evidence · Covenant</PageTitle>
+<PageTitle>Audit &amp; evidence · Covenant</PageTitle>
 
 <div class="page">
     <RequiresConnection>
         <div class="page-head">
             <div class="titles">
-                <h1>Evidence</h1>
+                <h1>Audit &amp; evidence</h1>
                 <span class="lede">Hash-chained audit log for this environment. Every allow and every refusal is an entry.</span>
             </div>
             <Button OnClick="LoadAsync" Busy="@_loading" BusyText="Verifying…" Disabled="@_loading">@(_report is null ? "Verify now" : "Verify again")</Button>

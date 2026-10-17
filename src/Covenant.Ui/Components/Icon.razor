@@ -1,0 +1,128 @@
+@* Original inline SVG icons drawn for this console (no icon set, no external asset; provenance: written in-repo).
+   20×20 grid, 1.6 px strokes in currentColor so they follow text colour and theme. Always decorative
+   (aria-hidden): the visible text label next to the icon — or the button's aria-label — carries the meaning. *@
+<svg class="icon @Class" width="@Size" height="@Size" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+     stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+    @switch (Name)
+    {
+        case "overview":
+            <rect x="3" y="3" width="6" height="6" rx="1.2" />
+            <rect x="11" y="3" width="6" height="6" rx="1.2" />
+            <rect x="3" y="11" width="6" height="6" rx="1.2" />
+            <rect x="11" y="11" width="6" height="6" rx="1.2" />
+            break;
+        case "playground":
+            <rect x="2.5" y="4" width="15" height="12" rx="2" />
+            <path d="M6 8.2l2.4 1.8L6 11.8M10.5 12h3.5" />
+            break;
+        case "requests":
+            <path d="M7.5 5.5h9M7.5 10h9M7.5 14.5h9M3.5 5.5h.8M3.5 10h.8M3.5 14.5h.8" />
+            break;
+        case "connections":
+            <path d="M7 2.5v3.5M13 2.5v3.5M5 6h10v2.5a5 5 0 0 1-10 0V6zM10 13.5v4" />
+            break;
+        case "policies":
+            <path d="M10 2.5l6 2.4v4.4c0 3.8-2.5 6.6-6 8.2-3.5-1.6-6-4.4-6-8.2V4.9l6-2.4z" />
+            <path d="M7.4 9.9l1.8 1.8 3.4-3.5" />
+            break;
+        case "budgets":
+            <rect x="2.5" y="5" width="15" height="11" rx="2" />
+            <path d="M2.5 8.5h15M12.5 12.5h2.5" />
+            break;
+        case "audit":
+            <path d="M5 2.5h6.5L15 6v11.5H5z" />
+            <path d="M11.5 2.5V6H15M7.6 11.6l1.6 1.6 3.2-3.3" />
+            break;
+        case "settings":
+            <path d="M3.5 5.5h8M15.5 5.5h1M3.5 10h2.5M9.5 10h7M3.5 14.5h6M13.5 14.5h3" />
+            <circle cx="13.5" cy="5.5" r="1.7" />
+            <circle cx="7.7" cy="10" r="1.7" />
+            <circle cx="11.7" cy="14.5" r="1.7" />
+            break;
+        case "pause":
+            <rect x="5" y="4" width="3.4" height="12" rx="1" />
+            <rect x="11.6" y="4" width="3.4" height="12" rx="1" />
+            break;
+        case "play":
+            <path d="M6.5 4.2l9 5.8-9 5.8z" />
+            break;
+        case "stop":
+            <rect x="5" y="5" width="10" height="10" rx="1.6" />
+            break;
+        case "sun":
+            <circle cx="10" cy="10" r="3.4" />
+            <path d="M10 2.3v1.9M10 15.8v1.9M2.3 10h1.9M15.8 10h1.9M4.6 4.6l1.3 1.3M14.1 14.1l1.3 1.3M4.6 15.4l1.3-1.3M14.1 5.9l1.3-1.3" />
+            break;
+        case "moon":
+            <path d="M15.8 12.4A6.6 6.6 0 0 1 7.6 4.2a6.6 6.6 0 1 0 8.2 8.2z" />
+            break;
+        case "info":
+            <circle cx="10" cy="10" r="7.3" />
+            <path d="M10 9v4.8M10 6.4v.1" />
+            break;
+        case "local":
+            <path d="M3 9.2l7-5.6 7 5.6v7.8H3z" />
+            <path d="M8 17v-4.2h4V17" />
+            break;
+        case "cloud":
+            <path d="M6.2 15.5h8.3a3.4 3.4 0 0 0 .3-6.8 4.9 4.9 0 0 0-9.4 1A3 3 0 0 0 6.2 15.5z" />
+            break;
+        case "copy":
+            <rect x="7" y="7" width="10" height="10" rx="1.6" />
+            <path d="M13 7V4.6A1.6 1.6 0 0 0 11.4 3H4.6A1.6 1.6 0 0 0 3 4.6v6.8A1.6 1.6 0 0 0 4.6 13H7" />
+            break;
+        case "present":
+            <path d="M3 7.5V3h4.5M12.5 3H17v4.5M17 12.5V17h-4.5M7.5 17H3v-4.5" />
+            break;
+        case "details":
+            <rect x="3" y="3" width="14" height="14" rx="2" />
+            <path d="M12 3v14M14.2 7h0M14.2 10h0" />
+            break;
+        case "history":
+            <circle cx="10" cy="10" r="7" />
+            <path d="M10 6.2V10l2.7 1.8" />
+            break;
+        case "check":
+            <path d="M4.5 10.5l3.6 3.6 7.4-8" />
+            break;
+        case "cross":
+            <path d="M5.5 5.5l9 9M14.5 5.5l-9 9" />
+            break;
+        case "skip":
+            <path d="M4 10h12" stroke-dasharray="2 2.4" />
+            break;
+        case "pending":
+            <circle cx="10" cy="10" r="3" />
+            break;
+        case "running":
+            <circle cx="10" cy="10" r="6.2" stroke-dasharray="3 2.6" />
+            <circle cx="10" cy="10" r="1.4" fill="currentColor" stroke="none" />
+            break;
+        case "warn":
+            <path d="M10 3l7.5 13.5h-15z" />
+            <path d="M10 8.2v3.6M10 14.2v.1" />
+            break;
+        case "plus":
+            <path d="M10 4v12M4 10h12" />
+            break;
+        case "logout":
+            <path d="M8 4H4v12h4M12.5 6.5L16 10l-3.5 3.5M16 10H8" />
+            break;
+        case "chevron":
+            <path d="M6.5 8l3.5 3.5L13.5 8" />
+            break;
+        default:
+            <circle cx="10" cy="10" r="2" />
+            break;
+    }
+</svg>
+
+@code {
+    /// <summary>overview, playground, requests, connections, policies, budgets, audit, settings, pause, play, stop,
+    /// sun, moon, info, local, cloud, copy, present, details, history, check, cross, skip, pending, running, warn,
+    /// plus, logout, chevron.</summary>
+    [Parameter] public string Name { get; set; } = "";
+    /// <summary>Pixel size (16–20 recommended).</summary>
+    [Parameter] public int Size { get; set; } = 18;
+    [Parameter] public string? Class { get; set; }
+}

@@ -1,69 +1,67 @@
 @inject AppState State
 @inject ConsoleSession Session
-@inject Interop Interop
 @inject NavigationManager Nav
 @implements IDisposable
 
 <nav class="shell-nav" aria-label="Primary">
     <div class="shell-brand">
         <span class="name">Covenant</span>
-        <span class="descriptor">AI governance workspace</span>
+        <span class="descriptor">AI governance control plane</span>
     </div>
 
-    <NavLink class="nav-link" href="" Match="NavLinkMatch.All">Overview</NavLink>
-    <NavLink class="nav-link" href="playground">Playground</NavLink>
-    <NavLink class="nav-link" href="requests">Requests</NavLink>
+    <NavLink class="nav-link" href="" Match="NavLinkMatch.All"><Icon Name="overview" /><span class="nav-text">Overview</span></NavLink>
+    <NavLink class="nav-link" href="playground"><Icon Name="playground" /><span class="nav-text">Playground</span></NavLink>
+    <NavLink class="nav-link" href="requests"><Icon Name="requests" /><span class="nav-text">Requests</span></NavLink>
     <NavLink class="nav-link" href="connections">
-        <span>Models &amp; connections</span>
+        <Icon Name="connections" /><span class="nav-text">Models &amp; connections</span>
         @if (LocalRouteMissing)
         {
-            <span class="dot warn" role="img" aria-label="Needs attention"></span>
+            <span class="nav-flag" title="The local route has no registered adapter">
+                <span class="dot warn" aria-hidden="true"></span><span class="visually-hidden">Needs attention</span>
+            </span>
         }
     </NavLink>
-    <NavLink class="nav-link" href="policies">Policies</NavLink>
-    <NavLink class="nav-link" href="budgets">Budgets</NavLink>
-    <NavLink class="nav-link" href="evidence">Evidence</NavLink>
+    <NavLink class="nav-link" href="policies"><Icon Name="policies" /><span class="nav-text">Policies</span></NavLink>
+    <NavLink class="nav-link" href="budgets"><Icon Name="budgets" /><span class="nav-text">Budgets</span></NavLink>
+    @* /audit is an alias; Match.Prefix on "evidence" keeps the item active on both. *@
+    <NavLink class="@AuditClass" href="evidence" Match="NavLinkMatch.Prefix"><Icon Name="audit" /><span class="nav-text">Audit &amp; evidence</span></NavLink>
+    <NavLink class="nav-link" href="settings"><Icon Name="settings" /><span class="nav-text">Settings</span></NavLink>
 
     <div class="nav-spacer"></div>
-
-    <NavLink class="nav-link" href="settings">Settings</NavLink>
 
     <div class="nav-session">
         @if (State.Connected)
         {
-            <span class="muted">Connected with admin token</span>
-            <span class="subtle">Environment: <span class="mono">@State.EnvironmentLabel</span></span>
-            <button type="button" class="btn ghost sm" style="align-self:flex-start" @onclick="DisconnectAsync">Disconnect</button>
+            <span class="muted">Shared admin token</span>
+            <button type="button" class="btn ghost sm nav-disconnect" @onclick="DisconnectAsync">
+                <Icon Name="logout" Size="16" /><span>Disconnect</span>
+            </button>
         }
         else
         {
             <span class="muted">Not connected</span>
             <a href="connect">Connect</a>
         }
-        <div class="theme-row">
-            <span class="subtle">Theme</span>
-            <button type="button" class="btn ghost sm" @onclick="ToggleThemeAsync" aria-pressed="@(_theme == "light" ? "true" : "false")">
-                @(_theme == "light" ? "Light" : "Dark")
-            </button>
-        </div>
     </div>
 </nav>
 
 @code {
-    private string _theme = "dark";
-
     private bool LocalRouteMissing => RouteHealth.LocalRouteMissing(State.LastStatus, State.Catalog);
 
-    protected override async Task OnInitializedAsync()
+    // NavLink cannot match two hrefs; mark the Audit item active on the /audit alias too.
+    private string AuditClass
     {
-        State.Changed += OnChanged;
-        try { _theme = await Interop.GetThemeAsync(); } catch (JSException) { _theme = "dark"; }
+        get
+        {
+            var rel = Nav.ToBaseRelativePath(Nav.Uri);
+            return rel.StartsWith("audit", StringComparison.OrdinalIgnoreCase) ? "nav-link active" : "nav-link";
+        }
     }
 
-    private async Task ToggleThemeAsync()
+    protected override void OnInitialized()
     {
-        var next = _theme == "light" ? "dark" : "light";
-        try { _theme = await Interop.SetThemeAsync(next); } catch (JSException) { /* keep current */ }
+        State.Changed += OnChanged;
+        Nav.LocationChanged += OnLocationChanged;
     }
 
     private async Task DisconnectAsync()
@@ -72,6 +70,12 @@
         Nav.NavigateTo("connect");
     }
 
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs e) => OnChanged();
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
-    public void Dispose() => State.Changed -= OnChanged;
+
+    public void Dispose()
+    {
+        State.Changed -= OnChanged;
+        Nav.LocationChanged -= OnLocationChanged;
+    }
 }

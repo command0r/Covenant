@@ -175,7 +175,7 @@
         new("Credential", "Shared admin token (X-Covenant-Admin-Token)", true),
         new("Stored in", "This tab’s sessionStorage only; cleared on disconnect or when the tab closes"),
         new("Status feed", State.FeedMode switch { FeedMode.Stream => "Live stream (/admin/status/stream)", FeedMode.Polling => "Polling every 3 s (stream unavailable)", _ => "Not running" }, true),
-        new("Application key", State.ApplicationKey is null ? "None held" : "Held in memory for the Playground; never persisted"),
+        new("Application key", "Never held — console requests run as an authorized test application (ADR-0012)"),
         new("Theme", "Stored in localStorage (the only value this console persists there)"),
     ];
 

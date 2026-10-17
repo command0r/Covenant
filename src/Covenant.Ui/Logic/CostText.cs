@@ -24,6 +24,16 @@ public static class CostText
         _ => NotReported,
     };
 
+    /// <summary>Cost text for one provider attempt, by its recorded basis (same rules as <see cref="Cost"/>).</summary>
+    public static string BasisCost(string? basis, decimal cost) => basis switch
+    {
+        "reported" => Usd(cost) + " reported usage",
+        "zero_priced" => "$0.00 configured",
+        "estimated_from_text" or "estimated_failed_call" => "≈ " + Usd(cost) + " estimated",
+        "no_call" => "$0.00 — no provider call",
+        _ => NotReported,
+    };
+
     /// <summary>Short form for table cells (same rules, fewer words).</summary>
     public static string CostShort(AuditEntryView r) => r.CostBasis switch
     {

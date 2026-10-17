@@ -2,7 +2,8 @@
 @inject AppState State
 @inject AdminApi Api
 @inject CatalogState Catalog
-@inject InferenceApi Inference
+@inject ConsoleInferenceApi Inference
+@inject WorkspaceConfig Ws
 @inject EvidenceTracker Evidence
 @inject NavigationManager Nav
 @implements IDisposable
@@ -13,7 +14,8 @@
   TASK 06 (UI half). Top: the APPLIED configuration as the server reports it (GET /admin/catalog) — "Registered"
   only ever comes from the server's flag. Bottom: the Ollama wizard. Draft values live only in this page; probing
   a draft never changes the running configuration, and runtime apply is not available (config + restart).
-  The governed test goes through /v1 with an APPLICATION key, never the admin token.
+  The governed test runs through POST /admin/playground/requests as an authorized test application (ADR-0012) —
+  the same governed pipeline as /v1; no application key is ever entered in the console.
 *@
 
 <div class="page">
@@ -221,21 +223,23 @@
 
                 <fieldset disabled="@(!AppliedPassed)">
                     <legend>7 · Governed test <span class="step-state @TestTone">@TestStepText</span></legend>
-                    <span class="secondary muted">Sends a short synthetic prompt to Covenant /v1 with an application key and requested model <span class="mono">@(_tag ?? "—")</span>. It passes through the full pipeline to Ollama — never directly. The prompt carries the published sample SSN so that cloud mode routes it to the local model.</span>
-                    @if (string.IsNullOrEmpty(State.ApplicationKey))
-                    {
-                        <div class="field">
-                            <label for="cx-key">Application key (required — the admin token never authorizes inference)</label>
-                            <input id="cx-key" class="input mono" type="password" autocomplete="off" spellcheck="false" @oninput="OnKeyInput" />
-                            <span class="help">Held in this tab's memory only; never stored. Shared with the Playground.</span>
-                        </div>
-                    }
-                    else
-                    {
-                        <span class="secondary">Using the application key held in memory for this tab.</span>
-                    }
+                    <span class="secondary muted">Sends a short synthetic prompt through the full governed pipeline as the chosen test application, requesting model <span class="mono">@(_tag ?? "—")</span> — never directly to Ollama. The prompt carries the published sample SSN so it is classified sensitive and must stay local.</span>
+                    <div class="field">
+                        <label for="cx-app">Run as</label>
+                        <select id="cx-app" class="input" value="@(_testApp ?? "")" @onchange="OnTestApp">
+                            <option value="" disabled>@(Ws.Applications is null ? "Applications unavailable" : "Choose an application…")</option>
+                            @foreach (var c in ComposerRules.Applications(Ws.Applications))
+                            {
+                                <option value="@c.App.Id" disabled="@(!c.Selectable)">@c.Label</option>
+                            }
+                        </select>
+                        @if (Ws.ApplicationsError is { } wae)
+                        {
+                            <span class="help bad">@wae</span>
+                        }
+                    </div>
                     <div class="btn-row">
-                        <Button Variant="primary" Busy="@_testing" BusyText="Running test…" OnClick="RunTestAsync">Run governed test</Button>
+                        <Button Variant="primary" Busy="@_testing" BusyText="Running test…" Disabled="@(_testApp is null)" OnClick="RunTestAsync">Run governed test</Button>
                     </div>
                     @if (_testOutcome is { } to)
                     {
@@ -305,6 +309,7 @@
     private OutcomeView? _testOutcome;
     private EvidenceStatus _testEvidence = EvidenceStatus.Idle;
     private CancellationTokenSource? _cts;
+    private string? _testApp;
 
     private string? EndpointProblem => ConnectionLogic.EndpointProblem(_endpoint);
     private bool ProbePassed => _probe is { Allowed: true, Reachable: true };
@@ -325,7 +330,18 @@
         _ => _testResult?.RequestId is null ? "No request id received" : "Not looked up",
     };
 
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnChanged;
+        await Ws.EnsureLoadedAsync();
+        _testApp = ComposerRules.Applications(Ws.Applications).FirstOrDefault(c => c.Selectable)?.App.Id;
+    }
+
+    private void OnTestApp(ChangeEventArgs e)
+    {
+        var id = e.Value?.ToString();
+        _testApp = ComposerRules.Find(Ws.Applications, id) is { } a && ComposerRules.WhyNotSelectable(a) is null ? a.Id : null;
+    }
 
     private static string StepText(bool passed, bool attempted) => passed ? "Passed" : attempted ? "Not passed" : "";
     private static string StepTone(bool passed, bool attempted) => passed ? "ok" : attempted ? "bad" : "";
@@ -441,11 +457,9 @@
         }
     }
 
-    private void OnKeyInput(ChangeEventArgs e) => State.SetApplicationKey(e.Value?.ToString());
-
     private async Task RunTestAsync()
     {
-        if (!AppliedPassed || _testing || _tag is not { } tag) return;
+        if (!AppliedPassed || _testing || _tag is not { } tag || _testApp is not { } app) return;
         _testing = true;
         _testResult = null;
         _testOutcome = null;
@@ -457,6 +471,9 @@
         {
             var form = new PlaygroundForm
             {
+                ApplicationId = app,
+                ProfileId = ComposerRules.Find(Ws.Applications, app) is { } appDto ? ComposerRules.DefaultProfile(appDto) : null,
+                Streaming = false,
                 Prompt = ConnectionLogic.GovernedTestPrompt(),
                 Mode = RouteMode.Explicit,
                 ExplicitModel = tag,
@@ -465,7 +482,7 @@
                 UseCase = "local-route-check",
             };
             var snapshot = RequestSnapshot.Freeze(1, form, DateTimeOffset.UtcNow);
-            var result = await Inference.SendAsync(snapshot, null, cts.Token);
+            var result = await Inference.SendAsync(snapshot, null, null, cts.Token);
             _testResult = result;
             _testOutcome = OutcomeModel.Compute(result.ToOutcomeInput(null));
             StateHasChanged();

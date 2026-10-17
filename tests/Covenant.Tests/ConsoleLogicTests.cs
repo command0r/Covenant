@@ -450,34 +450,48 @@ public sealed class SnapshotAndPresetTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 10, 16, 9, 0, 0, TimeSpan.Zero);
 
+    internal static List<ApplicationSummaryDto> Apps() =>
+    [
+        new() { Id = "demo-app", Team = "payments", Enabled = true, ConsoleTesting = true, GrantedProfiles = ["public-tickets", "internal"], DefaultProfile = "internal" },
+        new() { Id = "disabled-app", Team = "risk", Enabled = false, ConsoleTesting = true, GrantedProfiles = ["internal"], DefaultProfile = "internal" },
+        new() { Id = "prod-app", Team = "risk", Enabled = true, ConsoleTesting = false, GrantedProfiles = ["internal"], DefaultProfile = "internal" },
+    ];
+
+    internal static List<WorkloadProfileDto> Profiles() =>
+    [
+        new() { Id = "public-tickets", Name = "Public tickets", Baseline = "Public" },
+        new() { Id = "internal", Name = "Internal", Baseline = "Internal" },
+    ];
+
     [Fact]
     public void Snapshot_is_frozen_against_later_form_and_preset_edits()
     {
         var form = new PlaygroundForm();
-        ScenarioPresets.ApplyTo(ScenarioPresets.Find('A')!, form);
-        var snap = RequestSnapshot.Freeze(1, form, T0);
+        ScenarioPresets.ApplyTo(ScenarioPresets.Find('A')!, form, Apps(), Profiles());
+        var snap = RequestSnapshot.Freeze(1, form, T0, clientRequestId: "crid-1");
         Assert.True(snap.MatchesForm(form));
+        Assert.Equal("demo-app", snap.ApplicationId);
+        Assert.Equal("public-tickets", snap.ProfileId);
+        Assert.Equal("crid-1", snap.ClientRequestId);
 
-        // Edit the form, then re-fill it from another preset: the snapshot must not move.
         form.Prompt = "edited";
-        form.Streaming = true;
-        ScenarioPresets.ApplyTo(ScenarioPresets.Find('B')!, form);
+        form.Streaming = !form.Streaming;
+        ScenarioPresets.ApplyTo(ScenarioPresets.Find('B')!, form, Apps(), Profiles());
 
-        Assert.Equal(ScenarioPresets.NormalPrompt, snap.Prompt);
+        Assert.Equal(ScenarioPresets.TicketPrompt, snap.Prompt);
         Assert.Null(snap.RequestedModel);
-        Assert.False(snap.Streaming);
-        Assert.Equal("Scenario A · Permitted request", snap.ScenarioLabel);
-        Assert.Equal("Request #1 · Scenario A · Permitted request", snap.Title);
+        Assert.Equal("Scenario A · Public → cloud", snap.ScenarioLabel);
+        Assert.Equal("Request #1 · Scenario A · Public → cloud", snap.Title);
         Assert.False(snap.MatchesForm(form));
     }
 
     [Fact]
-    public void Editing_a_preset_copy_does_not_change_the_catalogue()
+    public void Every_run_gets_a_fresh_client_request_id()
     {
-        var a = ScenarioPresets.Find('A')!;
-        var edited = a with { Prompt = "changed" };
-        Assert.NotEqual(edited.Prompt, ScenarioPresets.Find('A')!.Prompt);
-        Assert.Equal(ScenarioPresets.NormalPrompt, ScenarioPresets.All[0].Prompt);
+        var form = new PlaygroundForm { Prompt = "x", ApplicationId = "demo-app" };
+        var ids = Enumerable.Range(1, 50).Select(i => RequestSnapshot.Freeze(i, form, T0).ClientRequestId).ToHashSet();
+        Assert.Equal(50, ids.Count);
+        Assert.All(ids, id => Assert.Equal(32, id.Length));
     }
 
     [Fact]
@@ -492,32 +506,65 @@ public sealed class SnapshotAndPresetTests
     }
 
     [Fact]
-    public void Scenario_B_requests_the_unapproved_test_model_and_A_lets_policy_choose()
+    public void Presets_only_populate_the_form()
     {
-        var form = new PlaygroundForm();
-        ScenarioPresets.ApplyTo(ScenarioPresets.Find("b")!, form);
-        var b = RequestSnapshot.Freeze(1, form, T0);
-        Assert.Equal("gpt-4-unapproved-test", b.RequestedModel);
-        Assert.Equal("gpt-4-unapproved-test", b.RoutingLabel);
+        var form = new PlaygroundForm { Streaming = false, MaxTokens = 77, Workflow = "wf" };
+        var result = ScenarioPresets.ApplyTo(ScenarioPresets.Find('B')!, form, Apps(), Profiles());
 
-        ScenarioPresets.ApplyTo(ScenarioPresets.Find('A')!, form);
-        var a = RequestSnapshot.Freeze(2, form, T0);
-        Assert.Null(a.RequestedModel);
-        Assert.Equal("Let policy choose", a.RoutingLabel);
+        Assert.Null(result.Note);
+        Assert.Equal('B', form.Scenario);
+        Assert.Equal(ScenarioPresets.SensitiveTicketPrompt, form.Prompt);
+        Assert.Equal(RouteMode.Policy, form.Mode);
+        Assert.Equal("demo-app", form.ApplicationId);          // first console-testable app with a Public profile
+        Assert.Equal("public-tickets", form.ProfileId);         // the granted Public-baseline profile
+        // Operator settings untouched; nothing frozen or sent — a preset has no submission side.
+        Assert.False(form.Streaming);
+        Assert.Equal(77, form.MaxTokens);
+        Assert.Equal("wf", form.Workflow);
+    }
+
+    [Fact]
+    public void Preset_without_a_matching_granted_profile_says_so_and_keeps_the_choice_to_the_operator()
+    {
+        var apps = new List<ApplicationSummaryDto>
+        {
+            new() { Id = "only-internal", Team = "t", Enabled = true, ConsoleTesting = true, GrantedProfiles = ["internal"], DefaultProfile = "internal" },
+        };
+        var form = new PlaygroundForm();
+        var result = ScenarioPresets.ApplyTo(ScenarioPresets.Find('A')!, form, apps, Profiles());
+        Assert.NotNull(result.Note);
+        Assert.Contains("Public", result.Note, StringComparison.Ordinal);
+        Assert.Equal("internal", form.ProfileId); // the app default, not a fabricated grant
+    }
+
+    [Fact]
+    public void Preset_is_ready_only_when_it_still_matches_and_nothing_blocks_run()
+    {
+        var preset = ScenarioPresets.Find('A')!;
+        var form = new PlaygroundForm();
+        ScenarioPresets.ApplyTo(preset, form); // no applications known
+        Assert.False(ScenarioPresets.IsReady(preset, form, null));
+
+        ScenarioPresets.ApplyTo(preset, form, Apps(), Profiles());
+        Assert.True(ScenarioPresets.IsReady(preset, form, Apps()));
+
+        form.Prompt += "!";
+        Assert.False(ScenarioPresets.IsReady(preset, form, Apps()));
     }
 
     [Fact]
     public void Scenario_D_appends_a_fresh_nonce_on_every_run()
     {
         var form = new PlaygroundForm();
-        ScenarioPresets.ApplyTo(ScenarioPresets.Find('D')!, form);
+        ScenarioPresets.ApplyTo(ScenarioPresets.Find('D')!, form, Apps(), Profiles());
         var one = RequestSnapshot.Freeze(1, form, T0);
         var two = RequestSnapshot.Freeze(2, form, T0);
 
         Assert.NotEqual(one.Prompt, two.Prompt);
-        Assert.StartsWith(ScenarioPresets.NormalPrompt + " [run ", one.Prompt, StringComparison.Ordinal);
-        Assert.Equal(ScenarioPresets.NormalPrompt, one.BasePrompt);
-        Assert.Equal("Scenario D · Pause and resume", one.ScenarioLabel);
+        Assert.NotEqual(one.ClientRequestId, two.ClientRequestId);
+        Assert.StartsWith(ScenarioPresets.TicketPrompt + " [run ", one.Prompt, StringComparison.Ordinal);
+        Assert.Equal(ScenarioPresets.TicketPrompt, one.BasePrompt);
+        Assert.Equal("Scenario D · Pause demo", one.ScenarioLabel);
         Assert.True(one.MatchesForm(form)); // the nonce is not a form change
 
         var nonces = Enumerable.Range(0, 200).Select(_ => ScenarioPresets.NewNonce()).ToHashSet();
@@ -546,19 +593,500 @@ public sealed class SnapshotAndPresetTests
         new InferenceRequest("tester", [new ChatMessage(ChatRole.User, text)], null, new AttributionTags("t", "w", "u"))).Classification;
 
     [Fact]
-    public void Scenario_C_and_the_connection_test_trigger_the_PII_classifier()
+    public void Scenarios_B_C_and_the_connection_test_trigger_the_PII_classifier()
     {
-        Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.SensitivePrompt));
+        Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.Find('B')!.Prompt));
+        Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.Find('C')!.Prompt));
         Assert.Equal(DataClassification.Pii, Classify(ConnectionLogic.GovernedTestPrompt()));
     }
 
     [Fact]
-    public void Scenarios_A_B_D_are_not_sensitive()
+    public void Scenarios_A_and_D_carry_nothing_sensitive()
     {
         var form = new PlaygroundForm();
         ScenarioPresets.ApplyTo(ScenarioPresets.Find('D')!, form);
-        Assert.Equal(DataClassification.Internal, Classify(ScenarioPresets.NormalPrompt));
-        Assert.Equal(DataClassification.Internal, Classify(RequestSnapshot.Freeze(1, form, T0).Prompt));
+        Assert.True(Classify(ScenarioPresets.TicketPrompt) < DataClassification.Pii);
+        Assert.True(Classify(RequestSnapshot.Freeze(1, form, T0).Prompt) < DataClassification.Pii);
+    }
+}
+
+public sealed class ComposerRulesTests
+{
+    private static readonly List<ApplicationSummaryDto> Apps = SnapshotAndPresetTests.Apps();
+
+    [Fact]
+    public void Without_applications_nothing_can_run()
+    {
+        var form = new PlaygroundForm { Prompt = "hello" };
+        Assert.Equal("Applications are not loaded yet.", ComposerRules.Problem(form, null));
+        Assert.Equal("No application is enabled for console testing.", ComposerRules.Problem(form, []));
+        Assert.Equal("Choose an application to run as.", ComposerRules.Problem(form, Apps));
+
+        Assert.True(ComposerRules.SelectApplication(form, Apps, "demo-app"));
+        Assert.Null(ComposerRules.Problem(form, Apps));
+    }
+
+    [Fact]
+    public void Disabled_and_non_test_applications_are_listed_but_not_selectable()
+    {
+        var choices = ComposerRules.Applications(Apps);
+        Assert.Equal(3, choices.Count);
+        Assert.True(choices[0].Selectable);                 // selectable first
+        Assert.Equal("demo-app", choices[0].App.Id);
+        Assert.Contains(choices, c => c.App.Id == "disabled-app" && !c.Selectable && c.Reason == "disabled");
+        Assert.Contains(choices, c => c.App.Id == "prod-app" && !c.Selectable && c.Reason == "console testing not allowed");
+
+        var form = new PlaygroundForm { Prompt = "x" };
+        Assert.False(ComposerRules.SelectApplication(form, Apps, "prod-app"));
+        Assert.False(ComposerRules.SelectApplication(form, Apps, "disabled-app"));
+        Assert.False(ComposerRules.SelectApplication(form, Apps, "nope"));
+        Assert.Null(form.ApplicationId);
+
+        form.ApplicationId = "prod-app"; // forced (e.g. stale form): Run is still refused, with the reason
+        Assert.Contains("console testing not allowed", ComposerRules.Problem(form, Apps), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Only_granted_profiles_are_selectable_and_the_default_follows_the_application()
+    {
+        var form = new PlaygroundForm { Prompt = "x" };
+        ComposerRules.SelectApplication(form, Apps, "demo-app");
+        Assert.Equal("internal", form.ProfileId); // default_profile
+        Assert.Equal(new[] { "public-tickets", "internal" }, ComposerRules.GrantedProfiles(ComposerRules.Find(Apps, "demo-app")));
+
+        Assert.False(ComposerRules.SelectProfile(form, Apps, "phi-records"));
+        Assert.Equal("internal", form.ProfileId);
+        Assert.True(ComposerRules.SelectProfile(form, Apps, "public-tickets"));
+        Assert.Equal("public-tickets", form.ProfileId);
+
+        form.ProfileId = "phi-records"; // ungranted value forced into the form
+        Assert.Equal("Profile phi-records is not granted to demo-app.", ComposerRules.Problem(form, Apps));
+    }
+
+    [Fact]
+    public void Default_profile_falls_back_to_the_first_granted_one_when_the_default_is_not_granted()
+    {
+        var app = new ApplicationSummaryDto { Id = "a", Enabled = true, ConsoleTesting = true, GrantedProfiles = ["p1", "p2"], DefaultProfile = "zzz" };
+        Assert.Equal("p1", ComposerRules.DefaultProfile(app));
+        Assert.Null(ComposerRules.DefaultProfile(new ApplicationSummaryDto { Id = "b", Enabled = true, ConsoleTesting = true }));
+    }
+
+    [Fact]
+    public void Eligible_overrides_follow_policies_profile_baseline_and_mode()
+    {
+        var config = new CovenantConfigDto
+        {
+            Mode = "Hybrid",
+            Connections =
+            [
+                new() { Id = "ollama", DisplayName = "Ollama", Boundary = "Local", Enabled = true, Models = [new() { ModelId = "qwen3:8b", DisplayName = "Qwen" }] },
+                new() { Id = "openai", DisplayName = "OpenAI", Boundary = "Cloud", Enabled = true, Models = [new() { ModelId = "gpt-x-mini" }] },
+                new() { Id = "off", Boundary = "Cloud", Enabled = false, Models = [new() { ModelId = "m" }] },
+            ],
+            Profiles = SnapshotAndPresetTests.Profiles(),
+            Policies =
+            [
+                new() { Id = "public", Enabled = true, Classifications = ["Public"],
+                        Targets = [new() { ConnectionId = "openai", ModelId = "gpt-x-mini" }, new() { ConnectionId = "off", ModelId = "m" }, new() { ConnectionId = "ollama", ModelId = "qwen3:8b" }] },
+                new() { Id = "internal", Enabled = true, Classifications = ["Internal"], Targets = [new() { ConnectionId = "ollama", ModelId = "qwen3:8b" }] },
+                new() { Id = "paused", Enabled = true, Paused = true, Classifications = ["Public"], Targets = [new() { ConnectionId = "ollama", ModelId = "other" }] },
+            ],
+        };
+
+        var pub = ComposerRules.EligibleOverrides(config, "public-tickets", null);
+        Assert.Equal(new[] { "openai/gpt-x-mini", "ollama/qwen3:8b" }, pub.Select(o => o.Value));
+        Assert.Equal("Cloud", pub[0].Boundary);
+        Assert.Equal("Local", pub[1].Boundary);
+
+        Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "internal", null).Select(o => o.Value));
+
+        config.Mode = "LocalOnly";
+        Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "public-tickets", null).Select(o => o.Value));
+    }
+}
+
+public sealed class SafeMarkdownTests
+{
+    [Theory]
+    [InlineData("<script>alert(1)</script>")]
+    [InlineData("hello <img src=x onerror=alert(1)>")]
+    [InlineData("<a href=\"javascript:alert(1)\">x</a>")]
+    [InlineData("<iframe src=//evil></iframe>")]
+    [InlineData("**<svg onload=alert(1)>**")]
+    [InlineData("`<script>`")]
+    [InlineData("```\n<script>alert(1)</script>\n```")]
+    [InlineData("- <b onmouseover=x>item</b>")]
+    public void Raw_html_is_always_encoded(string input)
+    {
+        var html = SafeMarkdown.ToHtml(input);
+        Assert.DoesNotContain("<script", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<img", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<iframe", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<svg", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<b ", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("<a href=\"javascript", html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("&lt;", html, StringComparison.Ordinal);
+        AssertOnlyAllowedTags(html);
+    }
+
+    [Theory]
+    [InlineData("[click](javascript:alert(1))")]
+    [InlineData("[click](JAVASCRIPT:alert(1))")]
+    [InlineData("[click](data:text/html;base64,PHNjcmlwdD4=)")]
+    [InlineData("[click](vbscript:msgbox)")]
+    [InlineData("[click](//evil.example/x)")]
+    [InlineData("[click](jav&#x61;script:alert(1))")]
+    public void Non_http_links_stay_literal_text(string input)
+    {
+        var html = SafeMarkdown.ToHtml(input);
+        Assert.DoesNotContain("<a ", html, StringComparison.Ordinal);
+        Assert.Contains("[click]", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Http_links_open_safely_and_cannot_break_out_of_the_attribute()
+    {
+        var html = SafeMarkdown.ToHtml("see [docs](https://example.com/a?b=1&c=2) now");
+        Assert.Contains("<a href=\"https://example.com/a?b=1&amp;c=2\" target=\"_blank\" rel=\"noopener noreferrer\">docs</a>", html, StringComparison.Ordinal);
+
+        var tricky = SafeMarkdown.ToHtml("[x](https://e.com/\"onmouseover=\"alert(1))");
+        Assert.DoesNotContain("\"onmouseover", tricky, StringComparison.Ordinal);
+        Assert.DoesNotContain(" onmouseover=\"", tricky, StringComparison.Ordinal);
+        AssertOnlyAllowedTags(tricky);
+    }
+
+    [Fact]
+    public void Supported_formatting_renders()
+    {
+        Assert.Equal("<h3>Title</h3>", SafeMarkdown.ToHtml("# Title"));
+        Assert.Equal("<h4>Sub</h4>", SafeMarkdown.ToHtml("## Sub"));
+        Assert.Equal("<h5>Small</h5>", SafeMarkdown.ToHtml("### Small"));
+        Assert.Equal("<p>#### four</p>", SafeMarkdown.ToHtml("#### four"));
+        Assert.Equal("<p><strong>bold</strong> and <em>it</em> and <strong>b2</strong> and <em>i2</em></p>",
+            SafeMarkdown.ToHtml("**bold** and *it* and __b2__ and _i2_"));
+        Assert.Equal("<p>use <code>a*b*c</code> here</p>", SafeMarkdown.ToHtml("use `a*b*c` here"));
+        Assert.Equal("<ul><li>one</li><li>two</li></ul>", SafeMarkdown.ToHtml("- one\n* two"));
+        Assert.Equal("<ol><li>first</li><li>second</li></ol>", SafeMarkdown.ToHtml("1. first\n2) second"));
+        Assert.Equal("<p>line one<br>line two</p><p>para two</p>", SafeMarkdown.ToHtml("line one\r\nline two\n\npara two"));
+        Assert.Equal("<pre><code>x &lt; 1\n**not bold**</code></pre>", SafeMarkdown.ToHtml("```csharp\nx < 1\n**not bold**\n```"));
+        Assert.Equal("<p>snake_case_name stays</p>", SafeMarkdown.ToHtml("snake_case_name stays"));
+        Assert.Equal("{&quot;priority&quot;:&quot;low&quot;}", StripP(SafeMarkdown.ToHtml("{\"priority\":\"low\"}")));
+        Assert.Equal("", SafeMarkdown.ToHtml(null));
+        Assert.Equal("", SafeMarkdown.ToHtml(""));
+    }
+
+    [Fact]
+    public void Unclosed_fence_while_streaming_renders_as_code()
+        => Assert.Equal("<pre><code>partial &lt;b&gt;</code></pre>", SafeMarkdown.ToHtml("```\npartial <b>"));
+
+    private static string StripP(string html) => html.StartsWith("<p>", StringComparison.Ordinal) ? html[3..^4] : html;
+
+    /// <summary>Every tag in the output is one the renderer itself writes.</summary>
+    private static void AssertOnlyAllowedTags(string html)
+    {
+        var allowed = new HashSet<string>(StringComparer.Ordinal) { "p", "br", "h3", "h4", "h5", "strong", "em", "code", "pre", "ul", "ol", "li", "a" };
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(html, "<\\/?([a-zA-Z0-9]+)"))
+            Assert.Contains(m.Groups[1].Value, allowed);
+        foreach (System.Text.RegularExpressions.Match m in System.Text.RegularExpressions.Regex.Matches(html, "<a ([^>]*)>"))
+            Assert.Matches("^href=\"https?://[^\"<>]*\" target=\"_blank\" rel=\"noopener noreferrer\"$", m.Groups[1].Value);
+    }
+}
+
+public sealed class TraceModelTests
+{
+    private static TraceEventDto E(long seq, string stage, string state, double? ms = null, string? attempt = null, string? reason = null, string? target = null)
+        => new() { Seq = seq, Stage = stage, State = state, DurationMs = ms, AttemptId = attempt, ReasonCode = reason, Target = target };
+
+    private static TraceStepView Step(TraceView v, string stage) => v.Steps.Single(s => s.Stage == stage);
+
+    [Fact]
+    public void Steps_follow_the_canonical_order_and_unreported_stages_are_pending_until_complete()
+    {
+        var open = TraceModel.Reduce([E(1, "auth", "passed", 2)], complete: false);
+        Assert.Equal(TraceModel.Stages, open.Steps.Select(s => s.Stage));
+        Assert.Equal(TraceStepState.Passed, Step(open, "auth").State);
+        Assert.Equal(2, Step(open, "auth").DurationMs);
+        Assert.Equal(TraceStepState.Pending, Step(open, "policy").State);
+
+        var done = TraceModel.Reduce([E(1, "auth", "passed", 2)], complete: true);
+        Assert.Equal(TraceStepState.NotReported, Step(done, "policy").State); // never invented as passed/skipped
+    }
+
+    [Fact]
+    public void Duplicates_are_dropped_by_seq_and_out_of_order_delivery_cannot_regress_a_state()
+    {
+        var events = new[]
+        {
+            E(3, "policy", "passed", 4, reason: "allowed"),
+            E(1, "auth", "running"),
+            E(2, "auth", "passed", 1.5),
+            E(2, "auth", "failed"),       // duplicate seq (replay): ignored, first copy wins
+            E(3, "policy", "refused"),    // duplicate seq
+            E(4, "policy", "running"),    // stray later event wins only because its seq is higher
+        };
+        var v = TraceModel.Reduce(events, complete: false);
+        Assert.Equal(TraceStepState.Passed, Step(v, "auth").State);
+        Assert.Equal(1.5, Step(v, "auth").DurationMs);
+        Assert.Equal(TraceStepState.Running, Step(v, "policy").State);
+        Assert.Equal("allowed", Step(v, "policy").ReasonCode);
+        Assert.Equal(4, v.LastSeq);
+    }
+
+    [Fact]
+    public void Skipped_stages_are_reported_as_skipped_with_their_reason()
+    {
+        var v = TraceModel.Reduce(
+        [
+            E(1, "cache", "passed", 1, reason: "cache_hit"),
+            E(2, "rate_limit", "skipped", reason: "cache_hit"),
+            E(3, "pause", "skipped", reason: "cache_hit"),
+            E(4, "provider", "skipped", reason: "cache_hit"),
+        ], complete: true);
+        Assert.Equal(TraceStepState.Skipped, Step(v, "rate_limit").State);
+        Assert.Equal(TraceStepState.Skipped, Step(v, "provider").State);
+        Assert.Empty(Step(v, "provider").Attempts);
+        Assert.Equal("cache_hit", Step(v, "provider").ReasonCode);
+        Assert.Null(Step(v, "rate_limit").DurationMs);
+    }
+
+    [Fact]
+    public void Provider_events_are_grouped_into_attempts_in_order_of_first_appearance()
+    {
+        var v = TraceModel.Reduce(
+        [
+            E(10, "provider", "running", attempt: "a1", target: "openai/gpt-x"),
+            E(12, "provider", "running", attempt: "a2", target: "ollama/qwen"),
+            E(11, "provider", "failed", 5000, attempt: "a1", reason: "timeout"),
+            E(13, "provider", "passed", 800, attempt: "a2"),
+        ], complete: true);
+        var p = Step(v, "provider");
+        Assert.Equal(2, p.Attempts.Count);
+        Assert.Equal("a1", p.Attempts[0].AttemptId);
+        Assert.Equal(TraceStepState.Failed, p.Attempts[0].State);
+        Assert.Equal("openai/gpt-x", p.Attempts[0].Target);
+        Assert.Equal("timeout", p.Attempts[0].ReasonCode);
+        Assert.Equal(5000, p.Attempts[0].DurationMs);
+        Assert.Equal("a2", p.Attempts[1].AttemptId);
+        Assert.Equal(TraceStepState.Passed, p.Attempts[1].State);
+        Assert.Equal("ollama/qwen", p.Attempts[1].Target);
+        Assert.Equal(TraceStepState.Passed, p.State);   // last attempt decides
+        Assert.Equal(5800, p.DurationMs);                // sum of reported attempt durations
+        Assert.Equal(new[] { 1, 2 }, p.Attempts.Select(a => a.Number));
+    }
+
+    [Fact]
+    public void Provider_is_running_while_any_attempt_runs()
+    {
+        var v = TraceModel.Reduce([E(1, "provider", "running", attempt: "a1")], complete: false);
+        Assert.Equal(TraceStepState.Running, Step(v, "provider").State);
+    }
+
+    [Fact]
+    public void Accumulator_dedupes_tracks_last_seq_and_merges_snapshots()
+    {
+        var acc = new TraceAccumulator();
+        Assert.True(acc.Add(E(1, "auth", "passed")));
+        Assert.False(acc.Add(E(1, "auth", "passed")));
+        Assert.True(acc.Add(E(5, "policy", "passed")));
+        Assert.Equal(5, acc.LastSeq);
+
+        acc.ApplySnapshot(new TraceSnapshotDto { Complete = true, ConfigVersion = 7, Events = [E(1, "auth", "passed"), E(6, "attribution", "passed")] });
+        Assert.Equal(3, acc.Count);
+        Assert.True(acc.Complete);
+        var view = acc.View();
+        Assert.Equal(7, view.ConfigVersion);
+        Assert.Equal(TraceStepState.NotReported, Step(view, "budget").State);
+    }
+
+    [Fact]
+    public void Unknown_states_and_stages_are_kept_honestly()
+    {
+        var v = TraceModel.Reduce([E(1, "auth", "weird"), E(2, "future_stage", "passed")], complete: true);
+        Assert.Equal(TraceStepState.NotReported, Step(v, "auth").State);
+        Assert.Equal("future_stage", v.Steps[^1].Stage);
+    }
+
+    [Fact]
+    public void Audit_summary_fallback_reads_objects_and_compact_strings()
+    {
+        var summary = System.Text.Json.JsonDocument.Parse(
+            "[{\"Stage\":\"auth\",\"State\":\"passed\",\"DurationMs\":1},\"policy:passed:3\",\"provider:failed:900\",\"provider:passed:400\",{\"nonsense\":1}]")
+            .RootElement.EnumerateArray().Select(e => e.Clone()).ToList();
+        var attempts = new List<AuditAttemptView>
+        {
+            new() { AttemptId = "a1", ConnectionId = "openai", ModelId = "gpt-x" },
+            new() { AttemptId = "a2", ConnectionId = "ollama", ModelId = "qwen" },
+        };
+        var v = TraceModel.FromAuditSummary(summary, attempts, 3)!;
+        Assert.Equal("audit summary", v.Source);
+        Assert.True(v.Complete);
+        Assert.Equal(TraceStepState.Passed, Step(v, "auth").State);
+        Assert.Equal(3, Step(v, "policy").DurationMs);
+        var p = Step(v, "provider");
+        Assert.Equal(2, p.Attempts.Count);
+        Assert.Equal("openai/gpt-x", p.Attempts[0].Target);
+        Assert.Equal(TraceStepState.Failed, p.Attempts[0].State);
+        Assert.Equal(TraceStepState.Passed, p.State);
+        Assert.Null(TraceModel.FromAuditSummary(null));
+        Assert.Null(TraceModel.FromAuditSummary([]));
+    }
+
+    [Fact]
+    public void Sse_parser_dispatches_on_blank_lines_and_joins_data()
+    {
+        var p = new SseParser();
+        Assert.Null(p.Feed(": comment"));
+        Assert.Null(p.Feed("id: 7"));
+        Assert.Null(p.Feed("data: {\"a\":"));
+        Assert.Null(p.Feed("data: 1}"));
+        var ev = p.Feed("");
+        Assert.NotNull(ev);
+        Assert.Equal("7", ev!.Id);
+        Assert.Equal("message", ev.Event);
+        Assert.Equal("{\"a\":\n1}", ev.Data);
+
+        Assert.Null(p.Feed("event: end"));
+        var end = p.Feed("");
+        Assert.Equal("end", end!.Event);
+        Assert.Null(p.Feed("")); // nothing pending
+    }
+}
+
+public sealed class ShellStatusTests
+{
+    [Theory]
+    [InlineData("local-only", "Local-only", "local")]
+    [InlineData("LocalOnly", "Local-only", "local")]
+    [InlineData("hybrid", "Hybrid", "hybrid")]
+    [InlineData("Hybrid", "Hybrid", "hybrid")]
+    [InlineData("legacy-cloud", "Legacy cloud", "legacy")]
+    [InlineData("LegacyCloud", "Legacy cloud", "legacy")]
+    [InlineData("cloud", "Legacy cloud", "legacy")]
+    [InlineData(null, "Mode not reported", "unknown")]
+    [InlineData("", "Mode not reported", "unknown")]
+    [InlineData("quantum", "Mode not reported", "unknown")]
+    public void Mode_badge_mapping(string? mode, string label, string tone)
+    {
+        var b = ShellStatus.Mode(mode);
+        Assert.Equal(label, b.Label);
+        Assert.Equal(tone, b.Tone);
+    }
+
+    private static readonly DateTimeOffset Now = new(2026, 10, 16, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public void Live_shows_no_counter_and_the_exact_time_goes_in_the_title()
+    {
+        var f = ShellStatus.Freshness(true, false, Now.AddSeconds(-1), Now, null);
+        Assert.Equal("Live", f.Label);
+        Assert.Equal("ok", f.Tone);
+        Assert.False(f.Stale);
+        Assert.Equal("Last status update 2026-10-16 11:59:59 UTC", f.Title);
+        Assert.DoesNotMatch("\\d+ s", f.Label);
+    }
+
+    [Fact]
+    public void Stale_shows_age_and_the_feed_problem()
+    {
+        var f = ShellStatus.Freshness(true, true, Now.AddSeconds(-12), Now, "Connection lost — retrying");
+        Assert.Equal("Stale · 12 s", f.Label);
+        Assert.Equal("warn", f.Tone);
+        Assert.Contains("Connection lost", f.Title, StringComparison.Ordinal);
+        Assert.Equal("Stale · 3 min", ShellStatus.Freshness(true, true, Now.AddSeconds(-200), Now, null).Label);
+        Assert.Equal("Stale · no update", ShellStatus.Freshness(true, true, null, Now, null).Label);
+        Assert.Equal("Disconnected", ShellStatus.Freshness(false, false, null, Now, null).Label);
+    }
+
+    [Fact]
+    public void Announcement_depends_on_state_changes_only()
+    {
+        var a = ShellStatus.Announcement(true, false, false);
+        Assert.Equal("Console connected. New provider calls accepted.", a);
+        Assert.Equal("Console connected. New provider calls paused. Status is stale.", ShellStatus.Announcement(true, true, true));
+        Assert.Equal("Console disconnected.", ShellStatus.Announcement(false, true, true));
+        // Same state, any time → same text: nothing to re-announce while the clock ticks.
+        Assert.Equal(a, ShellStatus.Announcement(true, false, false));
+    }
+}
+
+public sealed class AttemptAndDestinationTests
+{
+    private static AuditEntryView Fallback() => Set(Rec.V2(selected: "openai/gpt-x", attempted: "ollama/qwen", served: "ollama/qwen"),
+    [
+        new AuditAttemptView { AttemptId = "a1", ConnectionId = "openai", ModelId = "gpt-x", Outcome = "failed", ErrorClass = "timeout", DurationMs = 5000, CostUsd = 0.0001m, CostBasis = "estimated_failed_call" },
+        new AuditAttemptView { AttemptId = "a2", ConnectionId = "ollama", ModelId = "qwen", Outcome = "served", DurationMs = 800, CostUsd = 0m, CostBasis = "zero_priced" },
+    ]);
+
+    private static AuditEntryView Set(AuditEntryView r, List<AuditAttemptView> attempts) { r.Attempts = attempts; return r; }
+
+    private static readonly List<ConnectionDto> Connections =
+    [
+        new() { Id = "openai", Boundary = "Cloud", Enabled = true },
+        new() { Id = "ollama", Boundary = "Local", Enabled = true },
+    ];
+
+    [Fact]
+    public void Fallback_is_explained_attempt_by_attempt()
+    {
+        var r = Fallback();
+        var v = OutcomeModel.FromRecord(r);
+        Assert.Equal(DisplayOutcome.Served, v.Outcome);
+        Assert.Equal("Served by approved fallback", v.Title);
+        Assert.Contains("Attempt 1 (openai/gpt-x) failed: timeout; attempt 2 (ollama/qwen) served.", v.Explanation, StringComparison.Ordinal);
+
+        var lines = AttemptFacts.Lines(r, Connections);
+        Assert.Equal(2, lines.Count);
+        Assert.Equal("openai/gpt-x", lines[0].Target);
+        Assert.Equal("Cloud", lines[0].Boundary);
+        Assert.Equal("timeout", lines[0].ErrorClass);
+        Assert.Equal("≈ $0.0001 estimated", lines[0].Cost);
+        Assert.Equal("ollama/qwen", lines[1].Target);
+        Assert.Equal("Local", lines[1].Boundary);
+    }
+
+    [Fact]
+    public void Destination_is_the_serving_attempt_with_its_boundary()
+    {
+        var d = ModelFacts.Destination(Fallback(), Connections);
+        Assert.Equal("ollama/qwen", d.Text);
+        Assert.Equal("Local", d.Boundary);
+        Assert.True(d.Served);
+
+        var unknown = ModelFacts.Destination(Fallback(), null);
+        Assert.Null(unknown.Boundary); // never guessed from the name
+
+        var refused = ModelFacts.Destination(Rec.PolicyDeny());
+        Assert.Equal(ModelFacts.NoProviderCall, refused.Text);
+        Assert.False(refused.Served);
+
+        var cache = ModelFacts.Destination(Rec.V2(cacheHit: true, attempted: null, served: "ollama/qwen"), Connections);
+        Assert.StartsWith("Cache — no provider call", cache.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Single_attempt_is_not_called_a_fallback()
+    {
+        var r = Set(Rec.V2(), [new AuditAttemptView { AttemptId = "a1", ConnectionId = "openai", ModelId = "gpt-x", Outcome = "served" }]);
+        Assert.Null(AttemptFacts.FallbackSentence(r));
+        Assert.Equal("Served", OutcomeModel.FromRecord(r).Title);
+    }
+
+    [Fact]
+    public void Cancel_with_partial_text_says_so_truthfully()
+    {
+        var v = OutcomeModel.Compute(new OutcomeInput(200, Cancelled: true, HasPartialText: true));
+        Assert.Equal(DisplayOutcome.Cancelled, v.Outcome);
+        Assert.Equal("Cancelled — partial response", v.Title);
+        Assert.Contains("the provider may have charged for work done", v.Explanation, StringComparison.Ordinal);
+        Assert.Equal("Cancelled — no response received", OutcomeModel.Compute(new OutcomeInput(Cancelled: true)).Title);
+    }
+
+    [Fact]
+    public void Duplicate_submission_is_not_a_success()
+    {
+        var v = OutcomeModel.Compute(new OutcomeInput(409, "duplicate_submission"));
+        Assert.Equal(DisplayOutcome.DuplicateSubmission, v.Outcome);
+        Assert.Equal("unknown", v.PillKind);
     }
 }
 
@@ -627,13 +1155,13 @@ public sealed class ConnectionLogicTests
         => Assert.NotEqual(ConnectionLogic.GovernedTestPrompt(), ConnectionLogic.GovernedTestPrompt());
 
     [Fact]
-    public void Launch_link_reads_credentials_only_from_the_fragment()
+    public void Launch_link_reads_only_the_admin_token_from_the_fragment_and_ignores_appkey()
     {
         var c = LaunchLink.Parse("http://localhost:5201/ui/connect#token=abc%2B1&appkey=k-2");
         Assert.NotNull(c);
         Assert.Equal("abc+1", c!.AdminToken);
-        Assert.Equal("k-2", c.ApplicationKey);
 
+        Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect#appkey=k-2"));        // application keys are never accepted
         Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect?token=abc"));   // query is sent to the server: never accepted
         Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect"));
         Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect#"));

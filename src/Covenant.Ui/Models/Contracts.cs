@@ -212,6 +212,35 @@ public sealed class AuditEntryView
     [JsonPropertyName("Stream")] public bool? Stream { get; set; }
     [JsonPropertyName("UsageReported")] public bool? UsageReported { get; set; }
     [JsonPropertyName("CostBasis")] public string? CostBasis { get; set; }
+
+    // Audit record v3 (ADR-0012/0013/0014; additive, nullable — absent on older records → "Not recorded").
+    [JsonPropertyName("EventType")] public string? EventType { get; set; }
+    [JsonPropertyName("ConfigVersion")] public int? ConfigVersion { get; set; }
+    [JsonPropertyName("EntryPoint")] public string? EntryPoint { get; set; }
+    [JsonPropertyName("OperatorRef")] public string? OperatorRef { get; set; }
+    [JsonPropertyName("ApplicationId")] public string? ApplicationId { get; set; }
+    [JsonPropertyName("ProfileId")] public string? ProfileId { get; set; }
+    [JsonPropertyName("BaselineClassification")] public string? BaselineClassification { get; set; }
+    [JsonPropertyName("Attempts")] public List<AuditAttemptView>? Attempts { get; set; }
+    /// <summary>Compact persisted trace. Kept as raw JSON elements because the summary may be objects
+    /// ({Stage, State, DurationMs}) or "stage:state:ms" strings; Logic/TraceModel.FromAuditSummary reads both, so an
+    /// unexpected shape degrades to "Not recorded" instead of breaking the whole record.</summary>
+    [JsonPropertyName("Trace")] public List<System.Text.Json.JsonElement>? Trace { get; set; }
+    [JsonPropertyName("ReservedUsd")] public decimal? ReservedUsd { get; set; }
+    [JsonPropertyName("SettledUsd")] public decimal? SettledUsd { get; set; }
+}
+
+/// <summary>One provider attempt recorded on an audit v3 record (fallback evidence).</summary>
+public sealed class AuditAttemptView
+{
+    [JsonPropertyName("AttemptId")] public string? AttemptId { get; set; }
+    [JsonPropertyName("ConnectionId")] public string? ConnectionId { get; set; }
+    [JsonPropertyName("ModelId")] public string? ModelId { get; set; }
+    [JsonPropertyName("Outcome")] public string? Outcome { get; set; }
+    [JsonPropertyName("ErrorClass")] public string? ErrorClass { get; set; }
+    [JsonPropertyName("DurationMs")] public double? DurationMs { get; set; }
+    [JsonPropertyName("CostUsd")] public decimal? CostUsd { get; set; }
+    [JsonPropertyName("CostBasis")] public string? CostBasis { get; set; }
 }
 
 public sealed class AttributionTagsView
@@ -286,15 +315,8 @@ public sealed class ProbeResponse
     [JsonPropertyName("checked_utc")] public DateTimeOffset? CheckedUtc { get; set; }
 }
 
-// ---- Governed inference (/v1/chat/completions, OpenAI wire) — sent with an APPLICATION key, never the admin token. ----
-
-public sealed class ChatRequestDto
-{
-    [JsonPropertyName("model")] public string? Model { get; set; }
-    [JsonPropertyName("messages")] public List<ChatMessageDto> Messages { get; set; } = [];
-    [JsonPropertyName("stream")] public bool Stream { get; set; }
-    [JsonPropertyName("max_tokens")] public int? MaxTokens { get; set; }
-}
+// ---- Inference wire (OpenAI chat shape). Console inference posts PlaygroundRequestDto (ConfigContracts.cs) to
+// /admin/playground/requests with the admin token; the response contract is exactly /v1/chat/completions. ----
 
 public sealed class ChatMessageDto
 {
@@ -366,7 +388,22 @@ public sealed class StreamFrameDto
 [JsonSerializable(typeof(CatalogResponse))]
 [JsonSerializable(typeof(ProbeRequest))]
 [JsonSerializable(typeof(ProbeResponse))]
-[JsonSerializable(typeof(ChatRequestDto))]
 [JsonSerializable(typeof(ChatResponseDto))]
 [JsonSerializable(typeof(StreamFrameDto))]
+// v2 (ConfigContracts.cs)
+[JsonSerializable(typeof(ConfigEnvelopeDto))]
+[JsonSerializable(typeof(CovenantConfigDto))]
+[JsonSerializable(typeof(ConfigValidateRequestDto))]
+[JsonSerializable(typeof(ConfigValidationResultDto))]
+[JsonSerializable(typeof(ConfigPutRequestDto))]
+[JsonSerializable(typeof(ConfigPutResponseDto))]
+[JsonSerializable(typeof(List<ConfigVersionDto>))]
+[JsonSerializable(typeof(ConfigRollbackRequestDto))]
+[JsonSerializable(typeof(List<ApplicationSummaryDto>))]
+[JsonSerializable(typeof(PlaygroundRequestDto))]
+[JsonSerializable(typeof(TraceEventDto))]
+[JsonSerializable(typeof(TraceSnapshotDto))]
+[JsonSerializable(typeof(List<BudgetStateDto>))]
+[JsonSerializable(typeof(SimulateRequestDto))]
+[JsonSerializable(typeof(SimulateResponseDto))]
 public partial class UiJsonContext : JsonSerializerContext;

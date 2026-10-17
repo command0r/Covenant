@@ -55,7 +55,7 @@
         </form>
 
         <div class="secondary muted" style="display:flex;flex-direction:column;gap:6px">
-            <span>This is a shared admin token, not a personal account. It administers the console only — it never authorizes model requests. Applications send their own keys.</span>
+            <span>This is a shared admin token, not a personal account. Console requests run as an authorized test application chosen in the Playground; application keys never enter the console.</span>
             <span class="subtle">Kept in this tab’s session storage; closing the tab disconnects.</span>
         </div>
     </main>
@@ -85,7 +85,7 @@
                 return new("bad", "Token rejected", "The Host refused the admin token. Enter the current token to reconnect.");
             if (m.StartsWith("Connection lost", StringComparison.Ordinal))
                 return new("warn", "Connection lost", m + ". The Host did not answer; try again when it is reachable.");
-            return new("info", "Disconnected", "The token and any application key were cleared from this tab. Covenant itself keeps running — disconnecting never pauses it.");
+            return new("info", "Disconnected", "The admin token, prompts and responses were cleared from this tab. Covenant itself keeps running — disconnecting never pauses it.");
         }
     }
 
@@ -97,10 +97,10 @@
     {
         if (!firstRender || LaunchLink.Parse(Nav.Uri) is not { } launch) return;
         Nav.NavigateTo("connect", forceLoad: false, replace: true);
-        if (launch.ApplicationKey is { } key) State.SetApplicationKey(key);
-        if (launch.AdminToken is { } token && !State.Connected)
+        // Admin token only: an "appkey=" from an older launcher is ignored (ADR-0012 — no application key in the console).
+        if (!State.Connected)
         {
-            _token = token;
+            _token = launch.AdminToken;
             await ConnectAsync();
             StateHasChanged();
         }

@@ -20,7 +20,8 @@ public sealed class Interop(IJSRuntime js)
     public ValueTask TrapFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "trapFocus", containerId);
     public ValueTask ReleaseFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "releaseFocus", containerId);
 
-    /// <summary>Copies a non-secret identifier (request id) to the clipboard. Returns false if the browser refused.</summary>
+    /// <summary>Copies text the operator explicitly chose to copy (a request id or the response shown on screen —
+    /// never a credential) to the clipboard. Returns false if the browser refused.</summary>
     public ValueTask<bool> CopyTextAsync(string text) => js.InvokeAsync<bool>(Prefix + "copyText", text);
 
     public ValueTask DownloadTextAsync(string fileName, string contentType, string text)

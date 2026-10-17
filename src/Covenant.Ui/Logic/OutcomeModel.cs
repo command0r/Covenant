@@ -21,16 +21,21 @@ public enum DisplayOutcome
     RejectedBeforeGovernance,
     Cancelled,
     Unknown,
+    /// <summary>409 duplicate_submission: the Host already has a request with this client_request_id and did
+    /// NOT run it again (a reload or double-click never replays inference).</summary>
+    DuplicateSubmission,
 }
 
 /// <summary>Everything the client observed about one request. <see cref="Record"/> is the audit record once it
-/// has been found (null before that, or for a request that never reached the pipeline).</summary>
+/// has been found (null before that, or for a request that never reached the pipeline).
+/// <see cref="HasPartialText"/>: some response text had arrived before a cancel or failure (it is kept).</summary>
 public sealed record OutcomeInput(
     int? HttpStatus = null,
     string? ErrorCode = null,
     bool StreamTerminatedWithError = false,
     bool Cancelled = false,
-    AuditEntryView? Record = null);
+    AuditEntryView? Record = null,
+    bool HasPartialText = false);
 
 /// <param name="Outcome">Display outcome.</param>
 /// <param name="Title">Large outcome text.</param>
@@ -52,6 +57,15 @@ public static class OutcomeModel
 {
     public const string CancelledExplanation =
         "Stopped waiting — the request may have completed or been charged; this is not a rollback.";
+
+    public const string PartialTitle = "Cancelled — partial response";
+
+    public const string PartialCancelExplanation =
+        "Cancelled — partial response; the provider may have charged for work done. The text received so far is kept; this is not a rollback.";
+
+    private static string CancelTitle(OutcomeInput i) => i.HasPartialText ? PartialTitle : "Cancelled — no response received";
+
+    private static string CancelText(OutcomeInput i) => i.HasPartialText ? PartialCancelExplanation : CancelledExplanation;
 
     public static OutcomeView FromRecord(AuditEntryView record) => Compute(new OutcomeInput(Record: record));
 
@@ -77,6 +91,7 @@ public static class OutcomeModel
         DisplayOutcome.Unsupported => "Unsupported request",
         DisplayOutcome.RejectedBeforeGovernance => "Rejected before governance",
         DisplayOutcome.Cancelled => "Cancelled / incomplete",
+        DisplayOutcome.DuplicateSubmission => "Duplicate submission (not re-run)",
         _ => "Unknown",
     };
 
@@ -113,7 +128,7 @@ public static class OutcomeModel
     private static OutcomeView FromTransport(OutcomeInput input, string statusLine)
     {
         if (input.Cancelled)
-            return Make(input, DisplayOutcome.Cancelled, "Cancelled / incomplete", CancelledExplanation, statusLine);
+            return Make(input, DisplayOutcome.Cancelled, CancelTitle(input), CancelText(input), statusLine);
 
         if (input.StreamTerminatedWithError)
             return Make(input, DisplayOutcome.ProviderFailedMidStream, "Provider failed mid-stream",
@@ -131,8 +146,16 @@ public static class OutcomeModel
                     statusLine, awaiting: true);
             case 401:
                 return Make(input, DisplayOutcome.AuthenticationFailed, "Authentication failed",
-                    "No valid application key was presented. The request stopped at authentication: classification was not evaluated.",
+                    "The credential was not accepted. The request stopped at authentication: classification was not evaluated.",
                     statusLine);
+            case 404:
+                return Make(input, DisplayOutcome.Unknown, "Console inference not available",
+                    "This Host does not expose POST /admin/playground/requests (an older appliance version). Nothing was run.",
+                    statusLine, pill: "unknown");
+            case 409:
+                return Make(input, DisplayOutcome.DuplicateSubmission, "Already submitted — not run again",
+                    "Covenant already received a request with this client request id and did not run it a second time. The original request id is shown below.",
+                    statusLine, pill: "unknown");
             case 429:
                 return Make(input, DisplayOutcome.RateLimited, "Rate limited",
                     "A configured request-rate limit refused this request before any provider call.", statusLine);
@@ -145,13 +168,13 @@ public static class OutcomeModel
                     statusLine);
             case 403:
                 return Make(input, DisplayOutcome.Unknown, "Refused (HTTP 403) — awaiting evidence for the stage",
-                    "Covenant refused this request. Which stage refused it (policy, pause, budget or provider registration) is known only from the audit record.",
+                    "Covenant refused this request. Which stage refused it (application authorization, policy, pause, budget or provider registration) is known only from the audit record.",
                     statusLine, awaiting: true, pill: "refused");
             case 499:
-                return Make(input, DisplayOutcome.Cancelled, "Cancelled / incomplete", CancelledExplanation, statusLine);
+                return Make(input, DisplayOutcome.Cancelled, CancelTitle(input), CancelText(input), statusLine);
             case 502:
                 return Make(input, DisplayOutcome.ProviderUnavailable, "Provider unavailable",
-                    "The provider call failed or the provider could not be reached. Covenant refused fail-closed; there is no fallback model.",
+                    "The provider call failed or the provider could not be reached, and no approved fallback served it. Covenant refused fail-closed. The audit record lists each attempt.",
                     statusLine);
             default:
                 return Make(input, DisplayOutcome.Unknown, "Unexpected response",
@@ -169,7 +192,9 @@ public static class OutcomeModel
                 return Make(input, DisplayOutcome.ServedFromCache, "Served from cache",
                     "An identical earlier request's response was reused. No provider call was made, so the pause control does not apply to it." + tail,
                     statusLine);
-            return Make(input, DisplayOutcome.Served, "Served", "Allowed by policy and answered by the provider." + tail, statusLine);
+            var fallback = AttemptFacts.FallbackSentence(r);
+            return Make(input, DisplayOutcome.Served, fallback is null ? "Served" : "Served by approved fallback",
+                "Allowed by policy and answered by the provider." + (fallback is null ? "" : " " + fallback) + tail, statusLine);
         }
 
         if (!string.Equals(r.Effect, "Deny", StringComparison.OrdinalIgnoreCase))
@@ -186,15 +211,16 @@ public static class OutcomeModel
             case "Unsupported":
                 return Make(input, DisplayOutcome.Unsupported, "Unsupported request", reason, statusLine);
             case "Cancelled":
-                return Make(input, DisplayOutcome.Cancelled, "Cancelled / incomplete",
-                    CancelledExplanation + " Recorded: " + reason, statusLine);
+                return Make(input, DisplayOutcome.Cancelled, CancelTitle(input),
+                    CancelText(input) + " Recorded: " + reason, statusLine);
             case "UpstreamFailure":
                 bool midStream = input.StreamTerminatedWithError || input.HttpStatus == 200;
+                var attempts = AttemptFacts.CountSentence(r);
                 return midStream
                     ? Make(input, DisplayOutcome.ProviderFailedMidStream, "Provider failed mid-stream",
-                        "HTTP 200 was already sent when the provider failed: " + reason + ". Any text shown is partial.", statusLine)
+                        "HTTP 200 was already sent when the provider failed: " + reason + ". Any text shown is partial; no other provider continued the answer.", statusLine)
                     : Make(input, DisplayOutcome.ProviderUnavailable, "Provider call failed",
-                        reason + ". Covenant refused fail-closed; there is no fallback model.", statusLine);
+                        reason + ". Covenant refused fail-closed." + (attempts is null ? "" : " " + attempts), statusLine);
         }
 
         // Governance (or a legacy record without DenialKind): the recorded stage decides — never the reason text.
@@ -205,7 +231,7 @@ public static class OutcomeModel
                     "The operator pause is on, so this request was refused before any provider call. " + reason, statusLine);
             case "provider" when r.AttemptedModel is null:
                 return Make(input, DisplayOutcome.ProviderUnavailable, "Refused — no registered adapter",
-                    "Policy chose a route but no adapter serves it, so no provider call was made (fail-closed, no fallback). " + reason,
+                    "Policy chose a route but no adapter serves it, so no provider call was made (fail-closed). " + reason,
                     statusLine);
             case "budget":
                 return Make(input, DisplayOutcome.PolicyDenied, "Refused — budget exhausted", reason, statusLine);

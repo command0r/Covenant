@@ -77,7 +77,7 @@
       delete traps[containerId];
     },
 
-    // Copy a request id (never a secret) to the clipboard. Resolves true on success.
+    // Copy operator-selected text (a request id or the visible response — never a credential). Resolves true on success.
     copyText: function (text) {
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {

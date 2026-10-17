@@ -47,6 +47,49 @@ public sealed class AdminApi(HttpClient http, AppState state)
         => PostAsync("/admin/providers/probe", new ProbeRequest { Endpoint = endpoint },
             UiJsonContext.Default.ProbeRequest, UiJsonContext.Default.ProbeResponse, ct);
 
+    // ---- v2 (docs/ui-api-contract.md "v2 additions") ----
+
+    public Task<List<ApplicationSummaryDto>> GetApplicationsAsync(CancellationToken ct = default)
+        => GetAsync("/admin/applications", UiJsonContext.Default.ListApplicationSummaryDto, ct);
+
+    public Task<ConfigEnvelopeDto> GetConfigAsync(CancellationToken ct = default)
+        => GetAsync("/admin/config", UiJsonContext.Default.ConfigEnvelopeDto, ct);
+
+    public Task<List<BudgetStateDto>> GetBudgetsAsync(CancellationToken ct = default)
+        => GetAsync("/admin/budgets", UiJsonContext.Default.ListBudgetStateDto, ct);
+
+    public Task<TraceSnapshotDto> GetTraceAsync(string requestId, CancellationToken ct = default)
+        => GetAsync("/admin/requests/" + Uri.EscapeDataString(requestId) + "/trace", UiJsonContext.Default.TraceSnapshotDto, ct);
+
+    /// <summary>Opens the per-request trace SSE stream (replay then live). <paramref name="lastEventId"/> &gt; 0 is
+    /// sent as Last-Event-ID so a reconnect resumes after the last applied seq. Throws ApiException with the status
+    /// (404 unknown/expired, 410 expired) on a non-success answer.</summary>
+    public async Task<HttpResponseMessage> OpenTraceStreamAsync(string requestId, long lastEventId, CancellationToken ct)
+    {
+        var request = NewRequest(HttpMethod.Get, "/admin/requests/" + Uri.EscapeDataString(requestId) + "/trace/stream");
+        request.Headers.Accept.ParseAdd("text/event-stream");
+        if (lastEventId > 0)
+            request.Headers.TryAddWithoutValidation("Last-Event-ID", lastEventId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Microsoft.AspNetCore.Components.WebAssembly.Http.WebAssemblyHttpRequestMessageExtensions
+            .SetBrowserResponseStreamingEnabled(request, true);
+        // Not disposed here (same as the status stream): the browser keeps reading the body after headers.
+        var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
+        try
+        {
+            await EnsureSuccessAsync(response, ct);
+        }
+        catch
+        {
+            response.Dispose();
+            throw;
+        }
+        return response;
+    }
+
+    /// <summary>For callers that send their own admin requests (console inference): a 401 there means the admin
+    /// token was rejected, which is handled exactly like any other admin 401.</summary>
+    public void ReportUnauthorized() => Unauthorized?.Invoke();
+
     /// <summary>Raw GET returning the body text — used by Evidence export so the downloaded file is byte-for-byte
     /// what the server produced, not a re-serialization.</summary>
     public async Task<string> GetEvidenceJsonAsync(CancellationToken ct = default)
