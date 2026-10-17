@@ -1,0 +1,348 @@
+@inject ConfigEditor Editor
+
+@* Review round 3: "Applications & workload profiles" under Policies. Minimal — no enterprise IAM. Profiles: list, create,
+   edit name/description/baseline, remove (impact first; refused while an application's default or a policy's only
+   profile). Applications: EXISTING ones only (keys are startup secrets) — team, enabled, console testing, granted profiles,
+   default profile (must be granted), max output tokens. Every change edits the shared "policies" DRAFT; Preview impact →
+   Save & apply via ConfigEditor (If-Match). The baseline is server configuration; there is no client-side classification
+   control anywhere in the console. Pure rules: Logic/ProfileEditing.cs; the Host's validation stays authoritative. *@
+
+<section class="panel flush" id="applications" tabindex="-1" aria-labelledby="ap-h">
+    <div class="panel-head">
+        <h2 id="ap-h">Applications &amp; workload profiles</h2>
+        <span class="panel-sub">@(Editing ? "Editing the draft" : "Read-only — choose Edit above")</span>
+    </div>
+    <div class="pad profile-intro">
+        <span class="secondary">Each profile carries a server-side trusted baseline; detection can only escalate it. The Playground offers only the profiles granted to the chosen application.</span>
+        <details class="tech">
+            <summary>About profiles and applications</summary>
+            <ul class="plain-list secondary">
+                <li>@ProfileEditing.BaselineExplained</li>
+                <li>@ProfileEditing.PlaygroundExplained</li>
+                <li>@ProfileEditing.ApplicationsExplained</li>
+                <li>A request without a profile uses the application's default profile, or the built-in <span class="mono">@ProfileEditing.LegacyInternal</span> (baseline Internal) when none is set.</li>
+                <li>The console checks grants and defaults before you preview; the Host's validation on Preview impact and Save &amp; apply is authoritative.</li>
+            </ul>
+        </details>
+    </div>
+
+    @* ---- Workload profiles ---- *@
+    <div class="sub-head pad">
+        <h3 id="wp-h">Workload profiles</h3>
+        @if (Editing && _newProfile is null)
+        {
+            <button type="button" class="btn sm" @onclick="StartCreate">Create profile…</button>
+        }
+    </div>
+    @if (Editing && _newProfile is { } np)
+    {
+        var npProblems = ProfileEditing.Problems(np, Cfg);
+        <div class="policy-create pad" role="group" aria-labelledby="npf-h">
+            <h3 id="npf-h">New workload profile (draft)</h3>
+            <div class="form-grid">
+                <div class="field">
+                    <label for="npf-id">Profile id</label>
+                    <input id="npf-id" class="input mono" @bind="np.Id" @bind:event="oninput" spellcheck="false" />
+                </div>
+                <div class="field">
+                    <label for="npf-name">Name</label>
+                    <input id="npf-name" class="input" @bind="np.Name" @bind:event="oninput" />
+                </div>
+                <div class="field">
+                    <label for="npf-base">Trusted baseline</label>
+                    <select id="npf-base" class="input" @bind="np.Baseline">
+                        @foreach (var b in ProfileEditing.Baselines)
+                        {
+                            <option value="@b">@PolicyText.ClassificationLabel(b)</option>
+                        }
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="npf-desc">Description (optional)</label>
+                    <input id="npf-desc" class="input" @bind="np.Description" @bind:event="oninput" />
+                </div>
+            </div>
+            <span class="help">A new profile is granted to no application; grant it below.</span>
+            @if (npProblems.Count > 0)
+            {
+                <ul class="plain-list secondary warn-text" aria-live="polite">
+                    @foreach (var pp in npProblems) { <li>@pp</li> }
+                </ul>
+            }
+            <div class="btn-row">
+                <button type="button" class="btn primary" disabled="@(npProblems.Count > 0)" @onclick="() => AddProfileAsync(np)">Add to draft and preview impact</button>
+                <button type="button" class="btn" @onclick="() => _newProfile = null">Cancel</button>
+            </div>
+        </div>
+    }
+    @if (Cfg.Profiles.Count == 0)
+    {
+        <div class="pad"><span class="secondary muted">No workload profiles are declared. Requests run with the built-in <span class="mono">@ProfileEditing.LegacyInternal</span> profile (baseline Internal).</span></div>
+    }
+    <ul class="policy-list" aria-labelledby="wp-h">
+        @foreach (var p in Cfg.Profiles)
+        {
+            var prof = p;
+            var pi = Cfg.Profiles.IndexOf(prof);
+            var usage = ProfileEditing.Usage(Cfg, prof.Id);
+            var key = "p:" + prof.Id;
+            <li class="policy-item">
+                <div class="policy-head">
+                    <div class="conn-title">
+                        <strong class="wrap-any">@(string.IsNullOrWhiteSpace(prof.Name) ? prof.Id : prof.Name)</strong>
+                        <span class="secondary subtle"><span class="mono">@prof.Id</span> · @("baseline " + PolicyText.ClassificationLabel(prof.Baseline) + (string.IsNullOrWhiteSpace(prof.Description) ? "" : " · " + prof.Description))</span>
+                    </div>
+                    @if (Editing)
+                    {
+                        <button type="button" class="btn ghost sm" @onclick="() => AskRemove(prof.Id)">Remove profile…</button>
+                    }
+                </div>
+                <span class="secondary">
+                    Granted to: @(usage.GrantedTo.Count == 0 ? "no application" : string.Join(", ", usage.GrantedTo))
+                    @if (usage.DefaultOf.Count > 0)
+                    {
+                        <span> · default of @string.Join(", ", usage.DefaultOf)</span>
+                    }
+                    @if (usage.ScopedPolicies.Count > 0)
+                    {
+                        <span> · named by policy @string.Join(", ", usage.ScopedPolicies)</span>
+                    }
+                </span>
+                @if (Editing && _removeAsk == prof.Id)
+                {
+                    var blockers = ProfileEditing.RemovalBlockers(Cfg, prof.Id);
+                    <div class="alert @(blockers.Count > 0 ? "warn" : "info")" role="alertdialog" aria-labelledby="@("prm-h-" + prof.Id)">
+                        <div class="alert-text">
+                            <strong id="@("prm-h-" + prof.Id)">@(blockers.Count > 0 ? "Profile " + prof.Id + " cannot be removed yet" : "Remove profile " + prof.Id + " from the draft?")</strong>
+                            <ul class="plain-list secondary">
+                                @foreach (var line in blockers.Count > 0 ? blockers : ProfileEditing.RemovalImpact(Cfg, prof.Id)) { <li>@line</li> }
+                            </ul>
+                            @if (blockers.Count == 0)
+                            {
+                                <span class="alert-body">The Host's impact preview runs right after; nothing is applied until Save &amp; apply.</span>
+                            }
+                        </div>
+                        <div class="btn-row">
+                            @if (blockers.Count == 0)
+                            {
+                                <button type="button" class="btn primary" @onclick="() => RemoveProfileAsync(prof.Id)">Remove and preview impact</button>
+                            }
+                            <button type="button" class="btn" @onclick="() => _removeAsk = null">@(blockers.Count == 0 ? "Keep" : "Close")</button>
+                        </div>
+                    </div>
+                }
+                @if (Editing)
+                {
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="@("pn-" + prof.Id)">Name</label>
+                            <input id="@("pn-" + prof.Id)" class="input" value="@prof.Name" @onchange="@(e => SetName(prof, e))" />
+                        </div>
+                        <div class="field">
+                            <label for="@("pb-" + prof.Id)">Trusted baseline</label>
+                            <select id="@("pb-" + prof.Id)" class="input" value="@prof.Baseline" @onchange="@(e => SetBaseline(prof, e))" aria-describedby="@("pbh-" + prof.Id)">
+                                @if (!ProfileEditing.IsBaseline(prof.Baseline))
+                                {
+                                    <option value="@(prof.Baseline ?? "")" disabled>@(prof.Baseline ?? "Not set")</option>
+                                }
+                                @foreach (var b in ProfileEditing.Baselines)
+                                {
+                                    <option value="@b">@PolicyText.ClassificationLabel(b)</option>
+                                }
+                            </select>
+                            <span id="@("pbh-" + prof.Id)" class="help">Server-side; detection can only raise it.</span>
+                        </div>
+                        <div class="field">
+                            <label for="@("pd-" + prof.Id)">Description</label>
+                            <input id="@("pd-" + prof.Id)" class="input" value="@prof.Description" @onchange="@(e => SetDescription(prof, e))" />
+                        </div>
+                    </div>
+                }
+                @if (_errors.TryGetValue(key, out var perr))
+                {
+                    <span class="note bad" role="status">@perr</span>
+                }
+                <FieldIssues Issues="@Editor.Issues" Path="@IssueIndex.Profile(pi)" />
+            </li>
+        }
+    </ul>
+
+    @* ---- Applications (existing only) ---- *@
+    <div class="sub-head pad">
+        <h3 id="apps-h">Applications</h3>
+        <span class="secondary subtle">Existing applications only — keys are startup secrets (Auth:Keys).</span>
+    </div>
+    @if (Cfg.Applications.Count == 0)
+    {
+        <div class="pad"><span class="secondary muted">No applications are configured. Applications and their keys are defined at startup.</span></div>
+    }
+    <ul class="policy-list" aria-labelledby="apps-h">
+        @foreach (var a in Cfg.Applications)
+        {
+            var app = a;
+            var ai = Cfg.Applications.IndexOf(app);
+            var key = "a:" + app.Id;
+            var appProblems = ProfileEditing.ApplicationProblems(app, Cfg);
+            <li class="policy-item">
+                <div class="policy-head">
+                    <div class="conn-title">
+                        <strong class="mono wrap-any">@app.Id</strong>
+                        <span class="secondary subtle">team <span class="mono">@app.Team</span> · max output @(app.MaxOutputTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "server default") tokens</span>
+                    </div>
+                    <StatusPill Kind="@(app.Enabled ? "served" : "unknown")" Text="@(app.Enabled ? "Enabled" : "Disabled")" />
+                    <StatusPill Kind="@(app.ConsoleTesting ? "served" : "unknown")" Text="@(app.ConsoleTesting ? "Console testing allowed" : "No console testing")" />
+                </div>
+                @if (!Editing)
+                {
+                    <span class="secondary">Granted: @(app.GrantedProfiles.Count == 0 ? "no profile" : string.Join(", ", app.GrantedProfiles.Select(g => ProfileEditing.Label(Cfg, g))))</span>
+                    <span class="secondary">Default: @ProfileEditing.DefaultText(Cfg, app)</span>
+                }
+                else
+                {
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="@("at-" + app.Id)">Team</label>
+                            <input id="@("at-" + app.Id)" class="input mono" value="@app.Team" @onchange="@(e => SetTeam(app, e))" spellcheck="false" />
+                        </div>
+                        <div class="field">
+                            <label for="@("am-" + app.Id)">Max output tokens (enforced)</label>
+                            <input id="@("am-" + app.Id)" class="input mono" type="number" min="1" value="@(app.MaxOutputTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "")" @onchange="@(e => SetMax(app, e))" />
+                        </div>
+                        <div class="field">
+                            <label for="@("ad-" + app.Id)">Default profile</label>
+                            <select id="@("ad-" + app.Id)" class="input" value="@(app.DefaultProfile ?? "")" @onchange="@(e => SetDefault(app, e))">
+                                <option value="">None — built-in @ProfileEditing.LegacyInternal (Internal)</option>
+                                @foreach (var g in app.GrantedProfiles)
+                                {
+                                    <option value="@g">@ProfileEditing.Label(Cfg, g)</option>
+                                }
+                            </select>
+                            <span class="help">Only granted profiles can be the default.</span>
+                        </div>
+                    </div>
+                    <div class="btn-row">
+                        <label class="switch"><input type="checkbox" checked="@app.Enabled" @onchange="@(e => SetEnabled(app, e))" /> Enabled</label>
+                        <label class="switch"><input type="checkbox" checked="@app.ConsoleTesting" @onchange="@(e => SetConsoleTesting(app, e))" /> Console testing allowed (Playground may run as this application)</label>
+                    </div>
+                    <fieldset class="inline-fieldset">
+                        <legend class="field-label">Granted profiles</legend>
+                        @foreach (var g in ProfileEditing.GrantOptions(Cfg, app))
+                        {
+                            var gid = g;
+                            var isDefault = string.Equals(app.DefaultProfile, gid, StringComparison.Ordinal);
+                            <label class="switch" title="@(isDefault ? "Default profile — choose another default before revoking" : null)">
+                                <input type="checkbox" checked="@app.GrantedProfiles.Contains(gid)" disabled="@isDefault" @onchange="@(e => SetGrant(app, gid, e))" />
+                                @(ProfileEditing.Label(Cfg, gid) + (isDefault ? " · default" : ""))
+                            </label>
+                        }
+                    </fieldset>
+                }
+                @if (_errors.TryGetValue(key, out var aerr))
+                {
+                    <span class="note bad" role="status">@aerr</span>
+                }
+                @if (Editing && appProblems.Count > 0)
+                {
+                    <ul class="plain-list secondary warn-text">
+                        @foreach (var ap in appProblems) { <li>@ap</li> }
+                    </ul>
+                }
+                <FieldIssues Issues="@Editor.Issues" Path="@IssueIndex.Application(ai)" />
+            </li>
+        }
+    </ul>
+</section>
+
+@code {
+    /// <summary>The configuration shown: the draft while editing, else the applied one.</summary>
+    [Parameter, EditorRequired] public CovenantConfigDto Cfg { get; set; } = default!;
+    /// <summary>True while the Policies page owns the draft.</summary>
+    [Parameter] public bool Editing { get; set; }
+
+    private readonly Dictionary<string, string> _errors = new(StringComparer.Ordinal);
+    private NewProfileForm? _newProfile;
+    private string? _removeAsk;
+
+    private void StartCreate()
+    {
+        _newProfile = new NewProfileForm { Id = ProfileEditing.UniqueId("profile", Cfg), Baseline = "Internal" };
+        _removeAsk = null;
+    }
+
+    private async Task AddProfileAsync(NewProfileForm f)
+    {
+        if (!Editing || Editor.Draft is not { } d) return;
+        if (ProfileEditing.Add(d, f).Count > 0) return;
+        _newProfile = null;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void AskRemove(string profileId)
+    {
+        _removeAsk = profileId;
+        _newProfile = null;
+    }
+
+    private async Task RemoveProfileAsync(string profileId)
+    {
+        _removeAsk = null;
+        if (!Editing || Editor.Draft is not { } d) return;
+        if (ProfileEditing.Remove(d, profileId) is { } problem)
+        {
+            _errors["p:" + profileId] = problem;
+            return;
+        }
+        _errors.Remove("p:" + profileId);
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void SetName(WorkloadProfileDto p, ChangeEventArgs e) => Result("p:" + p.Id, ProfileEditing.SetName(p, e.Value?.ToString()));
+
+    private void SetBaseline(WorkloadProfileDto p, ChangeEventArgs e) => Result("p:" + p.Id, ProfileEditing.SetBaseline(p, e.Value?.ToString()));
+
+    private void SetDescription(WorkloadProfileDto p, ChangeEventArgs e)
+    {
+        ProfileEditing.SetDescription(p, e.Value?.ToString());
+        Result("p:" + p.Id, null);
+    }
+
+    private void SetTeam(ApplicationDto a, ChangeEventArgs e) => Result("a:" + a.Id, ProfileEditing.SetTeam(a, e.Value?.ToString()));
+
+    private void SetMax(ApplicationDto a, ChangeEventArgs e)
+    {
+        int? value = int.TryParse(e.Value?.ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : null;
+        Result("a:" + a.Id, ProfileEditing.SetMaxOutputTokens(a, value));
+    }
+
+    private void SetDefault(ApplicationDto a, ChangeEventArgs e) => Result("a:" + a.Id, ProfileEditing.SetDefault(a, e.Value?.ToString()));
+
+    private void SetGrant(ApplicationDto a, string profileId, ChangeEventArgs e)
+        => Result("a:" + a.Id, ProfileEditing.SetGrant(a, profileId, e.Value is bool b && b, Cfg));
+
+    private void SetEnabled(ApplicationDto a, ChangeEventArgs e)
+    {
+        a.Enabled = e.Value is bool b && b;
+        Result("a:" + a.Id, null);
+    }
+
+    private void SetConsoleTesting(ApplicationDto a, ChangeEventArgs e)
+    {
+        a.ConsoleTesting = e.Value is bool b && b;
+        Result("a:" + a.Id, null);
+    }
+
+    /// <summary>Null = the edit was applied to the draft (preview becomes stale); otherwise the refusal is shown and the
+    /// draft is untouched.</summary>
+    private void Result(string key, string? error)
+    {
+        if (!Editing) return;
+        if (error is null)
+        {
+            _errors.Remove(key);
+            Editor.Touch();
+        }
+        else _errors[key] = error;
+    }
+}

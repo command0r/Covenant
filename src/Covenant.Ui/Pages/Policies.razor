@@ -2,6 +2,8 @@
 @inject AppState State
 @inject ConfigEditor Editor
 @inject WorkspaceConfig Ws
+@inject NavigationManager Nav
+@inject Interop Interop
 @implements IDisposable
 
 <PageTitle>Policies · Covenant</PageTitle>
@@ -12,6 +14,8 @@
   policy, remove one (impact shown first), edit classification/profile applicability, targets, order, pause/resume, retry,
   and "Split this policy" (Public → cloud + local fallback; Internal/PII/PHI → local). Every change edits the DRAFT only;
   Preview impact → Save & apply via ConfigEditor. Cloud targets are never offered for PII/PHI. Simulator = dry run.
+  Review round 3: "Applications & workload profiles" (Components/ProfilesEditor.razor, #applications) edits profiles and
+  existing applications' grants in the same draft.
 *@
 
 <div class="page">
@@ -30,7 +34,7 @@
         </div>
 
         <EditorBar Owner="policies" Subject="Policies" ClaimedPaths="@ClaimedPaths"
-                   ViewHint="Viewing the applied routing. Edit to change targets, order, pauses or mode." />
+                   ViewHint="Viewing the applied routing. Edit to change targets, order, pauses, mode, profiles or application grants." />
 
         @if (Editor.Current is not { } cfg)
         {
@@ -422,6 +426,8 @@
                 </ul>
             </section>
 
+            <ProfilesEditor Cfg="cfg" Editing="Editing" />
+
             <PolicySimulator Applications="@Ws.Applications" Profiles="@cfg.Profiles" Draft="@(Editor.IsDirty ? Editor.Draft : null)" AppliedVersion="@Editor.AppliedVersion" />
         }
     </RequiresConnection>
@@ -451,7 +457,23 @@
     private bool Editing => Editor.Editing && Editor.Owner == "policies";
     private bool CanStartEdit => Editor.Applied is not null && !Editor.Saving && (!Editor.IsDirty || Editor.Owner == "policies");
 
-    private IReadOnlyList<string> ClaimedPaths => Editor.Current is { } c ? Enumerable.Range(0, c.Policies.Count).Select(IssueIndex.Policy).ToList() : [];
+    private IReadOnlyList<string> ClaimedPaths => Editor.Current is { } c
+        ? Enumerable.Range(0, c.Policies.Count).Select(IssueIndex.Policy)
+            .Concat(Enumerable.Range(0, c.Profiles.Count).Select(IssueIndex.Profile))
+            .Concat(Enumerable.Range(0, c.Applications.Count).Select(IssueIndex.Application)).ToList()
+        : [];
+
+    // policies#applications (linked from Settings): focus the section once it has rendered (focus scrolls it into view).
+    private bool _anchorDone;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_anchorDone || Editor.Current is null) return;
+        _anchorDone = true;
+        if (!new Uri(Nav.Uri).Fragment.Equals("#applications", StringComparison.OrdinalIgnoreCase)) return;
+        try { await Interop.FocusElementAsync("applications"); }
+        catch (JSException) { /* best effort */ }
+    }
 
     protected override async Task OnInitializedAsync()
     {

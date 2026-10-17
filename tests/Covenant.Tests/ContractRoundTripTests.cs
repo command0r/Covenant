@@ -1225,4 +1225,82 @@ public sealed class ContractRoundTripTests
         using var doc = JsonDocument.Parse(json);
         return doc.RootElement.Clone();
     }
+
+    // ---- Review round 3 (UI): the profile/grant editor builds drafts the Host's validation accepts ----
+
+    private static Covenant.Governance.ValidationEnvironment PermissiveEnvironment() => new()
+    {
+        EgressAllowList = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ollama-host:11434", "vllm-host:8000", "api.openai.com:443", "api.anthropic.com:443" },
+        SecretAvailable = _ => true,
+        LocalEndpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ollama-host:11434", "vllm-host:8000" },
+    };
+
+    /// <summary>Console draft → PUT body (UiJsonContext) → Host ConfigPutRequest → ConfigValidator.</summary>
+    private static (CovenantConfig Host, Covenant.Governance.ConfigValidationResult Result) HostValidates(UiModels.CovenantConfigDto draft)
+    {
+        var body = JsonSerializer.Serialize(new UiModels.ConfigPutRequestDto { Config = draft, ChangeSummary = "profiles" }, UiModels.UiJsonContext.Default.ConfigPutRequestDto);
+        var put = JsonSerializer.Deserialize(body, ConfigJsonContext.Default.ConfigPutRequest);
+        Assert.NotNull(put?.Config);
+        var config = put!.Config!;
+        var result = Covenant.Governance.ConfigValidator.Validate(config, PermissiveEnvironment());
+        Assert.True(result.StructurallySound, string.Join("; ", result.Errors.Select(e => e.Path + ": " + e.Code)));
+        return (config, result);
+    }
+
+    private static bool ProfileOrGrantPath(string path)
+        => path.StartsWith("profiles", StringComparison.Ordinal) || path.StartsWith("applications", StringComparison.Ordinal) || path.Contains(".profiles", StringComparison.Ordinal);
+
+    [Fact]
+    public void Profile_and_grant_edits_made_by_the_console_pass_host_validation()
+    {
+        var (_, envelope, _, _) = RoundTrip(Representative(ProviderMode.Hybrid));
+        var draft = envelope.Config!;
+
+        Assert.Empty(Covenant.Ui.Logic.ProfileEditing.Add(draft, new Covenant.Ui.Logic.NewProfileForm { Id = "support", Name = "Support tickets", Baseline = "Public", Description = "Synthetic" }));
+        var demo = Covenant.Ui.Logic.ProfileEditing.FindApplication(draft, "demo-app")!;
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.SetGrant(demo, "support", true, draft));
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.SetDefault(demo, "support"));
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.SetMaxOutputTokens(demo, 128));
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.SetTeam(demo, "payments-ops"));
+        var prod = Covenant.Ui.Logic.ProfileEditing.FindApplication(draft, "prod-app")!;
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.SetGrant(prod, "support", true, draft));
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.SetDefault(prod, "internal"));
+        prod.Enabled = true;
+        prod.ConsoleTesting = true;
+
+        // "clinical" is only granted (no default, no policy) → removable; "public-tickets" is policy 'public''s only
+        // profile → refused client-side (removing it would widen that policy).
+        Assert.Null(Covenant.Ui.Logic.ProfileEditing.Remove(draft, "clinical"));
+        Assert.NotNull(Covenant.Ui.Logic.ProfileEditing.Remove(draft, "public-tickets"));
+        Assert.All(draft.Applications, a => Assert.Empty(Covenant.Ui.Logic.ProfileEditing.ApplicationProblems(a, draft)));
+
+        var (host, result) = HostValidates(draft);
+        Assert.DoesNotContain(result.Errors, e => ProfileOrGrantPath(e.Path));
+        var support = host.Profiles.Single(p => p.Id == "support");
+        Assert.Equal(DataClassification.Public, support.Baseline);
+        Assert.Equal("Synthetic", support.Description);
+        Assert.DoesNotContain(host.Profiles, p => p.Id == "clinical");
+        var hostDemo = host.Applications.Single(a => a.Id == "demo-app");
+        Assert.Equal("support", hostDemo.DefaultProfile);
+        Assert.Equal(128, hostDemo.MaxOutputTokens);
+        Assert.Equal("payments-ops", hostDemo.Team);
+        Assert.DoesNotContain("clinical", hostDemo.GrantedProfiles);
+        var hostProd = host.Applications.Single(a => a.Id == "prod-app");
+        Assert.True(hostProd.Enabled);
+        Assert.True(hostProd.ConsoleTesting);
+        Assert.Equal(new[] { "internal", "support" }, hostProd.GrantedProfiles);
+    }
+
+    [Fact]
+    public void Console_and_host_agree_that_a_default_profile_must_be_granted()
+    {
+        var (_, envelope, _, _) = RoundTrip(Representative(ProviderMode.Hybrid));
+        var draft = envelope.Config!;
+        var prod = Covenant.Ui.Logic.ProfileEditing.FindApplication(draft, "prod-app")!;
+        Assert.NotNull(Covenant.Ui.Logic.ProfileEditing.SetDefault(prod, "customer-pii"));   // the editor refuses
+        prod.DefaultProfile = "customer-pii";                                                  // forced, to compare
+        Assert.NotEmpty(Covenant.Ui.Logic.ProfileEditing.ApplicationProblems(prod, draft));
+        var (_, result) = HostValidates(draft);
+        Assert.Contains(result.Errors, e => e.Code == "default_profile_not_granted");
+    }
 }

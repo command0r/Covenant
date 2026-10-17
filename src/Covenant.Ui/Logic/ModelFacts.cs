@@ -34,7 +34,7 @@ public static class ModelFacts
     public static string Served(AuditEntryView r)
     {
         if (r.CacheHit)
-            return string.IsNullOrWhiteSpace(r.ServedByModel) ? FromCache : FromCache + " · " + r.ServedByModel;
+            return CacheOrigin(r) is { } origin ? FromCache + " · " + origin : FromCache;
         if (!string.IsNullOrWhiteSpace(r.ServedByModel)) return r.ServedByModel;
         return string.Equals(r.Effect, "Deny", StringComparison.OrdinalIgnoreCase) ? "None — not served" : NotRecorded;
     }
@@ -48,6 +48,27 @@ public static class ModelFacts
             return "Not evaluated — stopped at " + PipelineStages.Label(r.StoppedAtStage);
         var cls = string.IsNullOrWhiteSpace(r.Classification) ? NotRecorded : r.Classification;
         return string.IsNullOrWhiteSpace(r.Signal) ? cls + " · no rule matched" : cls + " · " + r.Signal;
+    }
+
+    /// <summary>The FINAL classification for the result facts (Playground + presentation mode, review round 3), with the
+    /// trusted baseline and whether detection escalated it — from the audit record only:
+    /// "PII (baseline Public, escalated: US SSN pattern)", "Internal (baseline Internal, not escalated)",
+    /// "Not evaluated — stopped at Authentication". Never inferred from the request or the profile alone.</summary>
+    public static string ClassificationFact(AuditEntryView r)
+    {
+        if (r.ClassificationEvaluated is null) return NotRecorded;
+        if (r.ClassificationEvaluated == false)
+            return "Not evaluated — stopped at " + PipelineStages.Label(r.StoppedAtStage);
+        if (string.IsNullOrWhiteSpace(r.Classification)) return NotRecorded;
+        var final = PolicyText.ClassificationLabel(r.Classification);
+        var signal = string.IsNullOrWhiteSpace(r.Signal) ? null : r.Signal.Trim();
+        if (string.IsNullOrWhiteSpace(r.BaselineClassification))
+            return final + (signal is null ? " (no detector rule matched; baseline not recorded)" : " (detector: " + signal + "; baseline not recorded)");
+        var baseline = PolicyText.ClassificationLabel(r.BaselineClassification);
+        bool escalated = PolicyText.ClassificationOrder(r.Classification) > PolicyText.ClassificationOrder(r.BaselineClassification);
+        if (escalated)
+            return final + " (baseline " + baseline + ", escalated" + (signal is null ? "" : ": " + signal) + ")";
+        return final + " (baseline " + baseline + ", not escalated" + (signal is null ? "" : "; detector: " + signal) + ")";
     }
 
     /// <summary>The connection's boundary ("Local"/"Cloud") from the configuration, or null when unknown. Pre-v2
@@ -68,8 +89,11 @@ public static class ModelFacts
     {
         if (r.CacheHit)
         {
-            var origin = string.IsNullOrWhiteSpace(r.ServedByModel) ? "" : " (originally " + r.ServedByModel + ")";
-            return new DestinationView("Cache — no provider call" + origin, BoundaryOf(ConnectionPart(r.ServedByModel), connections), true);
+            // Provenance of the cached entry: the connection that produced it (ServedConnectionId) + its model.
+            var originModel = CacheOrigin(r);
+            var origin = originModel is null ? "" : " (originally " + originModel + ")";
+            return new DestinationView("Cache — no provider call" + origin,
+                BoundaryOf(string.IsNullOrWhiteSpace(r.ServedConnectionId) ? ConnectionPart(r.ServedByModel) : r.ServedConnectionId, connections), true);
         }
         if (r.Attempts is { Count: > 0 } attempts)
         {
@@ -84,6 +108,17 @@ public static class ModelFacts
         if (!string.IsNullOrWhiteSpace(r.AttemptedModel))
             return new DestinationView(r.AttemptedModel + " — not served", BoundaryOf(ConnectionPart(r.AttemptedModel), connections), false);
         return new DestinationView(IsV2(r) ? NoProviderCall : NotRecorded, null, false);
+    }
+
+    /// <summary>"connection/model" that produced a cached answer: ServedByModel when it already names the connection,
+    /// else ServedConnectionId + "/" + ServedByModel; null when neither is recorded.</summary>
+    public static string? CacheOrigin(AuditEntryView r)
+    {
+        var model = string.IsNullOrWhiteSpace(r.ServedByModel) ? null : r.ServedByModel.Trim();
+        var conn = string.IsNullOrWhiteSpace(r.ServedConnectionId) ? null : r.ServedConnectionId.Trim();
+        if (model is null) return conn;
+        if (conn is null || ConnectionPart(model) is not null) return model;
+        return conn + "/" + model;
     }
 
     /// <summary>"conn/model" → "conn"; "local:tag" (pre-v2) → "local"; otherwise null.</summary>

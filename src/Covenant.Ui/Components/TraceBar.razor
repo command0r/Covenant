@@ -2,7 +2,9 @@
    state and server-measured duration; provider attempts are counted on the provider chip. Nothing is animated
    from configuration — a chip changes only when an event arrives. Skipped stages are drawn visibly different
    (dashed, "Skipped"). Clicking a chip opens a small popover with state, reason code, duration and attempts;
-   Escape closes it (and does not bubble, so presentation mode stays open). *@
+   Escape closes it (and does not bubble, so presentation mode stays open). Review round 3: two rows of five stages up to
+   1440 px (one row of ten only when wide — CSS container query); state and duration on separate lines so neither clips;
+   the chip's title carries the full text. *@
 
 <div class="trace @(Compact ? "compact" : "")" role="group" aria-label="Request trace">
     <ol class="trace-steps">
@@ -13,10 +15,14 @@
             var open = _open == s.Stage;
             <li class="trace-step s-@key @(open ? "open" : "")">
                 <button type="button" class="trace-chip" aria-expanded="@(open ? "true" : "false")" aria-controls="@(_id + "-pop")"
-                        @onclick="() => Toggle(s.Stage)">
+                        title="@ChipTitle(s)" @onclick="() => Toggle(s.Stage)">
                     <Icon Name="@IconFor(s.State)" Size="16" />
-                    <span class="trace-name">@(s.Label + (s.Attempts.Count > 1 ? " ×" + s.Attempts.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : ""))</span>
-                    <span class="trace-meta">@Meta(s)</span>
+                    <span class="trace-name">@Name(s)</span>
+                    <span class="trace-meta">@TraceModel.StateText(s.State)</span>
+                    @if (Duration(s) is { } dur)
+                    {
+                        <span class="trace-dur">@dur</span>
+                    }
                 </button>
             </li>
         }
@@ -105,13 +111,17 @@
         _ => "pending",
     };
 
-    private static string Meta(TraceStepView s)
-    {
-        var state = TraceModel.StateText(s.State);
-        return s.DurationMs is { } d && s.State is not (TraceStepState.Pending or TraceStepState.Skipped or TraceStepState.NotReported)
-            ? state + " · " + Fmt.Ms(d)
-            : state;
-    }
+    private static string Name(TraceStepView s)
+        => s.Label + (s.Attempts.Count > 1 ? " ×" + s.Attempts.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+
+    /// <summary>Server-measured duration, only for a stage that actually ran.</summary>
+    private static string? Duration(TraceStepView s)
+        => s.DurationMs is { } d && s.State is not (TraceStepState.Pending or TraceStepState.Skipped or TraceStepState.NotReported)
+            ? Fmt.Ms(d)
+            : null;
+
+    private static string ChipTitle(TraceStepView s)
+        => Name(s) + " · " + TraceModel.StateText(s.State) + (Duration(s) is { } d ? " · " + d : "");
 
     private string SourceText
     {

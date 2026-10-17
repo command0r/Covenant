@@ -13,20 +13,25 @@
         <div class="field">
             <label for="@(IdPrefix + "-app")">Run as</label>
             <select id="@(IdPrefix + "-app")" class="input" value="@(Pg.Form.ApplicationId ?? "")" @onchange="OnApplication"
-                    disabled="@(Pg.Running || Ws.Applications is null)" aria-describedby="@(IdPrefix + "-app-help")">
+                    disabled="@(Pg.Running || Ws.Applications is null)" aria-describedby="@(AppHelp is null ? null : IdPrefix + "-app-help")"
+                    title="Identity and team come from this application; its credential never reaches the browser.">
                 <option value="" disabled>@(Ws.Applications is null ? (Ws.Loading ? "Loading applications…" : "Applications unavailable") : "Choose an application…")</option>
                 @foreach (var c in ComposerRules.Applications(Ws.Applications))
                 {
                     <option value="@c.App.Id" disabled="@(!c.Selectable)">@c.Label</option>
                 }
             </select>
-            <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@AppHelp</span>
+            @if (AppHelp is { } ah)
+            {
+                <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@ah</span>
+            }
         </div>
         <div class="field">
             <label for="@(IdPrefix + "-profile")">Workload profile</label>
             @{ var app = ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId); var granted = ComposerRules.GrantedProfiles(app); }
             <select id="@(IdPrefix + "-profile")" class="input" value="@(Pg.Form.ProfileId ?? "")" @onchange="OnProfile"
-                    disabled="@(Pg.Running || app is null || granted.Count == 0)" aria-describedby="@(IdPrefix + "-profile-help")">
+                    disabled="@(Pg.Running || app is null || granted.Count == 0)"
+                    title="Trusted baseline set by the server; detection can only escalate it.">
                 @if (granted.Count == 0)
                 {
                     <option value="">@(app is null ? "Choose an application first" : "No profile granted — server default")</option>
@@ -36,9 +41,21 @@
                     <option value="@p">@ComposerRules.ProfileLabel(Ws.Profiles, p)</option>
                 }
             </select>
-            <span id="@(IdPrefix + "-profile-help")" class="help">Trusted baseline set by the server; detection can only escalate it.</span>
         </div>
     </div>
+    @if (!Compact)
+    {
+        @* Review round 3: identity/retention explanations live here (and in tooltips), not as repeated lines in the flow. *@
+        <details class="about">
+            <summary>About this</summary>
+            <ul class="plain-list secondary">
+                <li>Identity and team come from the selected application; its credential never reaches the browser. The admin token runs the request as that application.</li>
+                <li>Only profiles granted to the application are offered. Each profile's baseline is a trusted, server-side classification; detection can only escalate it. There is no client-side classification control.</li>
+                <li>Response text is console-only: kept in this tab's memory, never persisted. The audit record holds a prompt fingerprint, not the response.</li>
+                <li>Grants, defaults and baselines are edited under Policies → Applications &amp; workload profiles.</li>
+            </ul>
+        </details>
+    }
 
     <div class="preset-row" role="group" aria-label="Scenario presets — fill the composer; only Run sends">
         <span class="preset-label">Presets</span>
@@ -164,15 +181,17 @@
         }
     }
 
-    private string AppHelp
+    /// <summary>Only a problem or a loading state is shown under "Run as"; the identity explanation is a tooltip and
+    /// part of "About this" (review round 3).</summary>
+    private string? AppHelp
     {
         get
         {
             if (Ws.ApplicationsError is { } e) return e;
             if (Ws.Applications is null) return Ws.Loading ? "Loading test applications…" : "Test applications not loaded.";
             if (!Ws.Applications.Any(a => ComposerRules.WhyNotSelectable(a) is null))
-                return "No application is enabled for console testing (configure one under Settings / configuration).";
-            return "Identity and team come from this application; its credential never reaches the browser.";
+                return "No application is enabled for console testing (allow it under Policies → Applications & workload profiles).";
+            return null;
         }
     }
 

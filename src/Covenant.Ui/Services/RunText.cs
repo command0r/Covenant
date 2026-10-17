@@ -27,15 +27,19 @@ public static class RunText
     public static string Cost(PlaygroundRun run)
         => run.Evidence.Record is { } rec ? CostText.Cost(rec) : AwaitingText(run);
 
-    /// <summary>Pending → Verified (record found) / Unavailable after the bounded retries. Never "verified" before
-    /// the record exists.</summary>
+    /// <summary>Final classification with baseline/escalation (review round 3) — from the audit record only.</summary>
+    public static string Classification(PlaygroundRun run)
+        => run.Evidence.Record is { } rec ? ModelFacts.ClassificationFact(rec) : AwaitingText(run);
+
+    /// <summary>Pending → Recorded (record found) / Unavailable after the bounded retries. Finding the record is NOT an
+    /// integrity check: "verified" wording is reserved for Audit &amp; evidence, where chain verification runs.</summary>
     public static (string Text, string Tone) Evidence(PlaygroundRun run)
     {
         if (run.InFlight) return ("Evidence after completion", "hollow");
         return run.Evidence.State switch
         {
             EvidenceState.Pending => ("Evidence pending", "hollow"),
-            EvidenceState.Found => ("Evidence verified — record found", "ok"),
+            EvidenceState.Found => ("Evidence recorded", "ok"),
             EvidenceState.Unavailable => ("Evidence unavailable", "warn"),
             EvidenceState.Error => ("Evidence lookup failed", "bad"),
             _ => run.Outcome?.Outcome == DisplayOutcome.RejectedBeforeGovernance

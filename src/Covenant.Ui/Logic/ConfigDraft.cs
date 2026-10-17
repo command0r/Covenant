@@ -255,6 +255,8 @@ public sealed class IssueIndex
     public static string Policy(int i) => "policies[" + I(i) + "]";
     public static string Target(int p, int t) => Policy(p) + ".targets[" + I(t) + "]";
     public static string Budget(int i) => "budgets[" + I(i) + "]";
+    public static string Profile(int i) => "profiles[" + I(i) + "]";
+    public static string Application(int i) => "applications[" + I(i) + "]";
     public static string Setting(string name) => "settings." + name;
 
     private static string I(int i) => i.ToString(CultureInfo.InvariantCulture);
@@ -284,6 +286,10 @@ public static class IssueHelp
             "Covenant could not build a provider client for this enabled connection (endpoint, secret or allow-list). Disable it or fix the cause above.",
         "ambiguous_policy_overlap" =>
             "Two enabled policies at the same specificity cover the same classification/profile. Narrow one by profile or disable it — Covenant never picks an arbitrary winner.",
+        "default_profile_not_granted" =>
+            "An application's default profile must also be granted to it. Grant it, or choose another default.",
+        "profile_not_found" =>
+            "A grant, default or policy names a workload profile that does not exist. Create the profile, or remove the reference.",
         "missing_global_budget" =>
             "A global budget is required: nothing is unlimited.",
         _ => null,

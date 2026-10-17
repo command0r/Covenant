@@ -59,6 +59,10 @@
                         <div class="response md @(prun.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text" aria-busy="@(prun.InFlight ? "true" : "false")">
                             @ResponseBody(prun)
                         </div>
+                        @if (!prun.InFlight && !prun.Snapshot.MatchesForm(Pg.Form))
+                        {
+                            <span class="changed-flag">Previous result — the prompt has changed since. Run to update.</span>
+                        }
                         <RunSummary Run="prun" Large="true" />
                     }
                     else
@@ -135,7 +139,6 @@ else
                         <div class="response md @(run.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text" aria-busy="@(run.InFlight ? "true" : "false")">
                             @ResponseBody(run)
                         </div>
-                        <span class="note">Response text is console-only: kept in this tab's memory, never persisted.</span>
                         <RunSummary Run="run" OnDetails="OpenDetails" DetailsButtonId="pg-details-open" />
                         <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" />
                     }

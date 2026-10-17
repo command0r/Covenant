@@ -137,6 +137,7 @@ public sealed class PlaygroundState : IDisposable
     {
         if (Running) return false;
         var ok = ComposerRules.SelectApplication(Form, _workspace.Applications, id);
+        PresetNote = null;   // the note was about the preset's own app/profile pick (review round 3)
         Notify();
         return ok;
     }
@@ -145,11 +146,17 @@ public sealed class PlaygroundState : IDisposable
     {
         if (Running) return false;
         var ok = ComposerRules.SelectProfile(Form, _workspace.Applications, profileId);
+        PresetNote = null;
         Notify();
         return ok;
     }
 
-    public void NotifyFormChanged() => Notify();
+    /// <summary>After a manual edit: a preset-specific note is dropped once the form no longer holds that preset.</summary>
+    public void NotifyFormChanged()
+    {
+        if (PresetNote is not null && !(ScenarioPresets.Find(Form.Scenario) is { } p && p.StillMatches(Form))) PresetNote = null;
+        Notify();
+    }
 
     /// <summary>Runs the preset only if the form still holds it and nothing blocks Run (the explicit
     /// "Run preset" action on Overview).</summary>

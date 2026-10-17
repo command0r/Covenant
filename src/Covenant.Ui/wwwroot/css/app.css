@@ -340,19 +340,37 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .run-facts > div { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .run-facts dt { color: var(--muted); }
 .run-facts dd { overflow-wrap: anywhere; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.run-facts > div.wide { grid-column: 1 / -1; }
 
 /* Trace bar */
-.trace { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.trace-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
-.trace-step { flex: 1 1 88px; min-width: 0; }
+/* Review round 3: a 5×2 grid (two rows of five stages) by default, so Attribution and every duration stay visible at
+   1280; one row of ten only on a wide viewport (> 1440 px) AND a wide trace container. State and duration are separate
+   lines; narrow containers drop the icon column (the state stays as text and colour). */
+.trace { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; container: trace / inline-size; }
+.trace-steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+.trace-step { min-width: 0; }
 .trace-chip {
-  width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 6px; align-items: center;
+  width: 100%; height: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto auto; column-gap: 6px; align-items: center;
   text-align: left; padding: 6px 8px; min-height: 44px; border-radius: var(--radius-control);
   border: 1px solid var(--border); background: var(--surface2); color: var(--text); font: inherit; cursor: pointer;
 }
-.trace-chip .icon { grid-row: 1 / span 2; }
+.trace-chip .icon { grid-row: 1 / span 3; }
 .trace-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.trace-meta { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
+.trace-meta, .trace-dur { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); }
+.trace-dur { color: var(--text); }
+@media (min-width: 1441px) {
+  @container trace (min-width: 1200px) {
+    .trace-steps { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+  }
+}
+@container trace (max-width: 639px) {
+  .trace-chip { grid-template-columns: minmax(0, 1fr); padding: 6px; }
+  .trace-chip .icon { display: none; }
+  .trace-name { font-size: 12px; }
+}
+@container trace (max-width: 379px) {
+  .trace-steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 .trace-step.s-passed .trace-chip { border-color: transparent; background: var(--green-bg); }
 .trace-step.s-passed .icon, .trace-step.s-passed .trace-meta { color: var(--green); }
 .trace-step.s-refused .trace-chip { border-color: var(--amber); background: var(--amber-bg); }
@@ -376,8 +394,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
 }
 .trace-pop-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .trace-source { font-size: 12px; color: var(--subtle); }
-.trace.compact .trace-step { flex-basis: 70px; }
-.trace.compact .trace-meta { display: none; }
+.trace.compact .trace-meta, .trace.compact .trace-dur { display: none; }
 .attempt-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: var(--text-secondary); }
 .attempt-list li { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-control); }
 .state-text.s-passed { color: var(--green); } .state-text.s-failed { color: var(--red); } .state-text.s-refused { color: var(--amber); }
@@ -416,6 +433,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
    at most one scroll (the layer itself), plus the response's intentional scroll. ---- */
 .present-root { position: fixed; inset: 0; z-index: 60; background: var(--bg); display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: auto; }
 .present-root:focus { outline: none; }
+.panel[tabindex="-1"]:focus { outline: none; }
 .present-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--surface); font-size: var(--text-secondary); }
 .present-head .brand { font-weight: 600; font-size: 18px; }
 .present-head .env { font-family: var(--font-mono); padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; }
@@ -435,7 +453,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .present-response .outcome { font-size: 30px; }
 .present-response .run-facts { font-size: 16px; }
 .present-trace .trace-name { font-size: 15px; }
-.present-trace .trace-meta { font-size: 13px; }
+.present-trace .trace-meta, .present-trace .trace-dur { font-size: 13px; }
 
 /* ---- Requests ---- */
 .filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
@@ -600,3 +618,11 @@ details.panel > summary { cursor: pointer; font-weight: 600; min-height: 32px; d
 /* Policies: create-policy form (review round 2, U4). */
 .policy-create { display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--border); }
 .policy-create h3 { margin: 0; font-size: var(--text-body, 14px); }
+
+/* ---- Applications & workload profiles (Policies, review round 3) ---- */
+.sub-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; border-top: 1px solid var(--border); padding-top: 12px; padding-bottom: 4px; }
+.sub-head h3 { margin: 0; font-size: var(--text-body, 14px); }
+.profile-intro { display: flex; flex-direction: column; gap: 6px; padding-top: 0; }
+.composer .about { font-size: var(--text-secondary); }
+.composer .about summary { cursor: pointer; color: var(--muted); }
+.composer .about ul { margin-top: 6px; }

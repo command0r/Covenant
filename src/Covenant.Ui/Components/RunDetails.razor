@@ -47,7 +47,7 @@
         <h3>Classification</h3>
         <dl class="facts">
             <dt>Trusted baseline</dt><dd>@Fmt.OrNotRecorded(rec.BaselineClassification) @(rec.ProfileId is { Length: > 0 } rp ? "· profile " + rp : "")</dd>
-            <dt>Final classification</dt><dd>@ModelFacts.Classification(rec)</dd>
+            <dt>Final classification</dt><dd>@ModelFacts.ClassificationFact(rec)</dd>
         </dl>
         <span class="note">The profile sets a trusted baseline; the detector can only escalate it (ADR-0012). The detector is a narrow demonstration pattern set, not DLP.</span>
     </section>
@@ -115,7 +115,7 @@
     {
         case EvidenceState.Found when Run.Evidence.Record is { } er:
             <dl class="facts">
-                <dt>Status</dt><dd><span class="dot ok" aria-hidden="true"></span> Verified — audit record found</dd>
+                <dt>Status</dt><dd><span class="dot ok" aria-hidden="true"></span> Evidence recorded <span class="subtle">(chain integrity is verified under Audit &amp; evidence)</span></dd>
                 <dt>Record id</dt>
                 <dd>
                     <span class="copy-row">

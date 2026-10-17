@@ -2365,3 +2365,226 @@ public sealed class HeaderLocalHealthTests
             LocalHealth.Derive(new CatalogResponse { Local = new LocalRouteInfo { Configured = true, Registered = false, ConnectionId = "ollama" } }, null).State);
     }
 }
+
+// ---- Review round 3 (UI) ----
+
+public sealed class ClassificationFactTests
+{
+    private static AuditEntryView With(string classification, string? baseline, string? signal)
+    {
+        var r = Rec.V2(classification: classification, signal: signal);
+        r.BaselineClassification = baseline;
+        return r;
+    }
+
+    [Fact]
+    public void Escalation_names_baseline_and_detector()
+        => Assert.Equal("PII (baseline Public, escalated: US SSN pattern)", ModelFacts.ClassificationFact(With("Pii", "Public", "US SSN pattern")));
+
+    [Fact]
+    public void Escalation_without_a_recorded_signal_still_says_escalated()
+        => Assert.Equal("PHI (baseline Internal, escalated)", ModelFacts.ClassificationFact(With("Phi", "Internal", null)));
+
+    [Fact]
+    public void Same_as_baseline_is_not_escalated()
+    {
+        Assert.Equal("Internal (baseline Internal, not escalated)", ModelFacts.ClassificationFact(With("Internal", "Internal", null)));
+        Assert.Equal("PII (baseline PII, not escalated; detector: US SSN pattern)", ModelFacts.ClassificationFact(With("Pii", "Pii", "US SSN pattern")));
+    }
+
+    [Fact]
+    public void Missing_baseline_is_said_not_guessed()
+    {
+        Assert.Equal("PII (detector: US SSN pattern; baseline not recorded)", ModelFacts.ClassificationFact(With("Pii", null, "US SSN pattern")));
+        Assert.Equal("Internal (no detector rule matched; baseline not recorded)", ModelFacts.ClassificationFact(With("Internal", null, null)));
+    }
+
+    [Fact]
+    public void Not_evaluated_and_legacy_records_never_show_the_restrictive_default_as_a_detection()
+    {
+        Assert.StartsWith("Not evaluated — stopped at", ModelFacts.ClassificationFact(Rec.AuthFail()), StringComparison.Ordinal);
+        Assert.DoesNotContain("PHI", ModelFacts.ClassificationFact(Rec.AuthFail()), StringComparison.Ordinal);
+        Assert.Equal(ModelFacts.NotRecorded, ModelFacts.ClassificationFact(Rec.Legacy()));
+    }
+
+    [Fact]
+    public void Cache_provenance_uses_the_served_connection_when_the_model_lacks_it()
+    {
+        var r = Rec.V2(cacheHit: true, attempted: null, served: "stub-slow");
+        r.ServedConnectionId = "local";
+        Assert.Equal("local/stub-slow", ModelFacts.CacheOrigin(r));
+        Assert.Equal("Cache — no provider call (originally local/stub-slow)", ModelFacts.Destination(r).Text);
+        Assert.Equal("Served from cache (no provider call) · local/stub-slow", ModelFacts.Served(r));
+
+        var full = Rec.V2(cacheHit: true, attempted: null, served: "ollama/qwen");
+        full.ServedConnectionId = "ollama";
+        Assert.Equal("ollama/qwen", ModelFacts.CacheOrigin(full));
+        Assert.Null(ModelFacts.CacheOrigin(Rec.V2(cacheHit: true, attempted: null, served: null)));
+    }
+}
+
+public sealed class ProfileEditingTests
+{
+    /// <summary>Hybrid config + two profiles and two existing applications (demo grants both, default internal).</summary>
+    private static CovenantConfigDto WithProfiles()
+    {
+        var cfg = Cfg.Hybrid();
+        cfg.Profiles =
+        [
+            new WorkloadProfileDto { Id = "public-demo", Name = "Public demo", Baseline = "Public" },
+            new WorkloadProfileDto { Id = "internal-default", Name = "Internal", Baseline = "Internal" },
+        ];
+        cfg.Applications =
+        [
+            new ApplicationDto { Id = "demo", Team = "payments", Enabled = true, ConsoleTesting = true, GrantedProfiles = ["public-demo", "internal-default"], DefaultProfile = "internal-default", MaxOutputTokens = 256 },
+            new ApplicationDto { Id = "batch", Team = "risk", Enabled = true, ConsoleTesting = false, GrantedProfiles = ["internal-default"], DefaultProfile = "internal-default" },
+        ];
+        return cfg;
+    }
+
+    [Fact]
+    public void Create_profile_validates_id_name_baseline_and_is_granted_to_nobody()
+    {
+        var cfg = WithProfiles();
+        Assert.Contains(ProfileEditing.Problems(new NewProfileForm { Id = "bad id!", Name = "x", Baseline = "Public" }, cfg), p => p.Contains("Profile id", StringComparison.Ordinal));
+        Assert.Contains(ProfileEditing.Problems(new NewProfileForm { Id = "public-demo", Name = "x", Baseline = "Public" }, cfg), p => p.Contains("already exists", StringComparison.Ordinal));
+        Assert.Contains(ProfileEditing.Problems(new NewProfileForm { Id = ProfileEditing.LegacyInternal, Name = "x", Baseline = "Internal" }, cfg), p => p.Contains("built-in", StringComparison.Ordinal));
+        Assert.Contains(ProfileEditing.Problems(new NewProfileForm { Id = "p", Name = " ", Baseline = "Public" }, cfg), p => p.Contains("name", StringComparison.Ordinal));
+        Assert.Contains(ProfileEditing.Problems(new NewProfileForm { Id = "p", Name = "x", Baseline = "Secret" }, cfg), p => p.Contains("baseline", StringComparison.Ordinal));
+        Assert.Contains(ProfileEditing.Problems(new NewProfileForm { Id = "p", Name = "x", Baseline = "pii" }, cfg), p => p.Contains("baseline", StringComparison.Ordinal));   // contract spelling only
+
+        var before = ConfigCopy.Canonical(cfg);
+        Assert.NotEmpty(ProfileEditing.Add(cfg, new NewProfileForm { Id = "", Name = "x" }));
+        Assert.Equal(before, ConfigCopy.Canonical(cfg));   // refused ⇒ draft untouched
+
+        Assert.Empty(ProfileEditing.Add(cfg, new NewProfileForm { Id = " customer-pii ", Name = " Customer PII ", Baseline = "Pii", Description = "  " }));
+        var added = cfg.Profiles[^1];
+        Assert.Equal("customer-pii", added.Id);
+        Assert.Equal("Customer PII", added.Name);
+        Assert.Equal("Pii", added.Baseline);
+        Assert.Null(added.Description);
+        Assert.Empty(ProfileEditing.Usage(cfg, "customer-pii").GrantedTo);
+        Assert.NotEqual("customer-pii", ProfileEditing.UniqueId("customer-pii", cfg));
+    }
+
+    [Fact]
+    public void Edit_name_and_baseline_refuse_blank_or_unknown_values()
+    {
+        var cfg = WithProfiles();
+        var p = cfg.Profiles[0];
+        Assert.NotNull(ProfileEditing.SetName(p, "  "));
+        Assert.Equal("Public demo", p.Name);
+        Assert.Null(ProfileEditing.SetName(p, " Public tickets "));
+        Assert.Equal("Public tickets", p.Name);
+        Assert.NotNull(ProfileEditing.SetBaseline(p, "Confidential"));
+        Assert.Equal("Public", p.Baseline);
+        Assert.Null(ProfileEditing.SetBaseline(p, "Internal"));
+        Assert.Equal("Internal", p.Baseline);
+        ProfileEditing.SetDescription(p, " ");
+        Assert.Null(p.Description);
+    }
+
+    [Fact]
+    public void Removing_a_default_profile_is_refused_client_side_with_the_reason()
+    {
+        var cfg = WithProfiles();
+        var blockers = ProfileEditing.RemovalBlockers(cfg, "internal-default");
+        Assert.Equal(2, blockers.Count);   // default of demo and of batch
+        Assert.All(blockers, b => Assert.Contains("default profile", b, StringComparison.Ordinal));
+        var before = ConfigCopy.Canonical(cfg);
+        Assert.NotNull(ProfileEditing.Remove(cfg, "internal-default"));
+        Assert.Equal(before, ConfigCopy.Canonical(cfg));
+        Assert.NotEmpty(ProfileEditing.RemovalBlockers(cfg, ProfileEditing.LegacyInternal));
+        Assert.NotEmpty(ProfileEditing.RemovalBlockers(cfg, "ghost"));
+    }
+
+    [Fact]
+    public void Removing_the_only_profile_of_a_policy_is_refused_because_it_would_widen_the_policy()
+    {
+        var cfg = WithProfiles();
+        cfg.Policies[0].Profiles = ["public-demo"];
+        Assert.Contains(ProfileEditing.RemovalBlockers(cfg, "public-demo"), b => b.Contains("widen", StringComparison.Ordinal));
+        Assert.NotNull(ProfileEditing.Remove(cfg, "public-demo"));
+        Assert.Equal(new[] { "public-demo" }, cfg.Policies[0].Profiles);
+    }
+
+    [Fact]
+    public void Removal_impact_lists_grants_and_multi_profile_policies_then_remove_cleans_every_reference()
+    {
+        var cfg = WithProfiles();
+        cfg.Policies[0].Profiles = ["public-demo", "internal-default"];
+        var impact = ProfileEditing.RemovalImpact(cfg, "public-demo");
+        Assert.Contains(impact, l => l.Contains("'demo' loses the grant", StringComparison.Ordinal));
+        Assert.Contains(impact, l => l.Contains("Policy 'public' stops listing", StringComparison.Ordinal));
+        Assert.Empty(ProfileEditing.RemovalBlockers(cfg, "public-demo"));
+
+        Assert.Null(ProfileEditing.Remove(cfg, "public-demo"));
+        Assert.DoesNotContain(cfg.Profiles, p => p.Id == "public-demo");
+        Assert.Equal(new[] { "internal-default" }, cfg.Applications[0].GrantedProfiles);
+        Assert.Equal(new[] { "internal-default" }, cfg.Policies[0].Profiles);
+        Assert.All(cfg.Applications, a => Assert.Empty(ProfileEditing.ApplicationProblems(a, cfg)));
+
+        var unused = WithProfiles();
+        unused.Profiles.Add(new WorkloadProfileDto { Id = "spare", Name = "Spare", Baseline = "Phi" });
+        Assert.Contains(ProfileEditing.RemovalImpact(unused, "spare"), l => l.Contains("changes no route", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Grants_and_default_profile_stay_consistent()
+    {
+        var cfg = WithProfiles();
+        var demo = cfg.Applications[0];
+
+        // The default cannot be revoked; another default first.
+        Assert.NotNull(ProfileEditing.SetGrant(demo, "internal-default", false, cfg));
+        Assert.Contains("internal-default", demo.GrantedProfiles);
+        Assert.NotNull(ProfileEditing.SetDefault(cfg.Applications[1], "public-demo"));   // not granted to batch
+        Assert.Equal("internal-default", cfg.Applications[1].DefaultProfile);
+        Assert.Null(ProfileEditing.SetDefault(demo, "public-demo"));
+        Assert.Null(ProfileEditing.SetGrant(demo, "internal-default", false, cfg));
+        Assert.Equal(new[] { "public-demo" }, demo.GrantedProfiles);
+
+        // Unknown profiles are never granted; the built-in one may be.
+        Assert.NotNull(ProfileEditing.SetGrant(demo, "ghost", true, cfg));
+        Assert.Null(ProfileEditing.SetGrant(demo, ProfileEditing.LegacyInternal, true, cfg));
+        Assert.Contains(ProfileEditing.LegacyInternal, ProfileEditing.GrantOptions(cfg, demo));
+
+        // No default ⇒ the built-in legacy-internal (baseline Internal) applies.
+        Assert.Null(ProfileEditing.SetDefault(demo, ""));
+        Assert.Null(demo.DefaultProfile);
+        Assert.Contains(ProfileEditing.LegacyInternal, ProfileEditing.DefaultText(cfg, demo), StringComparison.Ordinal);
+        Assert.Empty(ProfileEditing.ApplicationProblems(demo, cfg));
+
+        // What the Host rejects is reported.
+        demo.DefaultProfile = "internal-default";
+        Assert.Contains(ProfileEditing.ApplicationProblems(demo, cfg), p => p.Contains("not granted", StringComparison.Ordinal));
+        demo.GrantedProfiles.Add("ghost");
+        Assert.Contains(ProfileEditing.ApplicationProblems(demo, cfg), p => p.Contains("does not exist", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Team_and_output_bound_are_validated()
+    {
+        var app = WithProfiles().Applications[0];
+        Assert.NotNull(ProfileEditing.SetTeam(app, " "));
+        Assert.Equal("payments", app.Team);
+        Assert.Null(ProfileEditing.SetTeam(app, " risk "));
+        Assert.Equal("risk", app.Team);
+        Assert.NotNull(ProfileEditing.SetMaxOutputTokens(app, 0));
+        Assert.NotNull(ProfileEditing.SetMaxOutputTokens(app, null));
+        Assert.Equal(256, app.MaxOutputTokens);
+        Assert.Null(ProfileEditing.SetMaxOutputTokens(app, 64));
+        Assert.Equal(64, app.MaxOutputTokens);
+    }
+
+    [Fact]
+    public void Labels_name_the_baseline_and_the_built_in_profile()
+    {
+        var cfg = WithProfiles();
+        Assert.Equal("Public demo (baseline Public)", ProfileEditing.Label(cfg, "public-demo"));
+        Assert.Equal("legacy-internal (built-in, baseline Internal)", ProfileEditing.Label(cfg, ProfileEditing.LegacyInternal));
+        Assert.Equal("ghost (not configured)", ProfileEditing.Label(cfg, "ghost"));
+        Assert.True(ProfileEditing.Exists(cfg, ProfileEditing.LegacyInternal));
+        Assert.False(ProfileEditing.IsDeclared(cfg, ProfileEditing.LegacyInternal));
+    }
+}

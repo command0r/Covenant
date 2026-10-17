@@ -1,7 +1,8 @@
 @inject WorkspaceConfig Ws
 
-@* The compact outcome line under the response: outcome, actual destination (with Local/Cloud tag), duration,
-   tokens, cost basis and evidence state. The full facts live in the details drawer — not repeated here. *@
+@* The compact outcome line under the response: outcome, final classification (baseline → escalation, review round 3),
+   actual destination (with Local/Cloud tag), duration, tokens, cost basis and evidence state. The full facts live in the
+   details drawer — not repeated here. "Evidence recorded" = the audit record exists; integrity is verified on Audit & evidence. *@
 <div class="run-summary @(Large ? "large" : "")">
     <div class="run-outcome">
         @if (Run.InFlight)
@@ -29,6 +30,10 @@
         <span class="note bad">@te</span>
     }
     <dl class="run-facts">
+        <div class="wide">
+            <dt>Classification</dt>
+            <dd>@RunText.Classification(Run)</dd>
+        </div>
         <div>
             <dt>Destination</dt>
             <dd>
