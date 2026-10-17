@@ -149,7 +149,7 @@ if [[ "${OPEN_BROWSER:-1}" == "1" ]]; then
 fi
 cat <<EOF
   Console:        http://localhost:$PORT/ui/
-  Profile:        $PROFILE  (seed $SEED; Local-only never calls a cloud provider)
+  Startup seed:   $SEED (only used on first run; saved console configuration takes precedence)
   Local model:    ollama/$MODEL
   Run requests:   Playground → "Run as" demo-app → profile "Public demo" or "Internal" (no key needed)
   Private files: $CREDENTIALS/console-url (connected URL), application-key (/v1 clients only)

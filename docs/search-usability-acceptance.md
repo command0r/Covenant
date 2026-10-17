@@ -35,7 +35,7 @@ Verified on 2026-10-17, macOS arm64, .NET SDK 10.0.107. Branch: `feat/console-se
 
 ## Verification limits
 
-No live Tavily credential or paid OpenAI/Anthropic credential was configured in the verification process. Search wire format, local/cloud synthesis paths, source handling, failures, cancellation, permissions, cache bypass and budget accounting were exercised using test transports/adapters. This does **not** constitute a live Tavily acceptance test or a live paid-provider test.
+A live Tavily request was subsequently verified on the isolated published host: three sources retrieved, one reported credit, local Qwen synthesis, and $0.008 recorded using the explicitly labelled public pay-as-you-go reference rate (not a claim about the operator’s plan). Request: `req_302add2043ad4edca714ca7c75608f43`. The source endpoint and durable audit record both passed inspection. No paid OpenAI/Anthropic credential was configured in the verification process. Search wire format, local/cloud synthesis paths, source handling, failures, cancellation, permissions, cache bypass and budget accounting were exercised using test transports/adapters. Paid model-provider calls remain unverified live.
 
 Search is explicit and off by default. The implementation grounds a model using retrieved web snippets; it is not a dedicated weather API or a guarantee of answer accuracy. Classification recognises configured patterns and trusted profile baselines; it is not comprehensive data-loss prevention.
 

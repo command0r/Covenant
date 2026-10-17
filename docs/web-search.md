@@ -22,6 +22,17 @@ retrieved snippets as untrusted data. Web search is **off by default**.
 3. Restart the Host. Then check **Settings → Web search (Tavily)**: the checklist shows *API key configured* and
    *egress allow-list* as "yes".
 
+For the local demo launcher (which deliberately runs in Production), use:
+
+```bash
+python3 scripts/run-with-tavily.py
+```
+
+This explicitly loads **only** the saved Tavily key into the child process, approves `api.tavily.com:443`,
+and starts the usual demo launcher. It also accepts an existing `Tavily__ApiKey` environment variable.
+It never prints the key or imports other saved credentials. Normal launcher options (`PORT`, `STATE`, `OUT`,
+`SKIP_PUBLISH`) still work. It does not enable search or change policies automatically; complete the steps below.
+
 ## 2. Configuration (console; versioned, no restart)
 
 1. **Mode**: the configuration must be **Hybrid** (Policies). Local-only means no external calls of any kind, so it can
