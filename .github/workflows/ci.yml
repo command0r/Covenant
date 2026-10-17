@@ -1,19 +1,14 @@
-# CI: the impartial merge gate — build + tests + coverage threshold.
-# Tuned for minimal Actions minutes:
-#   - Linux runner only (1x minute multiplier)
-#   - one job, one `dotnet test` (restore+build+test in a single invocation)
-#   - NuGet cache keyed on csproj + build-props hashes (warm restore = seconds)
-#   - docs/deploy-only PRs are handled by ci-docs.yml (same check name, no-op) so the
-#     required check is always satisfiable without a full build
-#   - superseded PR runs are cancelled; main pushes always complete (evidence trail)
+# CI: the impartial merge gate — ONE workflow, ONE job, ONE required check name ("ci / test").
+# Every PR and every main push runs this job, so the required check always reports exactly once.
+# A cheap first step decides whether code changed; docs/deploy-only changes finish in seconds with
+# success, anything else runs the full build + tests + coverage gate. (Previously a docs-only twin
+# workflow shared the check name, and a mixed change could produce two "test" results.)
 name: ci
 
 on:
   pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'deploy/**', '.gitignore']
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'deploy/**', '.gitignore']
 
 permissions:
   contents: read
@@ -25,24 +20,51 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether code changed
+        id: scope
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"; HEAD="${{ github.event.pull_request.head.sha }}"
+          else
+            BASE="${{ github.event.before }}"; HEAD="${{ github.sha }}"
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; echo "No usable base — running the full build."; exit 0
+          fi
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "$CHANGED"
+          CODE=$(echo "$CHANGED" | grep -Ev '(\.md$|^docs/|^deploy/|^\.gitignore$)' || true)
+          if [ -n "$CODE" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Docs/deploy-only change — build not required
+        if: steps.scope.outputs.code != 'true'
+        run: echo "Only docs/deploy files changed; gate satisfied without a build."
 
       - uses: actions/setup-dotnet@v4
+        if: steps.scope.outputs.code == 'true'
         with:
           dotnet-version: 10.0.x
 
       - uses: actions/cache@v4
+        if: steps.scope.outputs.code == 'true'
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props', '**/Directory.Packages.props') }}
           restore-keys: nuget-${{ runner.os }}-
 
       - name: Test with coverage
-        run: dotnet test -c Release --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings --results-directory ./coverage
+        if: steps.scope.outputs.code == 'true'
+        run: dotnet test tests/Covenant.Tests -c Release --disable-build-servers --collect:"XPlat Code Coverage" --settings tests/coverlet.runsettings --results-directory ./coverage
 
       - name: Enforce coverage threshold (line >= 0.80)
+        if: steps.scope.outputs.code == 'true'
         run: |
           COUNT=$(find ./coverage -name 'coverage.cobertura.xml' | wc -l)
           test "$COUNT" -eq 1 || { echo "expected exactly 1 coverage report (single test project), found $COUNT"; exit 1; }
