@@ -1,0 +1,163 @@
+@page "/policies"
+@inject AppState State
+@implements IDisposable
+
+<PageTitle>Policies · Covenant</PageTitle>
+
+<div class="page">
+    <RequiresConnection>
+        @if (State.LastStatus is not { } s)
+        {
+            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
+        }
+        else
+        {
+            var groups = s.Routes.GroupBy(r => r.Classification).OrderBy(g => ClassificationOrder(g.Key)).ToList();
+            var unresolved = RouteHealth.UnresolvedRoutes(s, State.Catalog);
+
+            <div class="page-head">
+                <div class="titles">
+                    <h1>Policies</h1>
+                    <span class="lede">Routing is decided by classification. Application keys set identity and team; they do not grant models.</span>
+                </div>
+                <span class="page-note">Managed by configuration; restart required</span>
+                <a class="btn primary form" href="playground">Try in Playground</a>
+            </div>
+
+            <section class="panel" aria-labelledby="sum-h">
+                <h2 id="sum-h">In plain words</h2>
+                <ul class="plain-list">
+                    @foreach (var g in groups)
+                    {
+                        <li>
+                            <strong>@g.Key</strong> requests may use
+                            @foreach (var (r, i) in g.Select((x, idx) => (x, idx)))
+                            {
+                                if (i > 0) { <span>, </span> }
+                                <span class="mono">@r.Adapter:@r.Model</span>
+                            }
+                            @if (g.Count() > 1 && s.RoutingThresholdTokens > 0)
+                            {
+                                <span>; requests estimated under ~@Fmt.Int(s.RoutingThresholdTokens) tokens take the cheapest route and larger ones escalate.</span>
+                            }
+                            else
+                            {
+                                <span>.</span>
+                            }
+                        </li>
+                    }
+                    <li>A caller may ask for a specific model only if it is in the route set for the request’s classification.</li>
+                    <li>Each request starts with the restrictive default for enforcement. That default is never reported as a detection — when a stage before Classify refuses, the record shows “Not evaluated”.</li>
+                    @if (s.Routes.Count == 0)
+                    {
+                        <li><strong>No routes are configured.</strong> Every request is refused by policy (fail-closed).</li>
+                    }
+                </ul>
+            </section>
+
+            <section class="panel flush" aria-labelledby="rules-h">
+                <div class="panel-head">
+                    <h2 id="rules-h">Classification routes</h2>
+                    <span class="panel-sub">Read-only · as loaded at start · @(Fmt.Int(s.Routes.Count) + (s.Routes.Count == 1 ? " route" : " routes"))</span>
+                </div>
+                @if (s.Routes.Count == 0)
+                {
+                    <div style="padding:18px"><EmptyState Title="No routes configured" Body="Policy:Routes is empty; every request is refused." /></div>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Classification</th>
+                                    <th scope="col">Adapter</th>
+                                    <th scope="col">Model</th>
+                                    <th scope="col">Adapter status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var g in groups)
+                                {
+                                    var first = true;
+                                    foreach (var r in g)
+                                    {
+                                        <tr>
+                                            <td>@(first ? g.Key : "")</td>
+                                            <td class="mono">@r.Adapter</td>
+                                            <td class="mono">@r.Model</td>
+                                            <td>@AdapterStatus(r)</td>
+                                        </tr>
+                                        first = false;
+                                    }
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+                @if (unresolved.Count > 0)
+                {
+                    <div style="padding:14px 18px">
+                        <AlertCard Tone="warn" Title="@UnresolvedTitle(unresolved.Count)"
+                                   Body="Matching requests pass routing and are refused at the Provider stage — never sent elsewhere."
+                                   ActionText="Set up the connection" ActionHref="connections" />
+                    </div>
+                }
+            </section>
+
+            <section class="panel" aria-labelledby="flow-h">
+                <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
+                    <h2 id="flow-h">Configured processing order</h2>
+                    <span class="panel-sub">A request stops at the first stage that refuses it; a cache hit skips every stage after Cache. Audit wraps the whole pipeline and records every outcome, including refusals.</span>
+                </div>
+                <p class="mono secondary">auth → shape → classify → policy → cache → rate limit → pause/budget → provider → attribution (audit wraps)</p>
+                <ol class="stages">
+                    @foreach (var (name, desc, i) in Stages.Select((st, idx) => (st.Name, st.Desc, idx + 1)))
+                    {
+                        <li><span class="n">@i</span><span><span class="name">@name</span> <span class="muted secondary">— @desc</span></span></li>
+                    }
+                </ol>
+            </section>
+
+            <section class="panel" aria-labelledby="ed-h">
+                <h2 id="ed-h">Editing policies in the console is not available</h2>
+                <span class="secondary muted">An editor needs validation, versioned configuration, authorization, a review-then-apply step and defined rollback first. Per-application model grants do not exist today.</span>
+            </section>
+        }
+    </RequiresConnection>
+</div>
+
+@code {
+    private static readonly (string Name, string Desc)[] Stages =
+    [
+        ("Auth", "Application key → principal and team. Unknown key: refused (Unauthenticated)."),
+        ("Shape", "Only plain text chat is governed; tools, images and audio are refused (Unsupported)."),
+        ("Classify", "Public / Internal / PII / PHI from the prompt text; the restrictive default applies until evaluated."),
+        ("Policy", "Allowed route set for the classification; a requested model outside it is refused."),
+        ("Cache", "An identical governed request within the TTL is answered from cache — no provider call, no charge."),
+        ("Rate limit", "Per-principal limits; over the limit: refused (RateLimited)."),
+        ("Pause / budget", "Paused: refused. Estimated spend at or over the cap: refused (checked before the call)."),
+        ("Provider", "The adapter call; a permitted route with no registered adapter is refused here, never redirected."),
+        ("Attribution", "Reported usage × configured price, attributed to the team; written to the audit chain."),
+    ];
+
+    private static int ClassificationOrder(string c) => c.ToLowerInvariant() switch
+    {
+        "public" => 0, "internal" => 1, "pii" => 2, "phi" => 3, _ => 9,
+    };
+
+    private static string UnresolvedTitle(int n)
+        => n == 1 ? "1 route permitted by policy but not served by any registered adapter"
+                  : n + " routes permitted by policy but not served by any registered adapter";
+
+    private string AdapterStatus(Covenant.Ui.Models.RouteView r)
+    {
+        if (State.Catalog is null)
+            return State.CatalogError is null ? "Checking…" : "Unknown (catalog unavailable)";
+        return RouteHealth.IsRegistered(r, State.Catalog) ? "Registered" : "Not registered — refused at Provider";
+    }
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnChanged;
+}

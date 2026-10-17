@@ -1,0 +1,14 @@
+@* Loading placeholder: Lines rows of shimmering bars. Announced once to screen readers via the label. *@
+<div role="status" aria-label="@Label" style="display:flex;flex-direction:column;gap:10px">
+    @for (var i = 0; i < Lines; i++)
+    {
+        <span class="skeleton" style="width:@(Widths[i % Widths.Length])" aria-hidden="true"></span>
+    }
+</div>
+
+@code {
+    [Parameter] public int Lines { get; set; } = 3;
+    [Parameter] public string Label { get; set; } = "Loading";
+
+    private static readonly string[] Widths = ["60%", "85%", "40%", "70%"];
+}

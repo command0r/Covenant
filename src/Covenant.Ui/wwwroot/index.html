@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Covenant</title>
+    <base href="/ui/" />
+    <!-- Everything is local: no CDN, no external font, no remote script (root CLAUDE.md #4; CSP is 'self'). -->
+    <link href="fonts/fonts.css" rel="stylesheet" />
+    <link href="css/tokens.css" rel="stylesheet" />
+    <link href="css/app.css" rel="stylesheet" />
+    <!-- Applies the persisted theme before the WASM runtime starts, so there is no flash; also hosts the
+         tiny interop surface (sessionStorage for the admin token, theme, focus, Blob download). -->
+    <script src="js/interop.js"></script>
+</head>
+<body>
+    <div id="app">
+        <div class="boot" role="status" aria-live="polite">
+            <span class="boot-mark">Covenant</span>
+            <span class="boot-sub">Loading the console…</span>
+        </div>
+    </div>
+
+    <div id="blazor-error-ui" role="alert">
+        The console hit an unrecoverable error. Reload the page; the appliance itself is unaffected.
+        <a href="" class="reload">Reload</a>
+        <button type="button" class="dismiss" aria-label="Dismiss">×</button>
+    </div>
+    <script src="_framework/blazor.webassembly.js"></script>
+</body>
+</html>

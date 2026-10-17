@@ -120,6 +120,11 @@ public sealed class EvidenceReport
     [JsonPropertyName("total_cost_usd")] public required decimal TotalCostUsd { get; init; }
     [JsonPropertyName("cost_by_team_usd")] public required Dictionary<string, decimal> CostByTeamUsd { get; init; }
     [JsonPropertyName("requests_by_classification")] public required Dictionary<string, int> RequestsByClassification { get; init; }
+    /// <summary>Anchoring facts (ADR-0007). Configured ≠ verified: verification is ChainValid, which
+    /// already includes anchor comparison when anchors exist.</summary>
+    [JsonPropertyName("anchor_configured")] public bool AnchorConfigured { get; init; }
+    [JsonPropertyName("anchor_count")] public long AnchorCount { get; init; }
+    [JsonPropertyName("last_anchor_utc")] public DateTimeOffset? LastAnchorUtc { get; init; }
 }
 
 /// <summary>Durable budgets without new infrastructure: the audit log is the event store, the ledger its
@@ -154,6 +159,7 @@ public static class EvidenceExport
             byClassification[cls] = byClassification.GetValueOrDefault(cls) + 1;
         }
 
+        var anchorInfo = AnchorInfo.Read(anchorPath);
         return new EvidenceReport
         {
             GeneratedUtc = clock.GetUtcNow(),
@@ -169,6 +175,9 @@ public static class EvidenceExport
             TotalCostUsd = totalCost,
             CostByTeamUsd = costByTeam,
             RequestsByClassification = byClassification,
+            AnchorConfigured = anchorPath is not null,
+            AnchorCount = anchorInfo.Count,
+            LastAnchorUtc = anchorInfo.LastUtc,
         };
     }
 }

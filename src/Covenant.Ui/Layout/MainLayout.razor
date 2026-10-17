@@ -1,0 +1,27 @@
+@inherits LayoutComponentBase
+@inject AppState State
+@implements IDisposable
+
+<div class="shell">
+    <SideNav />
+    <div class="shell-main">
+        <StatusHeader />
+        @if (State.Connected && State.Paused)
+        {
+            <div class="pause-banner" role="status">
+                <strong>New provider calls paused</strong>
+                <span class="muted">@(string.IsNullOrWhiteSpace(State.PauseReason) ? "No reason recorded." : State.PauseReason)</span>
+                <span class="subtle">Cache hits bypass this stage; in-flight work is not cancelled; downstream actions are outside Covenant.</span>
+            </div>
+        }
+        <main id="main">
+            @Body
+        </main>
+    </div>
+</div>
+
+@code {
+    protected override void OnInitialized() => State.Changed += OnChanged;
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnChanged;
+}

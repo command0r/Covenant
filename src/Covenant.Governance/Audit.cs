@@ -16,13 +16,22 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
         {
             await next(ctx, ct);
         }
+        catch (OperationCanceledException)
+        {
+            // The caller went away mid-request. Still evidence: record it as an incomplete request,
+            // never as served, and never let the cancelled token suppress the audit write below.
+            ctx.Deny("request cancelled before completion", DenialKind.Cancelled);
+            throw;
+        }
         finally
         {
             // Final outcome, not any single stage's opinion: only a request that produced a response
             // was allowed. Denied anywhere, or errored with no response → recorded as a denial.
             bool served = !ctx.IsDenied && ctx.Response is not null;
+            var id = ctx.Request.RequestId ?? $"req_{Guid.NewGuid():n}";
+            var usage = ctx.Response?.Usage ?? ctx.FailedCallUsage ?? Usage.Empty;
             var entry = new AuditEntry(
-                Id: Guid.NewGuid().ToString("n"),
+                Id: id,
                 TimestampUtc: _clock.GetUtcNow(),
                 Principal: ctx.Identity.Principal,
                 Tags: ctx.Identity.Tags,
@@ -31,7 +40,7 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 Reason: ctx.DenialReason
                     ?? (served ? ctx.Policy?.Reason ?? "allowed" : "no response produced (errored or incomplete)"),
                 ServedByModel: ctx.Response?.ServedByModel,
-                Usage: ctx.Response?.Usage ?? Usage.Empty,
+                Usage: usage,
                 DurationMs: (_clock.GetUtcNow() - ctx.StartedUtc).TotalMilliseconds,
                 // Size + fingerprint, never content: the SHA-256 proves WHICH prompt this entry is
                 // about (holder of the text can verify), while the text itself stays in the data plane.
@@ -42,9 +51,20 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 PromptPreview: promptPreviewChars > 0
                     ? Truncate(string.Join(" ⏎ ", ctx.Request.Messages.Select(m => m.Content)), promptPreviewChars)
                     : null,
-                CacheHit: ctx.ServedFromCache);
+                CacheHit: ctx.ServedFromCache,
+                SchemaVersion: 2,
+                CorrelationId: id,
+                ClassificationEvaluated: ctx.ClassificationEvaluated,
+                DenialKind: ctx.IsDenied ? ctx.DenialKind.ToString() : null,
+                StoppedAtStage: ctx.IsDenied ? ctx.StoppedAtStage : null,
+                SelectedModel: ctx.Policy?.Route?.ModelId,
+                AttemptedModel: ctx.AttemptedModel,
+                Stream: ctx.Request.Stream,
+                UsageReported: ctx.AttemptedModel is null ? null : ctx.Response?.UsageReported ?? false,
+                CostBasis: ctx.CostBasis ?? (ctx.AttemptedModel is null ? "no_call" : "unknown_failed_call"));
 
-            await sink.EnqueueAsync(entry, ct);
+            // CancellationToken.None: a cancelled request must still produce its audit record.
+            await sink.EnqueueAsync(entry, CancellationToken.None);
         }
     }
 

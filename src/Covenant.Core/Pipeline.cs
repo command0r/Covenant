@@ -33,8 +33,9 @@ public sealed class InferencePipeline
         {
             var stage = stages[i];
             var spanName = "covenant.stage." + stage.GetType().Name;
+            var stageName = StageName(stage);
             var localNext = next;
-            next = (ctx, ct) => ctx.IsDenied ? Task.CompletedTask : RunStageAsync(stage, spanName, ctx, localNext, ct);
+            next = (ctx, ct) => ctx.IsDenied ? Task.CompletedTask : RunStageAsync(stage, spanName, stageName, ctx, localNext, ct);
         }
         _entry = next;
     }
@@ -53,10 +54,26 @@ public sealed class InferencePipeline
     }
 
     private static async Task RunStageAsync(
-        IPipelineStage stage, string spanName, InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
+        IPipelineStage stage, string spanName, string stageName, InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
         using var activity = CovenantDiagnostics.Source.StartActivity(spanName);
+        ctx.CurrentStage = stageName;
         await stage.InvokeAsync(ctx, next, ct);
+    }
+
+    /// <summary>Stable evidence names for stages (audit field StoppedAtStage); unknown stage types
+    /// fall back to their lower-cased type name without the "Stage" suffix.</summary>
+    public static string StageName(IPipelineStage stage)
+    {
+        var name = stage.GetType().Name;
+        if (name.EndsWith("Stage", StringComparison.Ordinal)) name = name[..^5];
+        return name switch
+        {
+            "Classify" => "classify",
+            "RateLimit" => "rate_limit",
+            "ProviderCall" => "provider",
+            _ => name.ToLowerInvariant(),
+        };
     }
 
     /// <summary>Governance metadata only (ADR-0003): classification, outcome, route, usage, attribution

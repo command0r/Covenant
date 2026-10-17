@@ -1,0 +1,208 @@
+@page "/budgets"
+@inject AppState State
+@inject AdminApi Api
+@implements IDisposable
+
+<PageTitle>Budgets · Covenant</PageTitle>
+
+<div class="page">
+    <RequiresConnection>
+        @if (State.LastStatus is not { } s)
+        {
+            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
+        }
+        else
+        {
+            var b = s.Budget;
+            var f = s.FinOps;
+            var remaining = b.GlobalCapUsd - b.GlobalSpendUsd;
+            var pct = Fmt.PercentClamped(b.GlobalSpendUsd, b.GlobalCapUsd);
+
+            if (b.GlobalCapUsd > 0 && b.GlobalSpendUsd >= b.GlobalCapUsd)
+            {
+                <AlertCard Tone="bad" Title="Global cap reached"
+                           Body="New provider calls are refused at the budget stage until accounting restarts. Cache hits are still served. Archive & reset (Settings → Maintenance) is a maintenance action, not the fix for an exhausted budget." />
+            }
+            else if (pct >= 80)
+            {
+                <AlertCard Tone="warn" Title="@($"Global budget {pct}% used")" Body="Calls already in flight when the cap is reached can still finish; the cap is a pre-call threshold." />
+            }
+
+            <div class="page-head">
+                <div class="titles">
+                    <h1>Budgets</h1>
+                    <span class="lede">Accounting period: the current audit segment<span>@SegmentSuffix</span>. Spend is rebuilt from the audit log at start; it is not a monthly billing cycle.</span>
+                </div>
+                <span class="page-note">Caps managed by configuration; restart required</span>
+            </div>
+
+            <section class="panel" aria-labelledby="g-h">
+                <h2 id="g-h">Global cap</h2>
+                <FactList Inline="true" Facts="@GlobalFacts(b, remaining)" />
+                <span class="meter @(pct >= 100 ? "bad" : pct >= 80 ? "warn" : "")" role="img" aria-label="@(Fmt.Percent(b.GlobalSpendUsd, b.GlobalCapUsd) + " of the global cap used")">
+                    <span style="width:@pct%"></span>
+                </span>
+                <div class="two-col secondary">
+                    <div>
+                        <strong>A threshold, checked before each call</strong>
+                        <p class="muted">Before a provider call, Covenant compares estimated spend recorded so far with the cap and refuses new calls once it is reached. Cache hits are not checked.</p>
+                    </div>
+                    <div>
+                        <strong>Not an exact invoice cap</strong>
+                        <p class="muted">Cost is known only after a call returns, so calls already in flight when the cap is reached can still finish — concurrent calls can overshoot it. Your provider’s invoice remains the billing record.</p>
+                    </div>
+                </div>
+                <p class="secondary subtle">Ledger is reconstructed from the current audit segment; a pre-call threshold check, not an invoice ceiling.</p>
+            </section>
+
+            <section class="panel flush" aria-labelledby="t-h">
+                <div class="panel-head">
+                    <h2 id="t-h">Teams</h2>
+                    <span class="panel-sub">Attribution from the audit record’s team tag</span>
+                </div>
+                @if (b.Teams.Count == 0)
+                {
+                    <div style="padding:18px"><EmptyState Title="No team spend recorded" Body="Teams appear here once a request attributed to them is recorded or a team cap is configured." /></div>
+                }
+                else
+                {
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th scope="col">Team</th>
+                                    <th scope="col" class="num">Recorded spend</th>
+                                    <th scope="col" class="num">Team cap</th>
+                                    <th scope="col" class="num">Remaining</th>
+                                    <th scope="col">Limits that apply</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var t in b.Teams.OrderByDescending(x => x.SpendUsd))
+                                {
+                                    <tr>
+                                        <td class="mono">@t.Team</td>
+                                        <td class="num mono">@Fmt.Usd(t.SpendUsd)</td>
+                                        <td class="num mono">@(t.CapUsd is { } cap ? Fmt.UsdTotal(cap) : "None configured")</td>
+                                        <td class="num mono">@(t.CapUsd is { } c2 ? (c2 - t.SpendUsd >= 0 ? Fmt.Usd(c2 - t.SpendUsd) : "Exceeded") : "—")</td>
+                                        <td class="secondary muted">@(t.CapUsd is null ? "Global cap only" : "Team cap, then global cap")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                }
+            </section>
+
+            <section class="panel" aria-labelledby="sb-h">
+                <h2 id="sb-h">What counts as spend</h2>
+                <ul class="plain-list secondary">
+                    <li>Estimated provider cost: tokens the provider reports × the configured price for that model. Covenant does not read provider invoices.</li>
+                    <li>Local route: $0 by configured price. Hardware, electricity and operations are excluded, not free.</li>
+                    <li>When a priced model reports no usage, cost is estimated from text length and charged (fail-closed). An unpriced model is charged $0 but counted as unknown — never as a saving.</li>
+                </ul>
+                <div class="indicator secondary">
+                    <span class="dot @(UnknownCostCount is > 0 ? "warn" : UnknownCostCount is null ? "" : "hollow")" aria-hidden="true"></span>
+                    @if (_requestsError is not null)
+                    {
+                        <span class="muted">Unknown-cost requests: unavailable (@_requestsError)</span>
+                    }
+                    else if (UnknownCostCount is null)
+                    {
+                        <span class="muted">Unknown-cost requests: counting…</span>
+                    }
+                    else
+                    {
+                        <span>Unknown-cost requests: <span class="mono">@UnknownCostCount</span> <span class="subtle">(@_unpriced unknown · @_estimated charged from a text-length estimate, of @_scanned records scanned)</span></span>
+                    }
+                </div>
+            </section>
+
+            <section class="panel" aria-labelledby="av-h">
+                <button type="button" class="btn ghost" style="justify-content:space-between;width:100%;text-align:left;min-height:48px"
+                        @onclick="@(() => _avoidedOpen = !_avoidedOpen)" aria-expanded="@(_avoidedOpen ? "true" : "false")" aria-controls="av-body">
+                    <span style="display:flex;flex-direction:column;align-items:flex-start">
+                        <span id="av-h" style="font-size:var(--text-section);font-weight:600">Estimated provider charge avoided</span>
+                        <span class="secondary subtle">@Fmt.Usd(f.EstimatedSavingsUsd) this segment · secondary analysis, not a measured saving</span>
+                    </span>
+                    <span>@(_avoidedOpen ? "Hide" : "Show")</span>
+                </button>
+                @if (_avoidedOpen)
+                {
+                    <div id="av-body" style="display:flex;flex-direction:column;gap:12px">
+                        <p class="secondary muted">Baseline assumption: every served request priced on the Host’s configured strong model at configured prices, uncached. An estimate, not a measured saving.</p>
+                        <div class="table-wrap">
+                            <table class="secondary">
+                                <thead><tr><th scope="col">Source</th><th scope="col" class="num">Estimate</th><th scope="col">Basis</th></tr></thead>
+                                <tbody>
+                                    <tr><td>Complexity router</td><td class="num mono">@Fmt.Usd(f.SavingsRouterUsd)</td><td class="muted">Served by a cheaper permitted cloud model instead of the baseline</td></tr>
+                                    <tr><td>Cache</td><td class="num mono">@Fmt.Usd(f.SavingsCacheUsd)</td><td class="muted">@(f.CacheHits == 0 ? "No cache hits in this segment" : $"{Fmt.Int(f.CacheHits)} cache hits priced at the cached model’s rate")</td></tr>
+                                    <tr><td>Local route</td><td class="num mono">@Fmt.Usd(f.SavingsLocalUsd)</td><td class="muted">@(f.LocalRequests == 0 ? "No local requests in this segment" : $"{Fmt.Int(f.LocalRequests)} requests, {Fmt.Int(f.LocalTokens)} tokens · provider price delta only; infrastructure cost is not configured")</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                }
+            </section>
+        }
+    </RequiresConnection>
+</div>
+
+@code {
+    private static IReadOnlyList<FactList.Fact> GlobalFacts(BudgetStatus b, decimal remaining) =>
+    [
+        new("Cap", Fmt.UsdTotal(b.GlobalCapUsd), true),
+        new("Recorded spend", Fmt.Usd(b.GlobalSpendUsd), true),
+        new("Remaining", remaining >= 0 ? Fmt.Usd(remaining) : "Exceeded by " + Fmt.Usd(-remaining), true),
+        new("Used", Fmt.Percent(b.GlobalSpendUsd, b.GlobalCapUsd), true),
+    ];
+
+    private bool _avoidedOpen;
+    private string? _requestsError;
+    private int? _unpriced;
+    private int? _estimated;
+    private int _scanned;
+    private bool _loadedOnce;
+
+    private SegmentInfo? Segment { get; set; }
+    private int? UnknownCostCount => _unpriced is null || _estimated is null ? null : _unpriced + _estimated;
+    private string SegmentSuffix => Segment is { FirstUtc: { } first } ? ", begun " + Fmt.Utc(first) : "";
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (State.Connected && !_loadedOnce) await LoadRequestsAsync();
+    }
+
+    private async Task LoadRequestsAsync()
+    {
+        _loadedOnce = true;
+        try
+        {
+            var r = await Api.GetRequestsAsync(1000);
+            Segment = r.Segment;
+            _scanned = r.Items.Count;
+            _unpriced = r.Items.Count(i => i.CostBasis is "unpriced" or "unknown_failed_call");
+            _estimated = r.Items.Count(i => i.CostBasis is "estimated_from_text" or "estimated_failed_call");
+            _requestsError = null;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _requestsError = "requests endpoint not available on this Host";
+        }
+        catch (Exception ex)
+        {
+            _requestsError = ex.Message;
+        }
+        StateHasChanged();
+    }
+
+    private void OnChanged()
+    {
+        if (State.Connected && !_loadedOnce) _ = InvokeAsync(LoadRequestsAsync);
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose() => State.Changed -= OnChanged;
+}

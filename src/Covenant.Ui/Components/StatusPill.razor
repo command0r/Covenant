@@ -1,0 +1,32 @@
+@* Outcome / state pill. Kind is one of: served, refused, failed, paused, unknown (anything else → unknown). *@
+<span class="pill @Css" role="status">
+    <span class="dot" aria-hidden="true"></span>@Label
+</span>
+
+@code {
+    [Parameter] public string Kind { get; set; } = "unknown";
+    [Parameter] public string? Text { get; set; }
+
+    private static readonly HashSet<string> Known = new(StringComparer.OrdinalIgnoreCase) { "served", "refused", "failed", "paused", "unknown" };
+
+    private string Css => Known.Contains(Kind) ? Kind.ToLowerInvariant() : "unknown";
+
+    private string Label => Text ?? Css switch
+    {
+        "served" => "Served",
+        "refused" => "Refused",
+        "failed" => "Failed",
+        "paused" => "Paused",
+        _ => "Unknown",
+    };
+
+    /// <summary>Maps an audit Effect/DenialKind pair onto a pill kind. Governance refusals are "refused";
+    /// upstream failures are "failed"; anything unrecognised is "unknown" — never a default green.</summary>
+    public static string KindFor(string? effect, string? denialKind)
+    {
+        if (string.Equals(effect, "Allow", StringComparison.OrdinalIgnoreCase)) return "served";
+        if (string.Equals(effect, "Deny", StringComparison.OrdinalIgnoreCase))
+            return string.Equals(denialKind, "UpstreamFailure", StringComparison.OrdinalIgnoreCase) ? "failed" : "refused";
+        return "unknown";
+    }
+}

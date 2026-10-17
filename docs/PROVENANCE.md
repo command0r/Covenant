@@ -22,5 +22,9 @@ No third-party source code has been copied into this repository. Everything belo
 - `OpenTelemetry.Extensions.Hosting` / `OpenTelemetry.Exporter.OpenTelemetryProtocol` 1.17.0 — Apache-2.0. Host-only, activated only when `Otel:Endpoint` is configured (ADR-0003). Core instruments via BCL `ActivitySource` and takes no OTel dependency.
 - `Neo4j.Driver` 6.2.1 — Apache-2.0, official Bolt driver. Host-only, activated only when `Neo4j:Uri` is configured (ADR-0006 evidence graph projection).
 - `Anthropic` 12.8.0 — MIT, official Anthropic SDK (IChatClient integration). Host-only, activated only when `Anthropic:ApiKey` is configured (ADR-0001 provider start set).
+- Console (`src/Covenant.Ui`, ADR-0004 standalone Blazor WebAssembly; compiled to static assets and embedded in the Host — never loaded into the Host process): `Microsoft.AspNetCore.Components.WebAssembly` 10.0.11 — MIT; `Microsoft.AspNetCore.Components.WebAssembly.DevServer` 10.0.11 — MIT, build/dev-time only (`PrivateAssets=all`), not in the published bundle. Pinned against nuget.org 2026-10-16.
+
+## Bundled assets (not code)
+- **IBM Plex Sans** (400/500/600, latin subset) and **IBM Plex Mono** (400/500, latin subset) — Copyright 2018 IBM Corp., **SIL Open Font License 1.1**. Copied from `covenant-prototype/fonts/` into `src/Covenant.Ui/wwwroot/fonts/` as `.woff2` together with both licence texts (`LICENSE-ibm-plex-sans.txt`, `LICENSE-ibm-plex-mono.txt`) and the `@font-face` declarations in `fonts/fonts.css`. Served only from the appliance (`/ui/fonts/*`); nothing is fetched from a CDN. The OFL permits bundling and redistribution with the licence; the fonts are not sold on their own and are not renamed (Reserved Font Name "Plex" is kept).
 
 _Update this file in the same change as any code that introduces a new influence or dependency._

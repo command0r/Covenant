@@ -1,0 +1,213 @@
+@page "/settings"
+@inject AppState State
+@inject AdminApi Api
+@inject ConsoleSession Session
+@inject NavigationManager Nav
+@implements IDisposable
+
+<PageTitle>Settings · Covenant</PageTitle>
+
+<div class="page">
+    <RequiresConnection>
+        @if (State.LastStatus is not { } s)
+        {
+            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
+        }
+        else
+        {
+            <div class="page-head">
+                <div class="titles">
+                    <h1>Settings</h1>
+                    <span class="lede">Values in effect since the last start (@Fmt.Utc(s.StartedUtc)). Change them in configuration and restart — there is nothing to save here.</span>
+                </div>
+            </div>
+
+            <section class="panel flush" aria-labelledby="cfg-h">
+                <div class="panel-head">
+                    <h2 id="cfg-h">Environment and configuration</h2>
+                    <span class="panel-sub">Managed by configuration; restart required</span>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <tbody>
+                            @foreach (var row in Rows(s))
+                            {
+                                <tr>
+                                    <th scope="row" style="width:34%">@row.Key</th>
+                                    <td>
+                                        <div style="display:flex;flex-direction:column;gap:2px">
+                                            <span class="@(row.Mono ? "mono" : "")">@row.Value</span>
+                                            @if (row.Note is not null)
+                                            {
+                                                <span class="secondary subtle">@row.Note</span>
+                                            }
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel" aria-labelledby="ses-h">
+                <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
+                    <h2 id="ses-h">This console session</h2>
+                    <span class="panel-sub">Connected with the shared admin token, kept in this tab’s session storage. It administers the console only and never sends model requests. Disconnecting does not pause Covenant.</span>
+                </div>
+                <FactList Facts="@SessionFacts()" />
+                <div class="btn-row">
+                    <Button OnClick="DisconnectAsync">Disconnect</Button>
+                </div>
+            </section>
+
+            <section class="panel" aria-labelledby="mt-h" style="border-color:var(--amber)">
+                <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
+                    <h2 id="mt-h">Maintenance</h2>
+                    <span class="panel-sub">Separate from day-to-day settings. Not a way to start a demo, and not a fix for an exhausted budget.</span>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:8px">
+                    <strong>Archive audit segment and reset spend accounting</strong>
+                    <ul class="plain-list secondary muted">
+                        <li>The current audit segment is closed and archived with a timestamp. Nothing is deleted; the archive stays independently verifiable.</li>
+                        <li>Spend counters reset to $0. Any reached budget reopens because accounting restarts, not because spend went away.</li>
+                        <li>Overview, Budgets and Requests then show only the new segment.</li>
+                    </ul>
+                </div>
+
+                @if (_resetError is not null)
+                {
+                    <ErrorBanner Title="Archive & reset failed" Message="@_resetError" />
+                }
+                @if (_resetResult is { } done)
+                {
+                    <div class="alert ok" role="status">
+                        <div class="alert-text">
+                            <strong>Segment archived · accounting reset</strong>
+                            <span class="alert-body">
+                                @(done.ArchivedTo is { Length: > 0 } ? "Archived to " : "Nothing to archive (the segment was empty); ")
+                                @if (done.ArchivedTo is { Length: > 0 })
+                                {
+                                    <span class="mono">@done.ArchivedTo</span><span>. </span>
+                                }
+                                A new segment has started.
+                            </span>
+                        </div>
+                        <a class="btn" href="evidence">View in Evidence</a>
+                    </div>
+                }
+
+                @if (!s.ChainValid)
+                {
+                    <AlertCard Tone="bad" Title="Chain verification is failing — do not archive" Body="Investigate the current segment first (Evidence). Archiving now would move an unverifiable segment out of view." ActionText="Open evidence" ActionHref="evidence" />
+                }
+                else
+                {
+                    <div class="btn-row">
+                        <Button Id="reset-open" Variant="danger" OnClick="@(() => { _confirmOpen = true; _typed = ""; })" Disabled="@_resetting">Archive and reset accounting…</Button>
+                    </div>
+                }
+            </section>
+
+            <Drawer Mode="dialog" Title="@("Confirm for environment " + State.EnvironmentLabel)" @bind-Open="_confirmOpen" OpenerId="reset-open">
+                <p class="secondary">This will <strong>archive the current audit segment</strong> (@Fmt.Int(s.AuditEntries) entries, since @SegmentStart(s)) and <strong>reset spend counters</strong> (@Fmt.Usd(s.Budget.GlobalSpendUsd) recorded against a @Fmt.UsdTotal(s.Budget.GlobalCapUsd) cap) — budgets reopen. The archived segment is kept and stays verifiable. Nothing is deleted.</p>
+                @if (State.Paused)
+                {
+                    <p class="secondary" style="color:var(--amber)">New provider calls are currently paused; resetting accounting does not resume them.</p>
+                }
+                <div class="field">
+                    <label for="envname">Type the environment name (<span class="mono">@State.EnvironmentLabel</span>) to confirm</label>
+                    <input id="envname" class="input mono" type="text" autocomplete="off" spellcheck="false" @bind="_typed" @bind:event="oninput" disabled="@_resetting" />
+                </div>
+                <div class="btn-row" style="justify-content:flex-end">
+                    <Button OnClick="@(() => _confirmOpen = false)" Disabled="@_resetting">Cancel</Button>
+                    <Button Variant="danger" OnClick="ResetAsync" Busy="@_resetting" BusyText="Archiving… (POST /admin/reset)" Disabled="@(!CanConfirm)">Archive and reset accounting</Button>
+                </div>
+            </Drawer>
+        }
+    </RequiresConnection>
+</div>
+
+@code {
+    private sealed record Row(string Key, string Value, string? Note = null, bool Mono = false);
+
+    private bool _confirmOpen;
+    private string _typed = "";
+    private bool _resetting;
+    private string? _resetError;
+    private ResetResponse? _resetResult;
+
+    private bool CanConfirm => !_resetting && string.Equals(_typed.Trim(), State.EnvironmentLabel, StringComparison.Ordinal);
+
+    protected override void OnInitialized() => State.Changed += OnChanged;
+
+    private static string NotReported => "Not reported by this Host";
+
+    private static List<Row> Rows(StatusReport s) =>
+    [
+        new("Environment", s.Environment ?? NotReported, "Shown in the header and in every confirmation", true),
+        new("Provider mode", s.Mode ?? NotReported, "Providers:Mode — cloud or local-only (ADR-0010)", true),
+        new("Covenant version", s.Version ?? NotReported, null, true),
+        new("Started", Fmt.Utc(s.StartedUtc), "Configuration is read once at start", true),
+        new("Audit log path", s.AuditPath ?? NotReported, "Audit:Path — the current segment; archives sit beside it", true),
+        new("Anchor", AnchorText(s), "Audit:AnchorPath / Audit:AnchorEvery — see Evidence for coverage"),
+        new("Cache TTL", s.CacheTtlSeconds is { } ttl ? (ttl == 0 ? "Disabled" : Fmt.Int(ttl) + " s") : NotReported, "Cache:TtlSeconds — identical governed requests are answered without a provider call", true),
+        new("Content-preview retention", s.PromptPreviewChars is { } pc ? (pc == 0 ? "No prompt preview stored" : Fmt.Int(pc) + " characters of each prompt") : NotReported, "Audit:PromptPreviewChars — the only prompt content the audit record holds", true),
+        new("Telemetry (OpenTelemetry)", s.OtelEnabled ? "Enabled — exporting to the configured in-perimeter collector" : "Disabled", "Otel:Endpoint; active only when configured (ADR-0003)"),
+        new("Routing threshold", Fmt.Int(s.RoutingThresholdTokens) + " estimated tokens", "Routing:ComplexityThresholdTokens — below: cheapest permitted route; above: escalate", true),
+        new("Application keys", Fmt.Int(s.Auth.KeyCount) + (s.Auth.KeyCount == 1 ? " key" : " keys") + (s.Auth.AllowAnonymous ? " · anonymous requests ALLOWED" : " · anonymous requests refused"), "Auth:Keys — count only; key values never leave the configuration", true),
+        new("Global budget cap", Fmt.UsdTotal(s.Budget.GlobalCapUsd), "Budget:GlobalCapUsd — team caps are listed under Budgets", true),
+    ];
+
+    private static string AnchorText(StatusReport s) => s.Anchor switch
+    {
+        null => NotReported,
+        { Configured: false } => "Not configured",
+        { Configured: true, Every: { } every } => $"Configured · every {Fmt.Int(every)} entries",
+        _ => "Configured",
+    };
+
+    private static string SegmentStart(StatusReport s)
+        => s.FinOps.Activity.Count > 0 ? Fmt.Utc(s.FinOps.Activity[0].T) : "start of segment (no entries yet)";
+
+    private IReadOnlyList<FactList.Fact> SessionFacts() =>
+    [
+        new("Credential", "Shared admin token (X-Covenant-Admin-Token)", true),
+        new("Stored in", "This tab’s sessionStorage only; cleared on disconnect or when the tab closes"),
+        new("Status feed", State.FeedMode switch { FeedMode.Stream => "Live stream (/admin/status/stream)", FeedMode.Polling => "Polling every 3 s (stream unavailable)", _ => "Not running" }, true),
+        new("Application key", State.ApplicationKey is null ? "None held" : "Held in memory for the Playground; never persisted"),
+        new("Theme", "Stored in localStorage (the only value this console persists there)"),
+    ];
+
+    private async Task ResetAsync()
+    {
+        if (!CanConfirm) return;
+        _resetting = true; _resetError = null; _resetResult = null;
+        try
+        {
+            _resetResult = await Api.ResetAsync();
+            _confirmOpen = false;
+        }
+        catch (Exception ex)
+        {
+            _resetError = ex.Message;
+            _confirmOpen = false;
+        }
+        finally
+        {
+            _resetting = false;
+            _typed = "";
+        }
+        // Never assume the outcome: re-sync the counters from the server either way.
+        await Session.TryRefreshAsync();
+    }
+
+    private async Task DisconnectAsync()
+    {
+        await Session.DisconnectAsync("Disconnected");
+        Nav.NavigateTo("connect");
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+    public void Dispose() => State.Changed -= OnChanged;
+}

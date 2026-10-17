@@ -1,0 +1,24 @@
+@* Failure surfaced to the operator. Never rendered as success-coloured; the detail (server reason / HTTP status)
+   is shown verbatim because the Host's error bodies are allow-listed labels, never client or secret bytes. *@
+@if (Message is not null)
+{
+    <div class="error-banner" role="alert">
+        <div class="error-text">
+            <strong>@Title</strong>
+            <span class="detail">@Message</span>
+        </div>
+        @if (OnRetry.HasDelegate)
+        {
+            <Button OnClick="@(_ => OnRetry.InvokeAsync())" Busy="@Busy" BusyText="Retrying…">Retry</Button>
+        }
+        @ChildContent
+    </div>
+}
+
+@code {
+    [Parameter] public string Title { get; set; } = "Something failed";
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public EventCallback OnRetry { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

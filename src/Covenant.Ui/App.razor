@@ -1,0 +1,18 @@
+@inject ConsoleSession Session
+
+@* .NET 10: Router.NotFound (render fragment) is [Obsolete] → CS0618 under warnings-as-errors; NotFoundPage is the
+   replacement and must be a routable component (Pages/NotFound.razor). *@
+<Router AppAssembly="@typeof(App).Assembly" NotFoundPage="@typeof(Covenant.Ui.Pages.NotFound)">
+    <Found Context="routeData">
+        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+    </Found>
+</Router>
+
+@code {
+    protected override async Task OnInitializedAsync()
+    {
+        // Resume a tab-scoped session (sessionStorage) before the first page renders its data.
+        await Session.RestoreAsync();
+    }
+}

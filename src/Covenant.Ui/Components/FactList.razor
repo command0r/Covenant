@@ -1,0 +1,26 @@
+@* Label/value rows. Mono values (ids, models, numbers, hashes) set Mono=true per fact. Inline=true lays the
+   facts out as a responsive grid of small label-over-value cells (summary strips). *@
+<dl class="facts @(Inline ? "inline" : "")">
+    @foreach (var f in Facts)
+    {
+        if (Inline)
+        {
+            <div>
+                <dt>@f.Label</dt>
+                <dd class="@(f.Mono ? "mono" : "")">@f.Value</dd>
+            </div>
+        }
+        else
+        {
+            <dt>@f.Label</dt>
+            <dd class="@(f.Mono ? "mono" : "")">@f.Value</dd>
+        }
+    }
+</dl>
+
+@code {
+    public sealed record Fact(string Label, string Value, bool Mono = false);
+
+    [Parameter] public IReadOnlyList<Fact> Facts { get; set; } = [];
+    [Parameter] public bool Inline { get; set; }
+}

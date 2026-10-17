@@ -1,0 +1,38 @@
+@* One button, four variants (default, primary, danger, ghost). Renders an <a> when Href is set so links that
+   look like buttons stay real links (middle-click, focus order). *@
+@if (Href is not null)
+{
+    <a class="btn @Variant @Size" href="@Href" id="@Id" aria-label="@AriaLabel">@ChildContent</a>
+}
+else
+{
+    <button type="@Type" class="btn @Variant @Size" id="@Id" disabled="@(Disabled || Busy)"
+            aria-label="@AriaLabel" aria-busy="@(Busy ? "true" : null)" @onclick="HandleClick">
+        @if (Busy && BusyText is not null)
+        {
+            @BusyText
+        }
+        else
+        {
+            @ChildContent
+        }
+    </button>
+}
+
+@code {
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    /// <summary>"" (default), "primary", "danger", "ghost".</summary>
+    [Parameter] public string Variant { get; set; } = "";
+    /// <summary>"" (40px), "form" (44px), "sm" (32px).</summary>
+    [Parameter] public string Size { get; set; } = "";
+    [Parameter] public string Type { get; set; } = "button";
+    [Parameter] public string? Id { get; set; }
+    [Parameter] public string? Href { get; set; }
+    [Parameter] public string? AriaLabel { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public string? BusyText { get; set; }
+    [Parameter] public EventCallback<MouseEventArgs> OnClick { get; set; }
+
+    private Task HandleClick(MouseEventArgs e) => Disabled || Busy ? Task.CompletedTask : OnClick.InvokeAsync(e);
+}

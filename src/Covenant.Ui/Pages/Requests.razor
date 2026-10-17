@@ -1,0 +1,496 @@
+@page "/requests"
+@page "/requests/{Id}"
+@using System.Text.Json
+@using System.Text.Json.Serialization
+@inject AdminApi Api
+@inject AppState State
+@inject RequestsViewState View
+@inject NavigationManager Nav
+@implements IDisposable
+
+<PageTitle>Requests · Covenant</PageTitle>
+
+@*
+  TASK 05. A recent snapshot of the CURRENT audit segment (GET /admin/requests?limit=500), filtered client-side,
+  labelled as such. Rows show the facts recorded at processing time only — today's pause, policy or health never
+  recolours them. Deep links (/requests/{id}) always fetch the exact record by correlation id.
+*@
+
+<div class="page" style="max-width:none">
+    <RequiresConnection>
+        <div class="page-head">
+            <div class="titles">
+                <h1>Requests</h1>
+                <span class="lede">@CoverageLabel</span>
+            </div>
+            <Button Busy="@_loading" BusyText="Loading…" OnClick="LoadAsync">Refresh</Button>
+        </div>
+
+        <ErrorBanner Title="Could not load recent requests" Message="@_loadError" OnRetry="LoadAsync" Busy="@_loading" />
+
+        <div class="filters" role="search" aria-label="Filter recent requests">
+            <div class="field search">
+                <label for="rq-id">Request id contains</label>
+                <input id="rq-id" class="input mono" type="search" spellcheck="false" placeholder="e.g. req_3f2a…"
+                       value="@View.Criteria.IdSearch" @oninput="OnIdSearch" />
+            </div>
+            <div class="field">
+                <label for="rq-out">Outcome</label>
+                <select id="rq-out" class="input" value="@(View.Criteria.Outcome?.ToString() ?? "")" @onchange="OnOutcome">
+                    <option value="">Any outcome</option>
+                    @foreach (var o in OutcomeOptions)
+                    {
+                        <option value="@o.ToString()">@OutcomeModel.Label(o)</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
+                <label for="rq-model">Model</label>
+                <select id="rq-model" class="input mono" value="@(View.Criteria.Model ?? "")" @onchange="OnModel">
+                    <option value="">Any model</option>
+                    @foreach (var m in ModelOptions)
+                    {
+                        <option value="@m">@m</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
+                <label for="rq-team">Team</label>
+                <select id="rq-team" class="input" value="@(View.Criteria.Team ?? "")" @onchange="OnTeam">
+                    <option value="">Any team</option>
+                    @foreach (var t in TeamOptions)
+                    {
+                        <option value="@t">@t</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
+                <label for="rq-time">Time</label>
+                <select id="rq-time" class="input" value="@View.Criteria.Window.ToString()" @onchange="OnWindow">
+                    @foreach (var w in Enum.GetValues<TimeWindow>())
+                    {
+                        <option value="@w.ToString()">@RequestFilter.Label(w)</option>
+                    }
+                </select>
+            </div>
+            <Button Size="form" Disabled="@(!View.Criteria.IsActive)" OnClick="ClearFilters">Clear filters</Button>
+        </div>
+        <span class="note">Filters apply to the recent snapshot loaded here (newest @RequestsViewState.SnapshotLimit records of the current audit segment), not to the full audit log or archived segments.</span>
+
+        <section class="panel flush" aria-labelledby="rq-h">
+            <div class="panel-head">
+                <h2 id="rq-h">Recent requests</h2>
+                <span class="panel-sub">@CountLabel</span>
+            </div>
+            @if (View.Snapshot is null)
+            {
+                if (_loading)
+                {
+                    <div style="padding:18px"><Skeleton Lines="5" Label="Loading recent requests" /></div>
+                }
+            }
+            else if (View.Snapshot.Items.Count == 0)
+            {
+                <div style="padding:18px"><EmptyState Title="No requests in the current audit segment yet" Body="Run a request in the Playground; its audit record appears here." /></div>
+            }
+            else if (Filtered.Count == 0)
+            {
+                <div style="padding:18px">
+                    <EmptyState Title="No requests match these filters" Body="The loaded snapshot has records, but none match.">
+                        <Button OnClick="ClearFilters">Clear filters</Button>
+                    </EmptyState>
+                </div>
+            }
+            else
+            {
+                <div class="table-scroll">
+                    <table class="req-table">
+                        <colgroup>
+                            <col style="width:150px" />
+                            <col style="width:170px" />
+                            <col style="width:190px" />
+                            <col style="width:270px" />
+                            <col style="width:90px" />
+                            <col style="width:170px" />
+                            <col style="width:200px" />
+                        </colgroup>
+                        <thead>
+                            <tr>
+                                <th scope="col">Time (UTC)</th>
+                                <th scope="col">Identity / team</th>
+                                <th scope="col">Outcome</th>
+                                <th scope="col">Selected → served model</th>
+                                <th scope="col" class="num">Duration</th>
+                                <th scope="col">Est. cost</th>
+                                <th scope="col">Request id</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var item in Filtered)
+                            {
+                                var r = item;
+                                var o = OutcomeModel.FromRecord(r);
+                                var model = ModelFacts.SelectedToServed(r);
+                                var cost = CostText.CostShort(r);
+                                <tr class="@(r.Id == View.SelectedId ? "selected" : "")" @onclick="() => Open(r)">
+                                    <td class="mono"><span class="cell" title="@Fmt.Utc(r.TimestampUtc)">@(r.TimestampUtc.UtcDateTime.ToString("MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))</span></td>
+                                    <td><span class="cell" title="@(r.Principal + " / " + r.Tags.Team)">@r.Principal <span class="subtle">/ @r.Tags.Team</span></span></td>
+                                    <td><span class="cell" title="@o.Title"><StatusPill Kind="@o.PillKind" Text="@OutcomeModel.Label(o.Outcome)" /></span></td>
+                                    <td class="mono"><span class="cell" title="@model">@model</span></td>
+                                    <td class="num mono">@Fmt.Ms(r.DurationMs)</td>
+                                    <td class="mono"><span class="cell" title="@CostText.Cost(r)">@cost</span></td>
+                                    <td>
+                                        <button type="button" id="@RowId(r.Id)" class="btn ghost sm mono cell" style="max-width:100%" title="@r.Id"
+                                                aria-label="@("Open details for request " + r.Id)" @onclick="() => Open(r)" @onclick:stopPropagation="true">
+                                            @Truncate(r.Id)
+                                        </button>
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+        </section>
+
+        <Drawer Open="@DrawerOpen" OpenChanged="OnDrawerOpenChanged" Title="@DrawerTitle" OpenerId="@(View.SelectedId is { } sid ? RowId(sid) : null)">
+            @if (_detailLoading)
+            {
+                <Skeleton Lines="6" Label="Loading the audit record" />
+            }
+            else if (_notFound)
+            {
+                <EmptyState Title="Not in the current audit segment"
+                            Body="@("No record with id " + Id + " was found (may be archived or not yet written). Archived segments are not searchable here; a request that was just sent may still be on its way.")">
+                    <Button OnClick="RetryDetailAsync">Retry lookup</Button>
+                </EmptyState>
+            }
+            else if (_detailError is not null)
+            {
+                <ErrorBanner Title="Could not load this request" Message="@_detailError" OnRetry="RetryDetailAsync" />
+            }
+            else if (View.SelectedRecord is { } rec)
+            {
+                if (HiddenNote(rec) is { } note)
+                {
+                    <div class="alert info" role="status"><div class="alert-text"><span class="alert-body">@note</span></div></div>
+                }
+                var o = OutcomeModel.FromRecord(rec);
+                var mf = ModelFacts.From(rec);
+
+                <section class="drawer-section" aria-label="Result">
+                    <h3>1 · Result</h3>
+                    <div class="result-head">
+                        <span class="outcome @o.PillKind" style="font-size:22px">@o.Title</span>
+                    </div>
+                    <span class="secondary">@o.Explanation</span>
+                    <span class="note">Recorded when the request was processed. Today’s pause, policy or model health does not change this result.</span>
+                </section>
+
+                <section class="drawer-section" aria-label="Request, identity and routing">
+                    <h3>2 · Request, identity and routing</h3>
+                    <dl class="facts">
+                        <dt>Request id</dt><dd class="mono">@rec.Id</dd>
+                        <dt>Time</dt><dd>@Fmt.Utc(rec.TimestampUtc)</dd>
+                        <dt>Identity</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Principal)</dd>
+                        <dt>Team</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Tags.Team)</dd>
+                        <dt>Workflow / use case</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Tags.Workflow) · @Fmt.OrNotRecorded(rec.Tags.UseCase)</dd>
+                        <dt>Selected model</dt><dd class="mono">@mf.Selected</dd>
+                        <dt>Provider attempted</dt><dd class="mono">@mf.Attempted</dd>
+                        <dt>Served model</dt><dd class="mono">@mf.Served</dd>
+                        <dt>Streamed</dt><dd>@(rec.Stream is { } st ? (st ? "Yes" : "No") : "Not recorded")</dd>
+                        <dt>Stopped at</dt><dd>@StoppedText(rec)</dd>
+                        <dt>Recorded reason</dt><dd>@Fmt.OrNotRecorded(rec.Reason)</dd>
+                    </dl>
+                </section>
+
+                <section class="drawer-section" aria-label="Classification">
+                    <h3>3 · Classification</h3>
+                    <span>@mf.Classification</span>
+                    @if (rec.ClassificationEvaluated == false)
+                    {
+                        <span class="note">The pipeline starts from the restrictive default (@rec.Classification) for enforcement. It is not a detection: the classifier never ran for this request.</span>
+                    }
+                    else if (rec.ClassificationEvaluated is null)
+                    {
+                        <span class="note">Legacy record: whether classification ran was not recorded. Stored class: @Fmt.OrNotRecorded(rec.Classification)@(rec.Signal is { Length: > 0 } sg ? " · signal " + sg : "").</span>
+                    }
+                </section>
+
+                <section class="drawer-section" aria-label="Usage, estimated cost and timing">
+                    <h3>4 · Usage, estimated cost and timing</h3>
+                    <dl class="facts">
+                        <dt>Tokens</dt><dd class="mono">@CostText.Tokens(rec)</dd>
+                        <dt>Estimated cost</dt><dd>@CostText.Cost(rec)</dd>
+                        <dt>Cost basis</dt><dd>@CostText.BasisDescription(rec.CostBasis)</dd>
+                        <dt>Cache</dt><dd>@(rec.CacheHit ? "Hit — response reused, no provider call" : "Not served from cache")</dd>
+                        <dt>Duration</dt><dd class="mono">@Fmt.Ms(rec.DurationMs) (recorded by Covenant)</dd>
+                    </dl>
+                </section>
+
+                <section class="drawer-section" aria-label="Audit evidence">
+                    <h3>5 · Audit evidence</h3>
+                    <dl class="facts">
+                        <dt>Prompt SHA-256</dt><dd class="mono">@Fmt.OrNotRecorded(rec.PromptSha256)</dd>
+                        <dt>Prompt length</dt><dd class="mono">@rec.PromptChars chars</dd>
+                        <dt>Matched signal</dt><dd>@(rec.Signal is { Length: > 0 } sig ? sig : rec.ClassificationEvaluated == true ? "None" : "Not evaluated or not recorded")</dd>
+                        <dt>Schema version</dt><dd class="mono">@(rec.SchemaVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "1 (legacy)")</dd>
+                    </dl>
+                    @if (rec.PromptPreview is { } preview)
+                    {
+                        <span class="secondary" style="font-weight:500">Prompt preview</span>
+                        <pre class="code-block">@preview</pre>
+                        <span class="note">Preview retained because Audit:PromptPreviewChars &gt; 0 when this record was written.</span>
+                    }
+                    else
+                    {
+                        <span class="note">No prompt content is retained in this record — only its fingerprint and length.</span>
+                    }
+                    <span class="note">Response text is never audit evidence; the Playground shows it only to the operator who sent the request.</span>
+                    <details class="raw">
+                        <summary>Raw audit record (JSON)</summary>
+                        <pre class="code-block">@RawJson(rec)</pre>
+                    </details>
+                </section>
+            }
+        </Drawer>
+    </RequiresConnection>
+</div>
+
+@code {
+    [Parameter] public string? Id { get; set; }
+
+    private static readonly UiJsonContext Indented = new(new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    });
+
+    private bool _loading;
+    private string? _loadError;
+    private bool _detailLoading;
+    private string? _detailError;
+    private bool _notFound;
+    private string? _paramId;
+
+    private IReadOnlyList<AuditEntryView> Items => View.Snapshot?.Items ?? [];
+    private IReadOnlyList<AuditEntryView> Filtered => RequestFilter.Apply(Items, View.Criteria, DateTimeOffset.UtcNow);
+
+    private IReadOnlyList<DisplayOutcome> OutcomeOptions
+    {
+        get
+        {
+            var list = RequestFilter.Outcomes(Items).ToList();
+            if (View.Criteria.Outcome is { } sel && !list.Contains(sel)) list.Add(sel);
+            return list;
+        }
+    }
+
+    private IReadOnlyList<string> ModelOptions => WithSelected(RequestFilter.Models(Items), View.Criteria.Model);
+    private IReadOnlyList<string> TeamOptions => WithSelected(RequestFilter.Teams(Items), View.Criteria.Team);
+
+    private bool DrawerOpen => Id is not null;
+
+    private string DrawerTitle => Id is null ? "Request" : "Request " + Truncate(Id);
+
+    private string CoverageLabel
+    {
+        get
+        {
+            if (View.Snapshot is not { } snap) return "Recent requests — current audit segment; not a full audit history search";
+            var since = snap.Segment.FirstUtc is { } f ? Fmt.Utc(f) : "(no records yet)";
+            return $"Recent requests — current audit segment since {since} ({Fmt.Int(snap.Segment.Entries)} records); not a full audit history search";
+        }
+    }
+
+    private string CountLabel
+    {
+        get
+        {
+            if (View.Snapshot is not { } snap) return "";
+            var loaded = snap.Items.Count;
+            var shown = Filtered.Count;
+            var loadedAt = View.LoadedUtc is { } t ? " · loaded " + Fmt.UtcShort(t) + " UTC" : "";
+            var cap = snap.Segment.Entries > loaded ? $" (newest {Fmt.Int(loaded)} of {Fmt.Int(snap.Segment.Entries)})" : "";
+            return $"Showing {Fmt.Int(shown)} of {Fmt.Int(loaded)} loaded{cap}{loadedAt}";
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnStateChanged;
+        if (State.Connected && View.Snapshot is null) await LoadAsync();
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (string.Equals(Id, _paramId, StringComparison.Ordinal)) return;
+        _paramId = Id;
+        _notFound = false;
+        _detailError = null;
+        if (Id is null)
+        {
+            View.SelectedId = null;
+            View.SelectedRecord = null;
+            return;
+        }
+        View.SelectedId = Id;
+        await EnsureDetailAsync();
+    }
+
+    private void OnStateChanged()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            if (State.Connected)
+            {
+                if (View.Snapshot is null && !_loading && _loadError is null) await LoadAsync();
+                if (Id is not null && View.SelectedRecord is null && !_detailLoading && !_notFound && _detailError is null)
+                    await EnsureDetailAsync();
+            }
+            StateHasChanged();
+        });
+    }
+
+    private async Task LoadAsync()
+    {
+        if (!State.Connected || _loading) return;
+        _loading = true;
+        _loadError = null;
+        StateHasChanged();
+        try
+        {
+            View.Snapshot = await Api.GetRequestsAsync(RequestsViewState.SnapshotLimit);
+            View.LoadedUtc = DateTimeOffset.UtcNow;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects and routes to /connect.
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    /// <summary>Deep link / selection: always the exact record for this id, even if the filters exclude it.</summary>
+    private async Task EnsureDetailAsync()
+    {
+        if (Id is not { } id || !State.Connected) return;
+        if (View.SelectedRecord is { } have && string.Equals(have.Id, id, StringComparison.Ordinal)) return;
+        _detailLoading = true;
+        _notFound = false;
+        _detailError = null;
+        View.SelectedRecord = null;
+        try
+        {
+            var rec = await Api.GetRequestAsync(id);
+            if (string.Equals(Id, id, StringComparison.Ordinal)) View.SelectedRecord = rec;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _notFound = true;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.BadRequest)
+        {
+            _detailError = "Not a valid request id (expected req_ followed by letters, digits, '-' or '_').";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // handled by ConsoleSession
+        }
+        catch (Exception ex)
+        {
+            _detailError = ex.Message;
+        }
+        finally
+        {
+            _detailLoading = false;
+        }
+    }
+
+    private async Task RetryDetailAsync()
+    {
+        _notFound = false;
+        _detailError = null;
+        View.SelectedRecord = null;
+        await EnsureDetailAsync();
+    }
+
+    private void Open(AuditEntryView r)
+    {
+        View.SelectedId = r.Id;
+        View.SelectedRecord = r;
+        Nav.NavigateTo("requests/" + Uri.EscapeDataString(r.Id));
+    }
+
+    private void OnDrawerOpenChanged(bool open)
+    {
+        if (open) return;
+        Nav.NavigateTo("requests");
+    }
+
+    private string? HiddenNote(AuditEntryView rec)
+    {
+        if (View.Snapshot is null) return null;
+        bool inSnapshot = Items.Any(i => string.Equals(i.Id, rec.Id, StringComparison.Ordinal));
+        if (!inSnapshot)
+            return "This request is not in the loaded recent list (it is newer than the snapshot, or older than the newest "
+                   + RequestsViewState.SnapshotLimit + " records). Shown from an exact lookup by id.";
+        if (!RequestFilter.Matches(rec, View.Criteria, DateTimeOffset.UtcNow))
+            return "This request is hidden by the current filters. It is shown because it was opened by id.";
+        return null;
+    }
+
+    private static string StoppedText(AuditEntryView r)
+    {
+        if (r.StoppedAtStage is { } s) return PipelineStages.Label(s);
+        if (string.Equals(r.Effect, "Allow", StringComparison.OrdinalIgnoreCase)) return "Completed — no stage stopped it";
+        return ModelFacts.IsV2(r) ? "Not recorded" : "Not recorded (legacy record)";
+    }
+
+    private static string RawJson(AuditEntryView r) => JsonSerializer.Serialize(r, Indented.AuditEntryView);
+
+    private static string RowId(string id) => "req-row-" + id;
+
+    private static string Truncate(string id) => id.Length <= 16 ? id : id[..12] + "…" + id[^4..];
+
+    private static IReadOnlyList<string> WithSelected(IReadOnlyList<string> options, string? selected)
+    {
+        if (string.IsNullOrWhiteSpace(selected) || options.Contains(selected, StringComparer.OrdinalIgnoreCase)) return options;
+        return [.. options, selected];
+    }
+
+    // ---- Filter handlers: the criteria record is immutable; each change replaces it. ----
+
+    private void OnIdSearch(ChangeEventArgs e)
+        => View.Criteria = View.Criteria with { IdSearch = e.Value?.ToString() };
+
+    private void OnOutcome(ChangeEventArgs e)
+        => View.Criteria = View.Criteria with
+        {
+            Outcome = Enum.TryParse<DisplayOutcome>(e.Value?.ToString(), out var o) ? o : null,
+        };
+
+    private void OnModel(ChangeEventArgs e)
+        => View.Criteria = View.Criteria with { Model = Blank(e.Value?.ToString()) };
+
+    private void OnTeam(ChangeEventArgs e)
+        => View.Criteria = View.Criteria with { Team = Blank(e.Value?.ToString()) };
+
+    private void OnWindow(ChangeEventArgs e)
+        => View.Criteria = View.Criteria with
+        {
+            Window = Enum.TryParse<TimeWindow>(e.Value?.ToString(), out var w) ? w : TimeWindow.All,
+        };
+
+    private void ClearFilters() => View.Criteria = RequestFilterCriteria.None;
+
+    private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
+
+    public void Dispose() => State.Changed -= OnStateChanged;
+}

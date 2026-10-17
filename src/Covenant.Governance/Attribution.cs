@@ -22,9 +22,26 @@ public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
     {
         if (ctx.Response is { } resp && ctx.Policy?.Route is { } route)
         {
-            decimal cost = priceBook.TryGetPrice(route.ModelId, out var p)
-                ? (resp.Usage.InputTokens / 1000m * p.InputPer1K) + (resp.Usage.OutputTokens / 1000m * p.OutputPer1K)
-                : 0m;
+            decimal cost;
+            if (!priceBook.TryGetPrice(route.ModelId, out var p))
+            {
+                cost = 0m;
+                ctx.CostBasis = "unpriced";               // unknown, flagged — never a real $0
+            }
+            else if (resp.UsageReported)
+            {
+                cost = (resp.Usage.InputTokens / 1000m * p.InputPer1K) + (resp.Usage.OutputTokens / 1000m * p.OutputPer1K);
+                ctx.CostBasis = p.InputPer1K == 0m && p.OutputPer1K == 0m ? "zero_priced" : "reported";
+            }
+            else
+            {
+                // ADR-0009: billable call, provider reported no usage → estimate from text and CHARGE it,
+                // so unknown usage cannot escape the budget. Token counts stay unreported.
+                long inTok = TokenEstimate.FromChars(ctx.Request.Messages.Sum(m => m.Content.Length));
+                long outTok = TokenEstimate.FromChars(resp.Message.Content.Length);
+                cost = inTok / 1000m * p.InputPer1K + outTok / 1000m * p.OutputPer1K;
+                ctx.CostBasis = p.InputPer1K == 0m && p.OutputPer1K == 0m ? "zero_priced" : "estimated_from_text";
+            }
 
             var priced = resp.Usage with { CostUsd = cost };
             ctx.Response = resp with { Usage = priced };

@@ -41,6 +41,7 @@ public sealed class ClassifyStage(IDataClassifier classifier) : IPipelineStage
         var result = classifier.Classify(ctx.Request);
         ctx.Classification = result.Classification;
         ctx.ClassificationSignal = result.Signal;
+        ctx.ClassificationEvaluated = true;
         await next(ctx, ct);
     }
 }

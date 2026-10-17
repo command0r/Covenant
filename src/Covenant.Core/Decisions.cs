@@ -33,4 +33,16 @@ public sealed record AuditEntry(
     string? PromptSha256 = null,
     string? Signal = null,
     string? PromptPreview = null,
-    bool CacheHit = false);
+    bool CacheHit = false,
+    // ---- v2 (ADR-0009): additive, nullable. Absent on legacy lines → "Not recorded", never a guess.
+    // The chain hashes stored bytes, so legacy lines verify unchanged; new lines carry the new fields.
+    int? SchemaVersion = null,
+    string? CorrelationId = null,
+    bool? ClassificationEvaluated = null,
+    string? DenialKind = null,
+    string? StoppedAtStage = null,
+    string? SelectedModel = null,
+    string? AttemptedModel = null,
+    bool? Stream = null,
+    bool? UsageReported = null,
+    string? CostBasis = null);

@@ -1,0 +1,75 @@
+/*
+ * Covenant design tokens — ported from covenant-prototype/tokens.css (design reference, revision 2).
+ * Apply data-theme="dark" (default) or data-theme="light" (projection) on <html>.
+ * Fonts: IBM Plex Sans / Mono are bundled in wwwroot/fonts (SIL OFL 1.1; see docs/PROVENANCE.md). No CDN.
+ */
+:root,
+:root[data-theme="dark"] {
+  --bg: #0D1015;
+  --surface: #141920;
+  --surface2: #1A2029;
+  --border: #2A323D;
+  --text: #E7EAEE;
+  --muted: #A9B1BD;
+  --subtle: #8C96A4;       /* lowest text tier; >= 4.5:1 on --surface */
+  --accent: #6FA3F7;       /* links, focus ring, outlines */
+  --accent-fill: #2E6BD6;  /* primary button fill */
+  --on-accent: #FFFFFF;
+  --green: #4CC38A;        /* served, verified */
+  --amber: #E5A84B;        /* paused, degraded, near limit */
+  --red: #F27A70;          /* denied, failed */
+  --green-bg: #13291F;
+  --amber-bg: #2E2414;
+  --red-bg: #321A19;
+  --blue-bg: #15233A;      /* current nav item, selected row */
+  --danger-fill: #B8322A;  /* destructive confirm only */
+  --scrim: rgba(0,0,0,.55); /* behind drawers */
+}
+
+:root[data-theme="light"] {
+  --bg: #F4F5F7;
+  --surface: #FFFFFF;
+  --surface2: #F0F2F5;
+  --border: #D5D9E0;
+  --text: #161A20;
+  --muted: #4A5361;
+  --subtle: #5B6472;
+  --accent: #1F5FC9;
+  --accent-fill: #1F5FC9;
+  --on-accent: #FFFFFF;
+  --green: #17794A;
+  --amber: #8A5A00;
+  --red: #B42318;
+  --green-bg: #E3F4EA;
+  --amber-bg: #FBF0DB;
+  --red-bg: #FCE6E3;
+  --blue-bg: #E3ECFB;
+  --danger-fill: #B42318;
+}
+
+:root {
+  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+
+  /* type scale (px) */
+  --text-page-title: 24px;   /* 600 */
+  --text-section: 18px;      /* 600 */
+  --text-body: 16px;         /* 400, line-height 1.5 */
+  --text-secondary: 14px;    /* minimum size */
+  --text-outcome: 28px;      /* Playground outcome */
+  --text-outcome-present: 40px;
+  --text-facts-present: 20px;
+
+  /* spacing, 4px base */
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-7: 28px;
+
+  /* radii */
+  --radius-control: 6px;
+  --radius-inner: 8px;
+  --radius-panel: 10px;
+
+  /* targets */
+  --target-min: 40px;
+  --target-form: 44px;
+}

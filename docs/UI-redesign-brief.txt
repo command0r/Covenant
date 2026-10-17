@@ -1,0 +1,187 @@
+Covenant UI redesign brief for Claude
+
+Purpose
+
+Redesign Covenant as an AI governance workspace that an operator can use and a presenter can demonstrate without switching to a terminal. Make the main journey obvious: configure an approved connection, run a request, understand its result, inspect its evidence, and stop or resume new provider calls.
+
+This is a design brief, not authorization to replace the application stack or invent completed backend capabilities. First deliver a clickable design prototype and implementation handoff. Keep design fixtures clearly separate from live results. Do not change the product code in the design pass.
+
+1. Product and design direction
+
+Covenant is a .NET application for governing model requests, attributing usage, and recording evidence. It is not another general-purpose chat application. A focused request playground belongs inside the product because it makes the controls observable.
+
+Keep the Covenant name. Use “AI governance workspace” as the short descriptor. Avoid the current long promise that every request is classified, routed, budgeted, attributed, and audited: early refusals and cache hits do not execute every stage.
+
+Use a restrained enterprise application style. Dark mode is the initial target, with a light-mode design variant for projection. Use neutral surfaces, one blue action accent, and semantic green/amber/red only for status. Remove glowing decorations, oversized metric cards, excessive uppercase headings, and empty space above navigation. Use a locally bundled sans-serif font and monospace only for identifiers, model names, and numbers where alignment helps.
+
+Desktop layout: a compact left navigation, a slim status header, and a useful working area. Optimize first for 1440×900 and 1920×1080; remain usable at 1280×720. Normal body text 16px, secondary text at least 14px. Presentation mode uses approximately 20–24px for key request results. Do not squeeze every field into one screen.
+
+Use tables where people need to scan many requests or compare models. Use a detail drawer or full detail view for one request. Do not turn every setting into a card or display a wall of raw JSON as the main experience.
+
+2. Navigation and global states
+
+Main navigation: Overview, Playground, Requests, Models & connections, Policies, Budgets, Evidence. Settings and the connection/account control sit at the bottom. “Pipeline” becomes a contextual request-flow view and a small explanation inside Policies, rather than a primary destination competing with actual work.
+
+Header: environment name, service condition, data freshness, and a persistent “Pause new model calls” control. Never show a green “Serving” badge based only on an open status stream or an unengaged stop switch. Distinguish “Console connected,” “Provider available,” and “Requests paused.” A missing local route should produce a visible degraded-state alert with “Review connection.”
+
+Current authentication is a shared admin token, not a named-user identity system. Show “Connected with admin token,” the environment, and Disconnect. Do not invent an avatar, named account, role picker, SSO, or tenant switcher. Design a dedicated connection screen with a masked token field, Connect, validation feedback, and clear disconnected/invalid-token/connection-lost states. Preserve navigation when reconnecting where safe.
+
+Authentication for administration and authentication for sending model requests are separate. Connecting to the console must not silently grant an application unlimited inference access.
+
+3. Overview
+
+Answer “What needs attention?” before showing historical statistics.
+
+Top: one concise alert for a missing connection, stopped calls, invalid audit chain, or stale data. Each alert links to an appropriate action. Then a compact summary row: served requests, refused/failed requests, provider charges, and budget used. Show the time range or audit segment for every total. A new screen visit does not reset accounting.
+
+Below: a modest request activity chart and a list of recent notable outcomes. Keep cost and request-count charts separate, or provide clearly labeled units and axes; do not overlay money and counts on an unlabeled scale. Provide a 15-minute, 1-hour, or available-history selector only if the data supports it.
+
+Move estimated savings into Budgets as a secondary analysis with its baseline explained. Rename it “Estimated provider charge avoided” if that is what the calculation measures. Local inference is not economically free: $0 provider token charges excludes hardware, electricity, and operations.
+
+“Run a request” is the primary action. “View requests” is secondary. Audit verification is a concise status linked to Evidence, not a large duplicate request-count card.
+
+4. Playground — the priority screen
+
+This is the conference demo workspace and the operator’s diagnostic starting point.
+
+Use two main columns: request setup on the left, result on the right. At the bottom, a collapsible evidence area follows the selected request. On smaller screens, stack setup above result. Keep the last result visible while preparing the next request.
+
+Request setup:
+- Application credential context: display the server-resolved application/team. For the first implementation, accept a separate application key, masked and held only in memory. A subsequent server-managed test-identity selector needs an explicit authorized backend contract; it must not impersonate arbitrary callers.
+- Routing choice: “Let policy choose” or a requested model from the allowed catalog. Provide an advanced explicit model field for testing a rejection; label it as a test input, not a permission grant.
+- Prompt editor with a short synthetic default, output-token limit, and streaming toggle.
+- Workflow/use-case labels, clearly distinguished from the key-bound identity and team.
+- Run request, Cancel, and Clear output. Explain that cancellation may leave work or charges already incurred; it is not rollback.
+
+Result:
+- Large outcome: Served, Reused from cache, Policy denied, Authentication failed, Rate limited, Provider unavailable, or Cancelled/incomplete. Distinguish HTTP failure from a governance refusal.
+- A plain-language reason and the actual HTTP status when available.
+- Response text for the request the operator just submitted; no automatic response archive.
+- Requested model versus actual model, provider/connection, measured duration, tokens when reported, and provider charges. Unknown values show “Not reported,” not fabricated zeroes.
+- “View request evidence” links to the exact audit record once it arrives. Show “Awaiting audit record” while the asynchronous sink catches up. Never guess the matching record by the most recent timestamp.
+
+Request flow:
+Show Authentication → Input validation → Classification → Policy and route selection → Cache → Rate limit → Operator stop and budget → Provider → Cost attribution. Audit wraps the request. This is the order assembled in Program.cs; do not copy a stale diagram from prose.
+
+A stage can be completed, denied, failed, skipped, not reached, or unknown. Show timings only when measured. The current API does not supply a full trace; until instrumentation exists, label this as “Configured processing order,” not an animated trace pretending to show actual execution.
+
+Scenario presets are useful, but they must make real requests:
+A. Normal permitted request.
+B. Valid application, unapproved requested model.
+C. Synthetic sensitive-data fixture routed to an approved local Qwen model, or refused if no usable local route exists.
+D. Pause new calls, then submit a fresh uncached request; resume and submit another.
+Presets populate the request. Only Run sends it. Selecting a scenario must not silently change policy or global stop state. Compare the expected outcome with the actual outcome and show a mismatch honestly.
+
+5. Requests and request detail
+
+Keep a compact, filterable list with time, application/team, outcome, model, duration, and charge. Classification can be a secondary column. Search by request ID; filter by application, outcome, model, and time. Offer page-size and pagination controls based on the actual data scope. Client filtering of a recent snapshot must say “Recent requests,” not imply a full audit-log search.
+
+Selecting a row opens a detail drawer with this order:
+1. Result and plain-language explanation.
+2. Request ID, time, identity, requested/served model, and routing evidence.
+3. Classification result and matched signal, if classification actually ran.
+4. Usage, charges, cache result, and measured duration.
+5. Audit evidence and optional raw JSON.
+
+Fix the misleading “hi”/PHI example in the supplied screenshot. The source initializes classification to PHI as a restrictive internal default. An authentication refusal occurs before classification. Display “Not evaluated — authentication failed,” not a detected-PHI badge. Preserve the restrictive enforcement default; add explicit evaluation state to the API instead of weakening the classifier.
+
+Keep historical results tied to the configuration at processing time. Never repaint old rows as though today’s policy applied then. Configuration version is a proposed backend field, not an existing fact.
+
+Content privacy: prompt previews remain opt-in. Show whether content is retained and what the retention scope is. The ordinary Requests page must not suddenly expose full prompts and responses. Hiding content in presentation mode does not erase stored content.
+
+6. Models & connections — Ollama and Qwen
+
+Separate the connection from its models. A connection has a display name, server-side base URL, provider type, credential reference if needed, approved boundary, and last-check state. Its model list shows exact IDs/tags, registered status, policy permission, and tested availability separately.
+
+Connection flow: choose Ollama → enter endpoint → Test connection → Discover installed models → select exact model tags → review proposed permitted routes → save/apply using the supported configuration workflow → run a governed test request. Discovery must not automatically approve every model.
+
+Do not guess the user’s Qwen tag, host address, or quantization. Do not substitute the current hard-coded llama model name. “Installed,” “registered,” “permitted,” and “reachable” are different states.
+
+The intended inference path is:
+Covenant Playground → Covenant request pipeline → Ollama → installed Qwen model.
+
+Optional separate chat-client path:
+Open WebUI → Covenant /v1 → Covenant request pipeline → Ollama → installed Qwen model.
+
+Open WebUI is a client in this design, not the local model runtime. Configuring Open WebUI to call Ollama directly bypasses Covenant. Its connection to Covenant needs a Covenant application key, never the admin token. Restrict validation initially to text chat and supported streaming; do not promise that all Open WebUI tools, images, background tasks, or other APIs are supported.
+
+Ollama’s documented local OpenAI-compatible base is http://localhost:11434/v1/. Here “localhost” means the machine/container running Covenant, not the presenter’s browser. A workstation or container deployment needs an address reachable from the Covenant host. Do not assume an Ollama endpoint or model is local-only merely because the provider type says Ollama; approval must verify the actual endpoint/model and egress behavior.
+
+First release: connect to an existing Ollama installation and use selected installed models. Model downloads, deletion, loading/unloading, GPU telemetry, and remote machine administration are later scope, not decorative buttons in the initial UI. No silent model pull or cloud fallback. If the local model fails, refuse the protected request and explain why.
+
+Display local provider charge as $0 only when that is the configured provider-charge basis. Label infrastructure costs as excluded or unconfigured. Never present an unknown cost as free.
+
+7. Policies, budgets, evidence, settings
+
+Policies: show current classification-to-route rules with a readable rule summary, configured models, and unresolved routes. For now this is read-only configuration. Add “Try in Playground.” Do not invent per-application model grants: current keys bind identity/team, while the routing policy is classification-based. A future editor needs validation, versioning, authorization, review/apply behavior, and rollback semantics before it is enabled.
+
+Budgets: global cap and team caps, spend basis, remaining budget, and applicable accounting period/segment. Explain that the current ledger is reconstructed from the audit log; it is not automatically a monthly billing cycle. Show threshold checks separately from an exact invoice cap. Keep the allocation example from the talk out of the product unless allocation functionality is actually implemented.
+
+Evidence: last verification time, chain status and scope, entry count, export, and independent anchor status when supported. “Chain verified” does not mean regulatory compliance, every event is present, or an independent anchor exists. Verification failures must remain prominent.
+
+Settings: environment and configuration source, active/applied configuration state, cache behavior, telemetry, content-preview retention, and connection/session details. Use “Managed by configuration; restart required” for current read-only values. Do not show a fake Save button.
+
+Put archive/reset behind a clearly separated maintenance action. Explain both effects: archive the audit segment and reset spend counters, potentially reopening budgets. Require confirmation showing the affected environment. Never delete the audit trail or use reset as the default way to start a demo.
+
+8. Pause control and presentation mode
+
+Replace “All inference stops instantly” with “Pause new provider calls.” Explain current scope: cache hits bypass this stage, in-flight work is not cancelled, and downstream actions are outside Covenant. The active banner reads “New provider calls paused” with reason and an explicit Resume action. Broader stopping behavior requires a backend change and tests.
+
+Presentation mode enlarges the Playground result and key evidence, hides navigation noise and sensitive fields, and keeps the active environment plus live/test-adapter mode visible. It does not change policy, credentials, or request handling. Include Exit presentation mode and keyboard-accessible controls. Fullscreen is optional.
+
+A successful five-minute demonstration stays in this workspace: run allowed → inspect evidence → run unapproved model → inspect denial → pause → demonstrate refusal → resume → demonstrate recovery. Model setup is completed before the talk.
+
+9. Backend reality and implementation handoff
+
+Existing surfaces:
+GET /admin/status and /admin/status/stream — authenticated snapshots.
+POST /admin/kill-switch — engage/resume.
+GET /admin/evidence — verification report.
+POST /admin/reset — archive/reset.
+GET /v1/models and POST /v1/chat/completions — application authentication and governed inference.
+
+Known gaps that the design must mark as proposed:
+- Stable request correlation: AuditStage generates its own record ID; the response ID is separate. Add one server-issued correlation ID spanning response headers/body and audit, including refusal paths, before enabling “View exact evidence.”
+- Execution state: classification evaluated/not reached, denial kind, selected route, configuration version, and any stage trace need explicit data. Preserve existing audit records; version new fields and render legacy unknowns honestly.
+- Provider health/discovery and selected model registration need backend endpoints. Probe only authorized configured hosts, enforce endpoint validation/timeouts, and keep provider credentials on the server.
+- The current local integration registers one exact Local:ModelId using Local:Endpoint and optional Local:ApiKey. Multiple Qwen models need a deliberate registry/config extension.
+- Startup currently requires OpenAI:ApiKey. Genuine local-only mode must start with no cloud credentials, validate configured providers independently, and keep missing approved routes fail-closed.
+- Public/Internal currently use cloud generalRoutes; PII/PHI use the local route. General local Qwen use requires an explicit policy change, not just a model dropdown.
+- /v1/models currently lists policy models even if an adapter is missing. The console needs an operational catalog with separate permission/registration/availability status.
+- Historical query/filtering and mutable policy/budget/provider configuration are not supplied by the current status endpoint.
+
+Architecture constraint: the accepted ADR-0004 specifies embedded standalone Blazor WebAssembly when richer editing or evidence browsing is introduced. Keep the .NET host minimal-API and NativeAOT-compatible; the current project does not prove a completed AOT publish. No Blazor Server or silent React migration. A Claude design prototype may use its own tooling in an isolated prototype, but that is not the production architecture decision. No CDN fonts, external analytics, or remote assets in the shipped appliance.
+
+10. Delivery sequence and acceptance
+
+Design pass first: deliver the shell, Playground, request detail, and Ollama connection flow before polishing secondary pages. Include normal, empty, loading, invalid-token, disconnected, stale, denied, missing-model, provider-timeout, stopped, and recovered states. Provide component styles, responsive behavior, and concise copy. Identify every mocked API response and every backend dependency.
+
+First functional slice: browser request submission through the existing governed path; useful result and refusal display; truthful statuses; exact evidence correlation; stop/resume; one approved local Qwen route. Preserve the existing shell script as a secondary integration-test tool.
+
+Next slice: model discovery/health, local-only startup, multiple selected local models, richer evidence queries. Configuration editors and named-user sessions/RBAC are separate later work.
+
+Acceptance examples:
+- A presenter can complete the main demo without a terminal or token pasted on screen.
+- Admin authentication never substitutes for an application key or bypasses policy.
+- “hi” rejected before authentication does not claim a PHI detection.
+- A missing local adapter never appears as a healthy local model.
+- Discovered models remain unavailable to inference until explicitly permitted and registered.
+- A configured local-only deployment makes real requests to the chosen installed Qwen model without a cloud credential or cloud fallback.
+- Both buffered and streamed text requests return honest outcome/usage data; provider failure and cancellation do not show success.
+- Request evidence links by correlation ID, survives asynchronous arrival, and does not depend on timestamp matching.
+- Cache and stop behavior match the actual pipeline; no animation invents stages that did not run.
+- Archive/reset never happens implicitly during a presentation and does not delete evidence.
+
+Source anchors inspected on 2026-10-15
+
+src/Covenant.Host/AdminUi.cs — embedded UI, sessionStorage admin token, status stream, request details.
+src/Covenant.Host/Program.cs — startup, local registration, routes, pipeline assembly, endpoints.
+src/Covenant.Core/InferenceContext.cs — restrictive default classification and denial kinds.
+src/Covenant.Governance/Auth.cs — key-bound identity and team.
+src/Covenant.Governance/Audit.cs — separate audit ID, optional previews, asynchronous evidence.
+src/Covenant.Governance/Budget.cs and Cache.cs — scope of stop and cache bypass.
+docs/adr/ADR-0004-admin-ui-blazor-wasm-when-triggered.md — accepted UI architecture.
+https://docs.ollama.com/api/openai-compatibility — local OpenAI-compatible endpoint and subset support.
+https://docs.openwebui.com/getting-started/quick-start/connect-a-provider/starting-with-openai-compatible/ — Open WebUI as an OpenAI-compatible client.
+
+Still to confirm before integration testing: which machine runs Ollama, its address from Covenant, the installed Qwen model tags, and whether the conference demo will use that machine locally or across a network. These do not block the UI design.

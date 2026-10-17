@@ -40,8 +40,15 @@ int OptionalNonNegativeInt(string key, int fallback)
     configErrors.Add($"{key} — must be a non-negative integer, got '{raw}'");
     return fallback;
 }
-if (string.IsNullOrWhiteSpace(openAiKey))
-    configErrors.Add("OpenAI:ApiKey       — provider credential");
+// Provider mode (ADR-0010): "cloud" (default) requires the OpenAI credential; "local-only" requires an
+// explicit Local:Endpoint + Local:ModelId, registers NO cloud provider, and refuses to start if cloud
+// credentials are configured (no silent cloud fallback, no quiet rerouting of cloud traffic).
+// The rules live in StartupValidation (pure, unit-tested); Program only applies them.
+string providerMode = StartupValidation.ProviderMode(builder.Configuration);
+bool localOnly = providerMode == StartupValidation.LocalOnlyMode;
+string? localEndpointRaw = StartupValidation.Trimmed(builder.Configuration["Local:Endpoint"]);
+string? localModelRaw = StartupValidation.Trimmed(builder.Configuration["Local:ModelId"]);
+configErrors.AddRange(StartupValidation.ValidateProviders(builder.Configuration));
 if (string.IsNullOrWhiteSpace(adminToken))
     configErrors.Add("Admin:Token         — guards /admin/* (kill switch, evidence export)");
 if (string.IsNullOrWhiteSpace(globalCapRaw)
@@ -116,24 +123,26 @@ builder.Services.ConfigureHttpJsonOptions(o =>
 string publicModelId = builder.Configuration["OpenAI:ModelId"] ?? "gpt-4o-mini";
 string strongModelId = builder.Configuration["OpenAI:StrongModelId"] ?? "gpt-4o";
 
-var openAiRoot = builder.Configuration["OpenAI:Endpoint"] is { Length: > 0 } openAiEndpoint
-    ? new OpenAIClient(new ApiKeyCredential(openAiKey!), new OpenAIClientOptions { Endpoint = new Uri(openAiEndpoint) })
-    : new OpenAIClient(openAiKey!);
-
-var clients = new Dictionary<string, IChatClient>
+var clients = new Dictionary<string, IChatClient>();
+if (!localOnly)
 {
-    [$"openai:{publicModelId}"] = openAiRoot.GetChatClient(publicModelId).AsIChatClient(),
-};
-clients[$"openai:{strongModelId}"] = openAiRoot.GetChatClient(strongModelId).AsIChatClient();
+    var openAiRoot = builder.Configuration["OpenAI:Endpoint"] is { Length: > 0 } openAiEndpoint
+        ? new OpenAIClient(new ApiKeyCredential(openAiKey!), new OpenAIClientOptions { Endpoint = new Uri(openAiEndpoint) })
+        : new OpenAIClient(openAiKey!);
+    clients[$"openai:{publicModelId}"] = openAiRoot.GetChatClient(publicModelId).AsIChatClient();
+    clients[$"openai:{strongModelId}"] = openAiRoot.GetChatClient(strongModelId).AsIChatClient();
+}
 
-// Optional in-perimeter target (vLLM, Ollama — any OpenAI-compatible endpoint). Not configured →
-// "local" stays unregistered and PII/PHI keep failing closed at the provider stage.
-string localModelId = builder.Configuration["Local:ModelId"] ?? "llama-3.1-8b-instruct";
-if (builder.Configuration["Local:Endpoint"] is { Length: > 0 } localEndpoint)
+// Optional in-perimeter target (vLLM, Ollama — any OpenAI-compatible endpoint), one exact model tag.
+// Not configured → the local route stays unregistered and PII/PHI keep failing closed at the provider
+// stage. The placeholder name is deliberately not a real model: nothing guesses the operator's tag.
+const string UnconfiguredLocalModel = "local-model-not-configured";
+string localModelId = localModelRaw ?? UnconfiguredLocalModel;
+if (localEndpointRaw is not null && localModelRaw is not null)
 {
     clients[$"local:{localModelId}"] = new OpenAIClient(
             new ApiKeyCredential(builder.Configuration["Local:ApiKey"] ?? "not-needed"),
-            new OpenAIClientOptions { Endpoint = new Uri(localEndpoint) })
+            new OpenAIClientOptions { Endpoint = new Uri(localEndpointRaw) })
         .GetChatClient(localModelId)
         .AsIChatClient();
 }
@@ -141,7 +150,7 @@ if (builder.Configuration["Local:Endpoint"] is { Length: > 0 } localEndpoint)
 // Optional Anthropic provider (ADR-0001 start set) — official SDK over IChatClient, opt-in via key.
 string anthropicModelId = builder.Configuration["Anthropic:ModelId"] ?? "claude-haiku-4-5";
 bool anthropicEnabled = false;
-if (builder.Configuration["Anthropic:ApiKey"] is { Length: > 0 } anthropicKey)
+if (!localOnly && builder.Configuration["Anthropic:ApiKey"] is { Length: > 0 } anthropicKey)
 {
     anthropicEnabled = true;
     var anthropicClient = builder.Configuration["Anthropic:Endpoint"] is { Length: > 0 } anthropicEndpoint
@@ -155,9 +164,11 @@ var registry = new ChatClientRegistry(clients);
 // --- Policy (first slice): PII/PHI have no public route, so they fail closed until "local" is wired. ---
 // Ordered cheapest → strongest: the policy engine complexity-routes within this set. Anthropic (when
 // configured) sits mid-list: reachable by explicit model request, never the default escalation.
-List<RouteTarget> generalRoutes = [new("openai", publicModelId)];
-if (anthropicEnabled) generalRoutes.Add(new("anthropic", anthropicModelId));
-generalRoutes.Add(new("openai", strongModelId));
+// Local-only (ADR-0010): every classification routes to the one approved local model — an explicit
+// mode choice, not a dropdown; in cloud mode Public/Internal stay on the cloud routes as before.
+List<RouteTarget> generalRoutes = localOnly ? [new("local", localModelId)] : [new("openai", publicModelId)];
+if (!localOnly && anthropicEnabled) generalRoutes.Add(new("anthropic", anthropicModelId));
+if (!localOnly) generalRoutes.Add(new("openai", strongModelId));
 
 var policy = new PolicyConfig
 {
@@ -188,6 +199,13 @@ foreach (var child in builder.Configuration.GetSection("Pricing").GetChildren())
         configErrors.Add($"Pricing:{child.Key} — requires numeric InPer1M and OutPer1M");
 }
 var prices = new PriceBook(priceMap);
+// Fail-closed accounting (ADR-0009): every routable model must be priced (0 is a valid, explicit price
+// for in-perimeter compute) — an unpriced route would let billable calls escape the budget.
+var routableModels = new List<string> { publicModelId, strongModelId, localModelId };
+if (anthropicEnabled) routableModels.Add(anthropicModelId);
+foreach (var routeModel in routableModels.Distinct())
+    if (!priceMap.ContainsKey(routeModel))
+        configErrors.Add($"Pricing:{routeModel} — routable model has no price (set InPer1M/OutPer1M; 0 is allowed)");
 
 long complexityThreshold = OptionalNonNegativeInt("Routing:ComplexityTokenThreshold", 400);
 
@@ -245,6 +263,9 @@ var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamC
 //     provider (a later registration wins); everything else is captured here. Outermost first;
 //     audit wraps everything; order per src/CLAUDE.md. ---
 builder.Services.AddSingleton<IChatClientRegistry>(registry);
+var providerHealth = new ProviderHealth();
+var probeAllowList = ProviderProbe.BuildAllowList(builder.Configuration["Providers:ProbeAllowList"], localEndpointRaw);
+string environmentName = builder.Configuration["Covenant:Environment"] is { Length: > 0 } envName ? envName : "local";
 builder.Services.AddSingleton(sp => new InferencePipeline(
 [
     new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
@@ -258,8 +279,8 @@ builder.Services.AddSingleton(sp => new InferencePipeline(
     })),                                             // policy + complexity routing, fail-closed
     new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
     new RateLimitStage(rateCounterGlobal, rateCounterTeams, rateConfig), // rate half of budget/rate; cache hits bypass (free)
-    new BudgetStage(killSwitch, spendLedger, budget),// kill switch + caps, before anything costs money
-    new ProviderCallStage(sp.GetRequiredService<IChatClientRegistry>()), // route + provider call
+    new BudgetStage(killSwitch, spendLedger, budget, prices),// pause + caps, before anything costs money; charges failed calls on unwind
+    new ProviderCallStage(sp.GetRequiredService<IChatClientRegistry>(), providerHealth), // route + provider call
     new AttributionStage(prices),                    // attribute cost
 ]));
 builder.Services.AddHostedService(_ => auditSink);   // drains the audit channel in the background
@@ -276,6 +297,19 @@ if (builder.Configuration["Neo4j:Uri"] is { Length: > 0 } neo4jUri)
 }
 
 var app = builder.Build();
+
+// Correlation (ADR-0009): one server-generated id per /v1 request, created BEFORE body binding so even a
+// request rejected by the binder (400, no pipeline, no audit record) carries it. Never caller-supplied.
+app.Use(async (http, next) =>
+{
+    if (http.Request.Path.StartsWithSegments("/v1"))
+    {
+        var rid = RequestCorrelation.NewId();
+        http.Items[RequestCorrelation.ItemKey] = rid;
+        http.Response.Headers[RequestCorrelation.Header] = rid;
+    }
+    await next(http);
+});
 
 // Model discovery for OpenAI-compatible clients (Open WebUI, SDKs). Same auth semantics as chat:
 // a valid API key, or anonymous only if explicitly allowed. Only policy-permitted models are listed.
@@ -297,11 +331,13 @@ app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipel
         Workflow: http.Request.Headers["X-Covenant-Workflow"].FirstOrDefault() ?? "unknown",
         UseCase: http.Request.Headers["X-Covenant-UseCase"].FirstOrDefault() ?? "unknown");
 
+    var requestId = RequestCorrelation.Get(http);
     var request = new InferenceRequest(principal, AnthropicWire.ToCanonical(body), body.Model, tags,
         Stream: body.Stream == true, Credential: credential,
-        MaxOutputTokens: body.MaxTokens, UnsupportedFeature: AnthropicWire.Unsupported(body));
+        MaxOutputTokens: body.MaxTokens, UnsupportedFeature: AnthropicWire.Unsupported(body),
+        RequestId: requestId);
     var ctx = new InferenceContext(request);
-    var msgId = $"msg_{Guid.NewGuid():n}";
+    var msgId = requestId;
 
     if (request.Stream)
     {
@@ -403,7 +439,8 @@ app.MapPost("/v1/chat/completions",
         Stream: body.Stream == true,
         Credential: credential,
         MaxOutputTokens: body.MaxCompletionTokens ?? body.MaxTokens,
-        UnsupportedFeature: OpenAiWire.Unsupported(body));
+        UnsupportedFeature: OpenAiWire.Unsupported(body),
+        RequestId: RequestCorrelation.Get(http));
 
     var ctx = new InferenceContext(request);
 
@@ -411,7 +448,7 @@ app.MapPost("/v1/chat/completions",
     if (request.Stream)
     {
         var resp = http.Response;
-        var chunkId = $"chatcmpl-{Guid.NewGuid():n}";
+        var chunkId = request.RequestId!;
         bool sseStarted = false;
 
         async ValueTask WriteChunkAsync(OpenAiChatChunk chunk, CancellationToken token)
@@ -454,7 +491,7 @@ app.MapPost("/v1/chat/completions",
         {
             // Mid-stream failure after a committed 200: terminate with an error event (audited already).
             var err = System.Text.Json.JsonSerializer.Serialize(
-                new ErrorResponse { Error = "upstream_error", Reason = ctx.DenialReason ?? "stream failed" },
+                new ErrorResponse { Error = "upstream_error", Reason = ctx.DenialReason ?? "stream failed", RequestId = request.RequestId },
                 CovenantJsonContext.Default.ErrorResponse);
             await resp.WriteAsync($"data: {err}\n\n", ct);
         }
@@ -481,6 +518,7 @@ app.MapPost("/v1/chat/completions",
     var r = ctx.Response;
     var dto = new OpenAiChatResponse
     {
+        Id = request.RequestId,
         Model = r.ServedByModel,
         Choices = [new OpenAiChoice { Index = 0, Message = new OpenAiMessage { Role = "assistant", Content = OpenAiWire.TextElement(r.Message.Content) } }],
         Usage = new OpenAiUsage
@@ -502,10 +540,11 @@ static IResult DenialResult(InferenceContext ctx)
         DenialKind.UpstreamFailure => ("upstream_error", StatusCodes.Status502BadGateway),
         DenialKind.RateLimited => ("rate_limited", StatusCodes.Status429TooManyRequests),
         DenialKind.Unsupported => ("unsupported", StatusCodes.Status400BadRequest),
+        DenialKind.Cancelled => ("cancelled", 499),
         _ => ("denied", StatusCodes.Status403Forbidden),
     };
     return Results.Json(
-        new ErrorResponse { Error = error, Reason = ctx.DenialReason ?? "no response" },
+        new ErrorResponse { Error = error, Reason = ctx.DenialReason ?? "no response", RequestId = ctx.Request.RequestId },
         CovenantJsonContext.Default.ErrorResponse, statusCode: status);
 }
 
@@ -560,6 +599,7 @@ var startedUtc = DateTimeOffset.UtcNow;
 StatusReport BuildStatus()
 {
     var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+    var anchorInfo = AnchorInfo.Read(anchorPath);
     var teamSpend = spendLedger.SnapshotByTeam();
 
     var teams = new List<TeamBudgetStatus>();
@@ -586,12 +626,26 @@ StatusReport BuildStatus()
             Teams = teams,
         },
         Routes = routes,
-        FinOps = FinOps.Build(entries, localModelId, strongModelId, priceMap),
+        // Local-only has no cloud baseline to compare against: no savings are claimed.
+        FinOps = FinOps.Build(entries, localModelId, localOnly ? localModelId : strongModelId, priceMap),
         ChainValid = verification.Valid,
         AuditEntries = verification.EntryCount,
         Auth = new AuthStatus { AllowAnonymous = allowAnonymous, KeyCount = apiKeys.Count },
         OtelEnabled = otelEnabled,
         RoutingThresholdTokens = complexityThreshold,
+        Environment = environmentName,
+        Mode = providerMode,
+        AuditPath = Path.GetFullPath(auditPath),
+        CacheTtlSeconds = cacheConfig.TtlSeconds,
+        PromptPreviewChars = promptPreviewChars,
+        Anchor = new AnchorStatus
+        {
+            Configured = anchorPath is not null,
+            Every = anchorPath is not null ? anchorEvery : null,
+            AnchorsWritten = anchorInfo.Count,
+            LastAnchorUtc = anchorInfo.LastUtc,
+        },
+        Version = typeof(Program).Assembly.GetName().Version?.ToString(),
     };
 }
 
@@ -638,6 +692,120 @@ app.MapPost("/admin/reset", async (HttpContext http) =>
         CovenantJsonContext.Default.ResetResponse);
 });
 
+// ---- Console API (docs/ui-api-contract.md) ----
+
+// Recent evidence: newest-first records of the CURRENT audit segment (since the last archive), bounded.
+// Not a historical search — the response says which segment it covers.
+app.MapGet("/admin/requests", (HttpContext http, int? limit) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+    http.Response.Headers.CacheControl = "no-store";
+    var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+    int take = Math.Clamp(limit ?? 200, 1, 1000);
+    var page = new RequestsPage
+    {
+        Segment = new SegmentInfo
+        {
+            Path = Path.GetFullPath(auditPath),
+            Entries = entries.Count,
+            ChainValid = verification.Valid,
+            FirstUtc = entries.Count > 0 ? entries[0].TimestampUtc : null,
+            LastUtc = entries.Count > 0 ? entries[^1].TimestampUtc : null,
+        },
+        Items = Enumerable.Reverse(entries).Take(take).ToList(),
+    };
+    return Results.Json(page, AuditJsonContext.Default.RequestsPage);
+});
+
+// Exact lookup by correlation id (== audit Id). 404 means "not in the current segment yet" — the sink
+// is asynchronous, so a caller polls briefly before concluding "unavailable"; it is never proof that an
+// audit write failed.
+app.MapGet("/admin/requests/{id}", (HttpContext http, string id) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+    http.Response.Headers.CacheControl = "no-store";
+    if (!RequestCorrelation.IsWellFormed(id))
+        return Results.Json(new ErrorResponse { Error = "invalid_id", Reason = "request id must be ≤64 chars of [A-Za-z0-9_-]" },
+            CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+    var (lookupVerification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+    if (!lookupVerification.Valid)
+        return Results.Json(new ErrorResponse { Error = "chain_invalid", Reason = $"audit chain verification failed: {lookupVerification.Failure} — evidence cannot be trusted; see /admin/evidence" },
+            CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status409Conflict);
+    for (int i = entries.Count - 1; i >= 0; i--)
+        if (string.Equals(entries[i].Id, id, StringComparison.Ordinal))
+            return Results.Json(entries[i], AuditJsonContext.Default.AuditEntry);
+    return Results.Json(new ErrorResponse { Error = "not_found", Reason = "no record with this id in the current audit segment", Scanned = entries.Count },
+        CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status404NotFound);
+});
+
+// Operational catalog: configured vs registered vs permitted vs observed health (GET /v1/models is
+// only the permitted list and is not a health check).
+app.MapGet("/admin/catalog", (HttpContext http) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+    // Resolved explicitly (not parameter-inferred): the LIVE registration, incl. a test override.
+    var liveRegistry = http.RequestServices.GetRequiredService<IChatClientRegistry>();
+    http.Response.Headers.CacheControl = "no-store";
+    var byRoute = new Dictionary<(string, string), List<string>>();
+    foreach (var (cls, targets) in policy.AllowedRoutes)
+        foreach (var t in targets)
+        {
+            if (!byRoute.TryGetValue((t.AdapterKey, t.ModelId), out var list)) byRoute[(t.AdapterKey, t.ModelId)] = list = [];
+            list.Add(cls.ToString());
+        }
+    string? localAuthority = localEndpointRaw is not null && Uri.TryCreate(localEndpointRaw, UriKind.Absolute, out var lu)
+        ? $"{lu.Scheme}://{lu.Host}:{lu.Port}{lu.AbsolutePath.TrimEnd('/')}" : null;
+    var models = byRoute.Select(kv =>
+    {
+        var (adapter, model) = kv.Key;
+        bool priced = priceMap.TryGetValue(model, out var p);
+        return new CatalogModel
+        {
+            Adapter = adapter,
+            ModelId = model,
+            Classifications = kv.Value,
+            Registered = model != UnconfiguredLocalModel && liveRegistry.TryResolve(adapter, model, out _),
+            PriceBasis = !priced ? "unpriced" : p.Item1 == 0m && p.Item2 == 0m ? "zero" : "configured",
+            InPer1M = priced ? p.Item1 * 1000m : null,
+            OutPer1M = priced ? p.Item2 * 1000m : null,
+            EndpointHost = adapter == "local" ? localAuthority : null,
+            Health = providerHealth.Get($"{adapter}:{model}"),
+        };
+    }).ToList();
+    var report = new CatalogReport
+    {
+        Mode = providerMode,
+        Models = models,
+        Local = new LocalConfigView
+        {
+            Configured = localEndpointRaw is not null && localModelRaw is not null,
+            Endpoint = localAuthority,
+            ModelId = localModelRaw,
+            Registered = localModelRaw is not null && liveRegistry.TryResolve("local", localModelRaw, out _),
+            EndpointHealth = providerHealth.Get($"endpoint:{localAuthority}"),
+        },
+        ProbeAllowList = probeAllowList.OrderBy(x => x, StringComparer.Ordinal).ToList(),
+    };
+    return Results.Json(report, CovenantJsonContext.Default.CatalogReport);
+});
+
+// Host-side probe + discovery of an OpenAI-compatible endpoint (Ollama). Allow-listed destinations
+// only; see ProviderProbe. A successful probe of the APPLIED local endpoint updates its endpoint health;
+// draft endpoints never change applied state.
+app.MapPost("/admin/providers/probe", async (ProbeRequest body, HttpContext http, CancellationToken ct) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+    var result = await ProviderProbe.RunAsync(body.Endpoint, probeAllowList, ct);
+    if (result.Allowed && localEndpointRaw is not null && Uri.TryCreate(localEndpointRaw, UriKind.Absolute, out var applied)
+        && result.Endpoint is not null
+        && string.Equals(result.Endpoint.TrimEnd('/'), $"{applied.Scheme}://{applied.Host}:{applied.Port}{applied.AbsolutePath.TrimEnd('/')}", StringComparison.OrdinalIgnoreCase))
+    {
+        var key = $"endpoint:{applied.Scheme}://{applied.Host}:{applied.Port}{applied.AbsolutePath.TrimEnd('/')}";
+        if (result.Reachable) providerHealth.Success(key); else providerHealth.Failure(key, result.Error ?? "unreachable");
+    }
+    return Results.Json(result, CovenantJsonContext.Default.ProbeResult);
+});
+
 // The dashboard: one self-contained embedded page, no CDN, no egress (root CLAUDE.md #4). Data calls
 // need the token; no-store because a stale cached page against a newer endpoint dies silently.
 app.MapGet("/admin/ui", (HttpContext http) =>
@@ -646,6 +814,7 @@ app.MapGet("/admin/ui", (HttpContext http) =>
     return Results.Content(AdminUi.Html, "text/html");
 });
 
+app.MapConsole();
 app.Run();
 
 static ChatRole ParseRole(string? role) => (role ?? "user").ToLowerInvariant() switch

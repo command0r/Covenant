@@ -19,6 +19,22 @@ public sealed class StatusReport
     [JsonPropertyName("auth")] public required AuthStatus Auth { get; init; }
     [JsonPropertyName("otel_enabled")] public required bool OtelEnabled { get; init; }
     [JsonPropertyName("routing_threshold_tokens")] public required long RoutingThresholdTokens { get; init; }
+    // Console additions — applied configuration facts, never secrets.
+    [JsonPropertyName("environment")] public string? Environment { get; init; }
+    [JsonPropertyName("mode")] public string? Mode { get; init; }
+    [JsonPropertyName("audit_path")] public string? AuditPath { get; init; }
+    [JsonPropertyName("cache_ttl_seconds")] public int? CacheTtlSeconds { get; init; }
+    [JsonPropertyName("prompt_preview_chars")] public int? PromptPreviewChars { get; init; }
+    [JsonPropertyName("anchor")] public AnchorStatus? Anchor { get; init; }
+    [JsonPropertyName("version")] public string? Version { get; init; }
+}
+
+public sealed class AnchorStatus
+{
+    [JsonPropertyName("configured")] public required bool Configured { get; init; }
+    [JsonPropertyName("every")] public int? Every { get; init; }
+    [JsonPropertyName("anchors_written")] public long? AnchorsWritten { get; init; }
+    [JsonPropertyName("last_anchor_utc")] public DateTimeOffset? LastAnchorUtc { get; init; }
 }
 
 public sealed class AuthStatus
@@ -65,6 +81,10 @@ public sealed class FinOpsSummary
     [JsonPropertyName("savings_router_usd")] public required decimal SavingsRouterUsd { get; init; }
     [JsonPropertyName("savings_cache_usd")] public required decimal SavingsCacheUsd { get; init; }
     [JsonPropertyName("cache_hits")] public required int CacheHits { get; init; }
+    /// <summary>Requests whose cost is unknown (unpriced, or a failed call on an unpriced model) — never counted as $0 savings.</summary>
+    [JsonPropertyName("unknown_cost_requests")] public int UnknownCostRequests { get; init; }
+    /// <summary>Requests charged from a text-length estimate because usage was not reported.</summary>
+    [JsonPropertyName("estimated_cost_requests")] public int EstimatedCostRequests { get; init; }
     [JsonPropertyName("cost_by_team_usd")] public required Dictionary<string, decimal> CostByTeamUsd { get; init; }
     [JsonPropertyName("denials_by_reason")] public required Dictionary<string, int> DenialsByReason { get; init; }
     /// <summary>Per-minute request/denial/cost buckets (most recent 60 non-empty), for the activity chart.</summary>
@@ -107,6 +127,7 @@ public sealed class RecentRequest
     /// <summary>Truncated input preview — present only when the operator set Audit:PromptPreviewChars.</summary>
     [JsonPropertyName("prompt_preview")] public string? PromptPreview { get; init; }
     [JsonPropertyName("cache")] public required bool CacheHit { get; init; }
+    [JsonPropertyName("cost_basis")] public string? CostBasis { get; init; }
 }
 
 public static class FinOps
@@ -148,7 +169,7 @@ public static class FinOps
         int allowed = 0, denied = 0, localRequests = 0;
         long localTokens = 0;
         decimal totalCost = 0m, savingsLocal = 0m, savingsRouter = 0m, savingsCache = 0m;
-        int cacheHits = 0;
+        int cacheHits = 0, unknownCost = 0, estimatedCost = 0;
         var costByTeam = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var denialsByReason = new Dictionary<string, int>();
         var requestsByModel = new Dictionary<string, int>();
@@ -168,7 +189,17 @@ public static class FinOps
             totalCost += e.Usage.CostUsd;
             costByTeam[e.Tags.Team] = costByTeam.GetValueOrDefault(e.Tags.Team) + e.Usage.CostUsd;
 
-            if (e.Effect == PolicyEffect.Allow)
+            // ADR-0009: unknown or estimated usage never feeds a savings claim (a false $0 or a false
+            // saving are the same error). Legacy records (no CostBasis) keep their old treatment.
+            bool usageKnown = e.CostBasis is null or "reported" or "zero_priced" or "no_call";
+            if (e.CostBasis is "unpriced" or "unknown_failed_call") unknownCost++;
+            if (e.CostBasis is "estimated_from_text" or "estimated_failed_call") estimatedCost++;
+
+            if (e.Effect == PolicyEffect.Allow && !usageKnown)
+            {
+                allowed++;
+            }
+            else if (e.Effect == PolicyEffect.Allow)
             {
                 allowed++;
                 // Baseline: this request runs (uncached) on the strong model. Savings split by cause;
@@ -220,6 +251,8 @@ public static class FinOps
             SavingsRouterUsd = savingsRouter,
             SavingsCacheUsd = savingsCache,
             CacheHits = cacheHits,
+            UnknownCostRequests = unknownCost,
+            EstimatedCostRequests = estimatedCost,
             CostByTeamUsd = costByTeam,
             DenialsByReason = denialsByReason,
             Activity = DenseActivity(buckets),
@@ -240,6 +273,7 @@ public static class FinOps
                     TokensIn = e.Usage.InputTokens,
                     TokensOut = e.Usage.OutputTokens,
                     CostUsd = e.Usage.CostUsd,
+                    CostBasis = e.CostBasis,
                     Ms = e.DurationMs,
                     Reason = e.Reason,
                     PromptChars = e.PromptChars,
