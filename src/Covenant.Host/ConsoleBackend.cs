@@ -269,6 +269,8 @@ public sealed class SegmentInfo
     [JsonPropertyName("chain_valid")] public required bool ChainValid { get; init; }
     [JsonPropertyName("first_utc")] public DateTimeOffset? FirstUtc { get; init; }
     [JsonPropertyName("last_utc")] public DateTimeOffset? LastUtc { get; init; }
+    /// <summary>Control-plane events in this segment (config.activated, …), excluded from Entries/items (v3).</summary>
+    [JsonPropertyName("events")] public int Events { get; init; }
 }
 
 public sealed class CatalogReport
@@ -277,6 +279,10 @@ public sealed class CatalogReport
     [JsonPropertyName("models")] public required List<CatalogModel> Models { get; init; }
     [JsonPropertyName("local")] public required LocalConfigView Local { get; init; }
     [JsonPropertyName("probe_allow_list")] public required List<string> ProbeAllowList { get; init; }
+    // v2 (ADR-0011): multiple connections, keyed by connection id; models keyed "connectionId:modelId".
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; init; }
+    [JsonPropertyName("connections")] public List<CatalogConnection>? Connections { get; init; }
+    [JsonPropertyName("egress_allow_list")] public List<string>? EgressAllowList { get; init; }
 }
 
 public sealed class CatalogModel
@@ -291,6 +297,10 @@ public sealed class CatalogModel
     [JsonPropertyName("out_per_1m")] public decimal? OutPer1M { get; init; }
     [JsonPropertyName("endpoint_host")] public string? EndpointHost { get; init; }
     [JsonPropertyName("health")] public required HealthView Health { get; init; }
+    // v2 additive: connection-scoped identity.
+    [JsonPropertyName("connection_id")] public string? ConnectionId { get; init; }
+    [JsonPropertyName("boundary")] public string? Boundary { get; init; }
+    [JsonPropertyName("key")] public string? Key { get; init; }
 }
 
 public sealed class LocalConfigView

@@ -56,13 +56,21 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
-        if (config.TtlSeconds <= 0 || ctx.Policy?.Route is not { } route)
+        // Bound configuration (ADR-0011/0013) owns TTL/size; the key additionally scopes to the config version,
+        // connection, application, profile and final classification — no reuse across versions or identities.
+        int ttl = ctx.Configuration?.Config.Settings.CacheTtlSeconds ?? config.TtlSeconds;
+        int maxEntries = ctx.Configuration?.Config.Settings.CacheMaxEntries ?? config.MaxEntries;
+        if (ttl <= 0 || ctx.Policy?.Route is not { } route)
         {
             await next(ctx, ct);
             return;
         }
 
-        var key = Key(ctx.Identity.Tags.Team, route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens);
+        var key = ctx.Configuration is { } cfg
+            ? Key(string.Join('\u001e', "v2", cfg.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ctx.ApplicationId ?? "", ctx.ProfileId ?? "", ctx.Classification.ToString(), route.AdapterKey, ctx.Identity.Tags.Team),
+                route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens)
+            : Key(ctx.Identity.Tags.Team, route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens);
         if (cache.TryGet(key, out var hit))
         {
             ctx.ServedFromCache = true;
@@ -76,7 +84,7 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
         await next(ctx, ct);
 
         if (!ctx.IsDenied && ctx.Response is { } fresh)
-            cache.Store(key, fresh, TimeSpan.FromSeconds(config.TtlSeconds), config.MaxEntries);
+            cache.Store(key, fresh, TimeSpan.FromSeconds(ttl), Math.Max(1, maxEntries));
     }
 
     private static string Key(string team, string modelId, IReadOnlyList<ChatMessage> messages, int? maxOutputTokens)

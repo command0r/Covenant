@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace Covenant.Core;
 
 // Runtime configuration model (ADR-0011..0014). Persisted as immutable JSON snapshots by the Host's
@@ -74,8 +76,10 @@ public sealed record ModelConfig
 
 public sealed record PriceConfig
 {
-    public required decimal InputPer1M { get; init; }
-    public required decimal OutputPer1M { get; init; }
+    // Explicit wire names: the snake_case naming policy would otherwise split the digit ("input_per1_m").
+    // In-box System.Text.Json attribute only — Core still references no package.
+    [JsonPropertyName("input_per_1m")] public required decimal InputPer1M { get; init; }
+    [JsonPropertyName("output_per_1m")] public required decimal OutputPer1M { get; init; }
     /// <summary>"provider-list" | "contract" | "zero-marginal-local" | free text source note.</summary>
     public required string Basis { get; init; }
     public DateOnly? EffectiveDate { get; init; }

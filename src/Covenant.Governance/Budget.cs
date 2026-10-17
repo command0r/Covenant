@@ -106,16 +106,32 @@ public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, Bud
             return;
         }
 
-        if (ledger.GlobalSpendUsd >= config.GlobalCapUsd)
+        // Caps come from the request's bound configuration when present (ADR-0011): hard "global" and
+        // "team:<id>" budgets. Spend lives in the ledger and is never reset by an apply. (Application scopes and
+        // UTC periods with reservations are ADR-0014 / T04.)
+        decimal? globalCap = config.GlobalCapUsd;
+        decimal? teamCapFromConfig = null;
+        var team = ctx.Identity.Tags.Team;
+        if (ctx.Configuration is { } cfg)
         {
-            ctx.Deny($"global budget exhausted (cap {config.GlobalCapUsd} USD)");
+            globalCap = cfg.Config.Budgets.FirstOrDefault(b => b.Scope == "global" && b.Enforcement == BudgetEnforcement.Hard)?.CapUsd;
+            teamCapFromConfig = cfg.Config.Budgets.FirstOrDefault(b =>
+                b.Enforcement == BudgetEnforcement.Hard && b.Scope.StartsWith("team:", StringComparison.Ordinal)
+                && string.Equals(b.Scope["team:".Length..], team, StringComparison.OrdinalIgnoreCase))?.CapUsd;
+        }
+
+        if (globalCap is { } gcap && ledger.GlobalSpendUsd >= gcap)
+        {
+            ctx.Deny($"global budget exhausted (cap {gcap} USD)");
             return;
         }
 
-        var team = ctx.Identity.Tags.Team;
-        if (config.TeamCapsUsd.TryGetValue(team, out var teamCap) && ledger.TeamSpendUsd(team) >= teamCap)
+        decimal? teamCap = ctx.Configuration is not null
+            ? teamCapFromConfig
+            : config.TeamCapsUsd.TryGetValue(team, out var legacyTeamCap) ? (decimal?)legacyTeamCap : null;
+        if (teamCap is { } tcap && ledger.TeamSpendUsd(team) >= tcap)
         {
-            ctx.Deny($"budget exhausted for team '{team}' (cap {teamCap} USD)");
+            ctx.Deny($"budget exhausted for team '{team}' (cap {tcap} USD)");
             return;
         }
 
@@ -139,7 +155,15 @@ public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, Bud
     /// is priced; otherwise it is flagged unknown.</summary>
     private void ChargeFailedCall(InferenceContext ctx, string model)
     {
-        if (prices is not null && prices.TryGetPrice(model, out var p))
+        bool priced;
+        (decimal InputPer1K, decimal OutputPer1K) p;
+        if (ctx.Configuration is { } cfg)
+            priced = ConfigPrices.TryGet(cfg, ctx.Policy?.Route?.AdapterKey ?? "", model, out p);
+        else if (prices is not null)
+            priced = prices.TryGetPrice(model, out p);
+        else { priced = false; p = default; }
+
+        if (priced)
         {
             long inTok = TokenEstimate.FromChars(ctx.Request.Messages.Sum(m => m.Content.Length));
             long outTok = TokenEstimate.FromChars(ctx.PartialOutputChars);
@@ -152,6 +176,22 @@ public sealed class BudgetStage(IKillSwitch killSwitch, ISpendLedger ledger, Bud
         {
             ctx.CostBasis = "unknown_failed_call";
         }
+    }
+}
+
+/// <summary>Connection-scoped price lookup in a bound configuration (USD per 1K, matching IPriceBook).
+/// A model with no price entry is UNPRICED — never a silent $0.</summary>
+public static class ConfigPrices
+{
+    public static bool TryGet(IRequestConfiguration cfg, string connectionId, string modelId, out (decimal InputPer1K, decimal OutputPer1K) price)
+    {
+        if (cfg.FindModel(connectionId, modelId)?.Price is { } p)
+        {
+            price = (p.InputPer1M / 1000m, p.OutputPer1M / 1000m);
+            return true;
+        }
+        price = default;
+        return false;
     }
 }
 

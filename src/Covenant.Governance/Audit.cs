@@ -28,6 +28,7 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
             // Final outcome, not any single stage's opinion: only a request that produced a response
             // was allowed. Denied anywhere, or errored with no response → recorded as a denial.
             bool served = !ctx.IsDenied && ctx.Response is not null;
+            int previewChars = ctx.Configuration?.Config.Settings.PromptPreviewChars ?? promptPreviewChars;
             var id = ctx.Request.RequestId ?? $"req_{Guid.NewGuid():n}";
             var usage = ctx.Response?.Usage ?? ctx.FailedCallUsage ?? Usage.Empty;
             var entry = new AuditEntry(
@@ -48,8 +49,8 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 PromptSha256: Convert.ToHexString(SHA256.HashData(
                     Encoding.UTF8.GetBytes(string.Join('\n', ctx.Request.Messages.Select(m => m.Content))))).ToLowerInvariant(),
                 Signal: ctx.ClassificationSignal,
-                PromptPreview: promptPreviewChars > 0
-                    ? Truncate(string.Join(" ⏎ ", ctx.Request.Messages.Select(m => m.Content)), promptPreviewChars)
+                PromptPreview: previewChars > 0
+                    ? Truncate(string.Join(" ⏎ ", ctx.Request.Messages.Select(m => m.Content)), previewChars)
                     : null,
                 CacheHit: ctx.ServedFromCache,
                 SchemaVersion: 2,
@@ -61,7 +62,16 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 AttemptedModel: ctx.AttemptedModel,
                 Stream: ctx.Request.Stream,
                 UsageReported: ctx.AttemptedModel is null ? null : ctx.Response?.UsageReported ?? false,
-                CostBasis: ctx.CostBasis ?? (ctx.AttemptedModel is null ? "no_call" : "unknown_failed_call"));
+                CostBasis: ctx.CostBasis ?? (ctx.AttemptedModel is null ? "no_call" : "unknown_failed_call"),
+                // v3 (additive): configuration binding and identity — only recorded when a configuration
+                // version was bound (legacy compositions keep writing the v2 shape exactly).
+                EventType: null,
+                ConfigVersion: ctx.ConfigVersion,
+                EntryPoint: ctx.Configuration is null ? null : ctx.EntryPoint,
+                OperatorRef: ctx.OperatorRef,
+                ApplicationId: ctx.ApplicationId,
+                ProfileId: ctx.ProfileId,
+                BaselineClassification: ctx.BaselineClassification);
 
             // CancellationToken.None: a cancelled request must still produce its audit record.
             await sink.EnqueueAsync(entry, CancellationToken.None);

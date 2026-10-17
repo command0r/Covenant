@@ -27,6 +27,8 @@ public sealed class StatusReport
     [JsonPropertyName("prompt_preview_chars")] public int? PromptPreviewChars { get; init; }
     [JsonPropertyName("anchor")] public AnchorStatus? Anchor { get; init; }
     [JsonPropertyName("version")] public string? Version { get; init; }
+    // v2 (ADR-0011): the active configuration version every new request binds to.
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; init; }
 }
 
 public sealed class AnchorStatus
@@ -165,6 +167,8 @@ public static class FinOps
         string strongModelId,
         IReadOnlyDictionary<string, (decimal InPer1K, decimal OutPer1K)> prices)
     {
+        // v3: control-plane events (config.activated, …) are not requests — no counts, spend or activity.
+        if (entries.Any(e => !e.IsRequest())) entries = entries.Where(e => e.IsRequest()).ToList();
         var strongPrice = prices.GetValueOrDefault(strongModelId);
         int allowed = 0, denied = 0, localRequests = 0;
         long localTokens = 0;

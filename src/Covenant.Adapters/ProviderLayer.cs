@@ -29,14 +29,20 @@ public interface IProviderHealth
 
 /// <summary>The one place provider concepts exist (ADR-0001): canonical ↔ Microsoft.Extensions.AI
 /// mapping around the resolved IChatClient. No governance here; no provider concept escapes.</summary>
-public sealed class ProviderCallStage(IChatClientRegistry registry, IProviderHealth? health = null) : IPipelineStage
+/// <param name="preferRequestClients">ADR-0011: resolve against the provider clients compiled into the request's
+/// bound configuration snapshot (so a request keeps the clients of the version it started on). The Host sets it
+/// only when its own snapshot-backed registry is the DI registration; a test-substituted registry always wins.</param>
+public sealed class ProviderCallStage(IChatClientRegistry registry, IProviderHealth? health = null, bool preferRequestClients = false) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
         var route = ctx.Policy?.Route;
         if (route is null) { ctx.Deny("no route resolved before provider call"); return; }
 
-        if (!registry.TryResolve(route.AdapterKey, route.ModelId, out var client))
+        var effective = preferRequestClients && ctx.Configuration?.GetResource<IChatClientRegistry>() is { } snapshotClients
+            ? snapshotClients
+            : registry;
+        if (!effective.TryResolve(route.AdapterKey, route.ModelId, out var client))
         {
             ctx.Deny($"no adapter registered for '{route.AdapterKey}:{route.ModelId}'"); // fail-closed
             return;

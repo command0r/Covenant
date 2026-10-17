@@ -1,15 +1,10 @@
-using System.ClientModel;
-using System.Globalization;
 using System.Text.Json;
-using Anthropic;
 using System.Security.Cryptography;
 using System.Text;
 using Covenant.Adapters;
 using Covenant.Core;
 using Covenant.Governance;
 using Covenant.Host;
-using Microsoft.Extensions.AI;
-using OpenAI;
 using OpenTelemetry.Exporter;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -20,52 +15,23 @@ using ChatRole = Covenant.Core.ChatRole;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// --- Configuration (fail-closed: missing/invalid required values → refuse to start; a refusal is a diagnostic, not a crash) ---
+// --- Startup-only configuration (fail-closed: missing/invalid required values → refuse to start; a refusal is a diagnostic, not a crash).
+//     Startup-only per ADR-0011: Admin:Token, secret values, Auth:Keys, Audit:*, Config:Path, Providers:ProbeAllowList. ---
 string auditPath = builder.Configuration["Audit:Path"] ?? "covenant-audit.log";
-
-string? openAiKey = builder.Configuration["OpenAI:ApiKey"];
 string? adminToken = builder.Configuration["Admin:Token"];
-string? globalCapRaw = builder.Configuration["Budget:GlobalCapUsd"];
-decimal globalCapUsd = 0m;
 
 var configErrors = new List<string>();
 
 // Optional numeric settings: absent = fallback (opt-in off); present-but-invalid or negative =
 // misconfiguration → refuse to start. Fail-open "unparseable means unlimited" is forbidden here.
 int OptionalNonNegativeInt(string key, int fallback)
-{
-    var raw = builder.Configuration[key];
-    if (string.IsNullOrWhiteSpace(raw)) return fallback;
-    if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) && v >= 0) return v;
-    configErrors.Add($"{key} — must be a non-negative integer, got '{raw}'");
-    return fallback;
-}
-// Provider mode (ADR-0010): "cloud" (default) requires the OpenAI credential; "local-only" requires an
-// explicit Local:Endpoint + Local:ModelId, registers NO cloud provider, and refuses to start if cloud
-// credentials are configured (no silent cloud fallback, no quiet rerouting of cloud traffic).
-// The rules live in StartupValidation (pure, unit-tested); Program only applies them.
-string providerMode = StartupValidation.ProviderMode(builder.Configuration);
-bool localOnly = providerMode == StartupValidation.LocalOnlyMode;
-string? localEndpointRaw = StartupValidation.Trimmed(builder.Configuration["Local:Endpoint"]);
-string? localModelRaw = StartupValidation.Trimmed(builder.Configuration["Local:ModelId"]);
-configErrors.AddRange(StartupValidation.ValidateProviders(builder.Configuration));
+    => LegacyImport.OptionalNonNegativeInt(builder.Configuration, key, fallback, configErrors);
+
 if (string.IsNullOrWhiteSpace(adminToken))
     configErrors.Add("Admin:Token         — guards /admin/* (kill switch, evidence export)");
-if (string.IsNullOrWhiteSpace(globalCapRaw)
-    || !decimal.TryParse(globalCapRaw, NumberStyles.Number, CultureInfo.InvariantCulture, out globalCapUsd))
-    configErrors.Add("Budget:GlobalCapUsd — appliance-wide spend ceiling, a number like 5.00");
 
-var teamCapsUsd = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
-foreach (var child in builder.Configuration.GetSection("Budget:TeamCapsUsd").GetChildren())
-{
-    if (child.Value is { } capRaw
-        && decimal.TryParse(capRaw, NumberStyles.Number, CultureInfo.InvariantCulture, out var cap))
-        teamCapsUsd[child.Key] = cap;
-    else
-        configErrors.Add($"Budget:TeamCapsUsd:{child.Key} — not a number: '{child.Value}'");
-}
-
-// API keys (virtual keys). Anonymous serving is an explicit opt-in, never a default.
+// API keys (virtual keys). Anonymous serving is an explicit opt-in, never a default. A key binds to an
+// application via Auth:Keys:N:Application (default: its Principal) — ADR-0012.
 bool allowAnonymous = string.Equals(builder.Configuration["Auth:AllowAnonymous"], "true", StringComparison.OrdinalIgnoreCase);
 var apiKeys = new List<ApiKeyRecord>();
 foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren())
@@ -73,16 +39,15 @@ foreach (var child in builder.Configuration.GetSection("Auth:Keys").GetChildren(
     if (child["Key"] is { Length: > 0 } key
         && child["Principal"] is { Length: > 0 } keyPrincipal
         && child["Team"] is { Length: > 0 } keyTeam)
-        apiKeys.Add(new ApiKeyRecord(key, keyPrincipal, keyTeam));
+        apiKeys.Add(new ApiKeyRecord(key, keyPrincipal, keyTeam, child["Application"] is { Length: > 0 } keyApp ? keyApp : null));
     else
         configErrors.Add($"Auth:Keys:{child.Key} — requires Key, Principal, and Team");
 }
 if (apiKeys.Count == 0 && !allowAnonymous)
     configErrors.Add("Auth                — no API keys configured and Auth:AllowAnonymous is not 'true' (fail-closed: unauthenticated serving must be an explicit choice)");
 
-// Fail-closed refusal, printed as a diagnostic (never a crash). Called after each config region —
-// the first gate sits before provider-client
-// construction (which would throw on a missing key) and again after ALL config sections have parsed.
+// Fail-closed refusal, printed as a diagnostic (never a crash). Called after each config region. Program is the
+// composition root: it is the only place that exits; library code returns error lists.
 void FailIfConfigErrors()
 {
     if (configErrors.Count == 0) return;
@@ -96,6 +61,67 @@ void FailIfConfigErrors()
     Environment.Exit(1);
 }
 FailIfConfigErrors();
+
+// --- Runtime configuration (ADR-0011): versioned repository. Bootstrap precedence: (1) an existing repository
+//     wins; (2) empty + Config:Seed ∈ {demo-local-only, demo-hybrid} ⇒ that seed is v1; (3) otherwise the legacy
+//     startup keys are imported into v1 (origin legacy-import), reproducing the pre-v2 routing exactly.
+//     Default location: "<Audit:Path>.config/" — beside the audit log, and unique per audit log. ---
+string configDir = StartupValidation.Trimmed(builder.Configuration["Config:Path"]) is { Length: > 0 } cp ? cp : auditPath + ".config";
+var egressAllowList = StartupEgress.BuildAllowList(builder.Configuration);
+var secretAvailable = StartupEgress.SecretAvailability(builder.Configuration);
+ConfigValidationResult ValidateConfig(CovenantConfig c) => ConfigValidator.Validate(c, new ValidationEnvironment
+{
+    EgressAllowList = egressAllowList,
+    SecretAvailable = secretAvailable,
+    // Imported legacy-cloud configurations keep the pre-v2 PII/PHI placeholder (refused at the provider stage).
+    LegacyCompat = c.Mode == ProviderMode.LegacyCloud,
+});
+void AddValidationErrors(CovenantConfig c, ConfigValidationResult v)
+{
+    foreach (var e in v.Errors) configErrors.Add($"Config v{c.Version} ({c.Origin}) {e.Path} — {e.Code}: {e.Message}");
+    foreach (var w in v.Warnings) Console.Error.WriteLine($"covenant: config warning v{c.Version} {w.Path} — {w.Code}: {w.Message}");
+}
+
+var configRepo = new ConfigRepository(configDir);
+var opened = configRepo.Open();
+configErrors.AddRange(opened.Errors);
+FailIfConfigErrors();
+foreach (var w in opened.Warnings) Console.Error.WriteLine($"covenant: config warning — {w}");
+
+CovenantConfig activeConfig;
+bool bootstrapped = false;
+if (opened.IsEmpty)
+{
+    var seed = StartupValidation.Trimmed(builder.Configuration["Config:Seed"]);
+    CovenantConfig? v1 = null;
+    if (seed is { Length: > 0 })
+    {
+        if (DemoSeeds.IsKnown(seed)) v1 = DemoSeeds.Build(seed, builder.Configuration, DateTimeOffset.UtcNow, configErrors);
+        else configErrors.Add($"Config:Seed         — '{seed}' is not a known seed ({DemoSeeds.LocalOnly}, {DemoSeeds.Hybrid})");
+    }
+    else
+    {
+        // Legacy import: the pre-v2 provider-mode rules (ADR-0010) still apply to the keys being imported.
+        configErrors.AddRange(StartupValidation.ValidateProviders(builder.Configuration));
+        v1 = LegacyImport.Build(builder.Configuration, DateTimeOffset.UtcNow, configErrors);
+    }
+    FailIfConfigErrors();
+    AddValidationErrors(v1!, ValidateConfig(v1!));
+    FailIfConfigErrors();
+    activeConfig = configRepo.Bootstrap(v1!);
+    bootstrapped = true;
+}
+else
+{
+    activeConfig = opened.Active!;
+    // Fail-closed: an active configuration that no longer validates (e.g. a referenced secret was removed from
+    // the environment) refuses to start rather than serving on half-valid rules.
+    AddValidationErrors(activeConfig, ValidateConfig(activeConfig));
+    FailIfConfigErrors();
+    foreach (var legacyKey in new[] { "Providers:Mode", "OpenAI:ModelId", "OpenAI:StrongModelId", "Routing:ComplexityTokenThreshold", "Cache:TtlSeconds", "RateLimit:GlobalPerMinute", "RateLimit:PerTeamPerMinute", "Budget:GlobalCapUsd" })
+        if (!string.IsNullOrWhiteSpace(builder.Configuration[legacyKey]))
+            Console.Error.WriteLine($"covenant: note — {legacyKey} is a legacy startup key; configuration v{activeConfig.Version} in {configDir} governs routing/budgets (key ignored).");
+}
 
 // --- Observability (ADR-0003): opt-in OTel export — no Otel:Endpoint → no SDK; same egress discipline as model endpoints (in-perimeter, never phone-home); spans are diagnostics, the audit chain is the evidence. ---
 bool otelEnabled = false;
@@ -119,117 +145,16 @@ if (builder.Configuration["Otel:Endpoint"] is { Length: > 0 } otelEndpoint)
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.TypeInfoResolverChain.Insert(0, CovenantJsonContext.Default));
 
-// --- Provider layer (ADR-0001). OpenAI:* config can point at any OpenAI-compatible server; clients register per exact "adapter:model" key — a route to an unregistered model fails closed. ---
-string publicModelId = builder.Configuration["OpenAI:ModelId"] ?? "gpt-4o-mini";
-string strongModelId = builder.Configuration["OpenAI:StrongModelId"] ?? "gpt-4o";
-
-var clients = new Dictionary<string, IChatClient>();
-if (!localOnly)
+// --- Provider layer (ADR-0001) + runtime snapshots (ADR-0011): each validated version compiles into an immutable
+//     RuntimeSnapshot owning its provider clients ("connectionId:modelId"); a request acquires one at entry. ---
+var clientFactory = new SdkProviderClientFactory(builder.Configuration, egressAllowList);
+RuntimeSnapshot CompileSnapshot(CovenantConfig c)
 {
-    var openAiRoot = builder.Configuration["OpenAI:Endpoint"] is { Length: > 0 } openAiEndpoint
-        ? new OpenAIClient(new ApiKeyCredential(openAiKey!), new OpenAIClientOptions { Endpoint = new Uri(openAiEndpoint) })
-        : new OpenAIClient(openAiKey!);
-    clients[$"openai:{publicModelId}"] = openAiRoot.GetChatClient(publicModelId).AsIChatClient();
-    clients[$"openai:{strongModelId}"] = openAiRoot.GetChatClient(strongModelId).AsIChatClient();
+    var clients = clientFactory.Build(c);
+    foreach (var skip in clients.Skipped) Console.Error.WriteLine($"covenant: config v{c.Version} — no provider client for {skip}");
+    return new RuntimeSnapshot(c, clients);
 }
-
-// Optional in-perimeter target (vLLM, Ollama — any OpenAI-compatible endpoint), one exact model tag.
-// Not configured → the local route stays unregistered and PII/PHI keep failing closed at the provider
-// stage. The placeholder name is deliberately not a real model: nothing guesses the operator's tag.
-const string UnconfiguredLocalModel = "local-model-not-configured";
-string localModelId = localModelRaw ?? UnconfiguredLocalModel;
-if (localEndpointRaw is not null && localModelRaw is not null)
-{
-    clients[$"local:{localModelId}"] = new OpenAIClient(
-            new ApiKeyCredential(builder.Configuration["Local:ApiKey"] ?? "not-needed"),
-            new OpenAIClientOptions { Endpoint = new Uri(localEndpointRaw) })
-        .GetChatClient(localModelId)
-        .AsIChatClient();
-}
-
-// Optional Anthropic provider (ADR-0001 start set) — official SDK over IChatClient, opt-in via key.
-string anthropicModelId = builder.Configuration["Anthropic:ModelId"] ?? "claude-haiku-4-5";
-bool anthropicEnabled = false;
-if (!localOnly && builder.Configuration["Anthropic:ApiKey"] is { Length: > 0 } anthropicKey)
-{
-    anthropicEnabled = true;
-    var anthropicClient = builder.Configuration["Anthropic:Endpoint"] is { Length: > 0 } anthropicEndpoint
-        ? new AnthropicClient { ApiKey = anthropicKey, BaseUrl = anthropicEndpoint }
-        : new AnthropicClient { ApiKey = anthropicKey };
-    clients[$"anthropic:{anthropicModelId}"] = anthropicClient.AsIChatClient(anthropicModelId);
-}
-
-var registry = new ChatClientRegistry(clients);
-
-// --- Policy (first slice): PII/PHI have no public route, so they fail closed until "local" is wired. ---
-// Ordered cheapest → strongest: the policy engine complexity-routes within this set. Anthropic (when
-// configured) sits mid-list: reachable by explicit model request, never the default escalation.
-// Local-only (ADR-0010): every classification routes to the one approved local model — an explicit
-// mode choice, not a dropdown; in cloud mode Public/Internal stay on the cloud routes as before.
-List<RouteTarget> generalRoutes = localOnly ? [new("local", localModelId)] : [new("openai", publicModelId)];
-if (!localOnly && anthropicEnabled) generalRoutes.Add(new("anthropic", anthropicModelId));
-if (!localOnly) generalRoutes.Add(new("openai", strongModelId));
-
-var policy = new PolicyConfig
-{
-    AllowedRoutes = new Dictionary<DataClassification, IReadOnlyList<RouteTarget>>
-    {
-        [DataClassification.Public]   = generalRoutes,
-        [DataClassification.Internal] = generalRoutes,
-        [DataClassification.Pii]      = [new("local", localModelId)],
-        [DataClassification.Phi]      = [new("local", localModelId)],
-    }
-};
-
-// Real per-token prices (published per-1M rates converted to per-1K; earlier placeholders were 1000× off).
-// Override per model: Pricing:<model>:InPer1M / OutPer1M (USD per million tokens).
-var priceMap = new Dictionary<string, (decimal, decimal)>
-{
-    [publicModelId] = (0.00015m, 0.0006m),     // gpt-4o-mini: $0.15 / $0.60 per 1M
-    [strongModelId] = (0.0025m, 0.01m),        // gpt-4o:      $2.50 / $10.00 per 1M
-    [localModelId] = (0m, 0m),                 // in-perimeter compute: no per-token provider cost
-};
-if (anthropicEnabled) priceMap[anthropicModelId] = (0.001m, 0.005m); // claude-haiku-4-5: $1 / $5 per 1M
-foreach (var child in builder.Configuration.GetSection("Pricing").GetChildren())
-{
-    if (decimal.TryParse(child["InPer1M"], NumberStyles.Number, CultureInfo.InvariantCulture, out var inPer1M)
-        && decimal.TryParse(child["OutPer1M"], NumberStyles.Number, CultureInfo.InvariantCulture, out var outPer1M))
-        priceMap[child.Key] = (inPer1M / 1000m, outPer1M / 1000m);
-    else
-        configErrors.Add($"Pricing:{child.Key} — requires numeric InPer1M and OutPer1M");
-}
-var prices = new PriceBook(priceMap);
-// Fail-closed accounting (ADR-0009): every routable model must be priced (0 is a valid, explicit price
-// for in-perimeter compute) — an unpriced route would let billable calls escape the budget.
-var routableModels = new List<string> { publicModelId, strongModelId, localModelId };
-if (anthropicEnabled) routableModels.Add(anthropicModelId);
-foreach (var routeModel in routableModels.Distinct())
-    if (!priceMap.ContainsKey(routeModel))
-        configErrors.Add($"Pricing:{routeModel} — routable model has no price (set InPer1M/OutPer1M; 0 is allowed)");
-
-long complexityThreshold = OptionalNonNegativeInt("Routing:ComplexityTokenThreshold", 400);
-
-// Response cache: opt-in via Cache:TtlSeconds > 0 (holds response content in memory; team-scoped keys).
-var cacheConfig = new CacheConfig
-{
-    TtlSeconds = OptionalNonNegativeInt("Cache:TtlSeconds", 0),
-    MaxEntries = OptionalNonNegativeInt("Cache:MaxEntries", 1_000),
-};
-var responseCache = new ResponseCache();
-
-// Rate limits: opt-in via RateLimit:* (0 = unlimited). Refusals are 429s and audited like any denial.
-var rateConfig = new RateLimitConfig
-{
-    GlobalPerMinute = OptionalNonNegativeInt("RateLimit:GlobalPerMinute", 0),
-    PerTeamPerMinute = OptionalNonNegativeInt("RateLimit:PerTeamPerMinute", 0),
-};
-var rateCounterGlobal = new RateCounter();
-var rateCounterTeams = new RateCounter();
-int promptPreviewChars = OptionalNonNegativeInt("Audit:PromptPreviewChars", 0);
-
-// Second gate: pricing, routing, cache, rate limits, and preview have parsed by now (anchoring
-// parses just below and has its own gate before sink construction).
-FailIfConfigErrors();
+var runtime = new SnapshotHolder(CompileSnapshot(activeConfig));
 
 // Chain-head anchoring (ADR-0007): both settings together or neither; the anchor path should live
 // on an independent storage domain — that placement is the entire security value.
@@ -256,33 +181,48 @@ if (!chainAtBoot.Valid)
         "Point Audit:Path at a fresh file to resume serving.");
     Environment.Exit(1);
 }
-LedgerReplay.Rebuild(priorEntries, spendLedger);
-var budget = new BudgetConfig { GlobalCapUsd = globalCapUsd, TeamCapsUsd = teamCapsUsd };
+LedgerReplay.Rebuild(priorEntries, spendLedger);   // control-plane events are skipped
+
+// ADR-0011: the active version's activation is evidenced in the chain. A fresh bootstrap records it; a crash
+// between pointer rename and audit append (no event for the active version) is recovered here, marked as such.
+if (bootstrapped || !priorEntries.Any(e => e.EventType == AuditEntryKinds.ConfigActivated && e.ConfigVersion == activeConfig.Version))
+    auditSink.TryWrite(ConfigAuditEvents.Activated(activeConfig, bootstrapped ? "covenant-bootstrap" : "covenant-boot", DateTimeOffset.UtcNow,
+        recovered: !bootstrapped));
 
 // --- Pipeline assembly. The provider registry is resolved from DI so tests can substitute a stub
 //     provider (a later registration wins); everything else is captured here. Outermost first;
-//     audit wraps everything; order per src/CLAUDE.md. ---
-builder.Services.AddSingleton<IChatClientRegistry>(registry);
+//     audit wraps everything; order per src/CLAUDE.md. Every stage reads the request's bound snapshot
+//     (ctx.Configuration); the constructor arguments below are only the fail-closed fallback for a context
+//     without one (deny-all policy, zero budget), which the Host never produces. ---
+builder.Services.AddSingleton<IRuntimeConfig>(runtime);
+builder.Services.AddSingleton<IChatClientRegistry>(new SnapshotChatClientRegistry(runtime));
 var providerHealth = new ProviderHealth();
-var probeAllowList = ProviderProbe.BuildAllowList(builder.Configuration["Providers:ProbeAllowList"], localEndpointRaw);
+var probeAllowList = ProviderProbe.BuildAllowList(builder.Configuration["Providers:ProbeAllowList"], StartupValidation.Trimmed(builder.Configuration["Local:Endpoint"]));
 string environmentName = builder.Configuration["Covenant:Environment"] is { Length: > 0 } envName ? envName : "local";
-builder.Services.AddSingleton(sp => new InferencePipeline(
-[
-    new AuditStage(auditSink, promptPreviewChars:    // outermost: audits allow, deny, and error alike
-        promptPreviewChars),
-    new AuthStage(new AuthConfig { AllowAnonymous = allowAnonymous, Keys = apiKeys }), // auth first
-    new ShapeStage(),                                // refuse shapes governance can't see (images, tools) — audited
-    new ClassifyStage(new RegexDataClassifier()),    // classify
-    new PolicyStage(new PolicyEngine(policy, new RoutingOptions
-    {
-        ComplexityTokenThreshold = complexityThreshold,
-    })),                                             // policy + complexity routing, fail-closed
-    new CacheStage(responseCache, cacheConfig),      // cache before budget/provider: a hit skips the model call
-    new RateLimitStage(rateCounterGlobal, rateCounterTeams, rateConfig), // rate half of budget/rate; cache hits bypass (free)
-    new BudgetStage(killSwitch, spendLedger, budget, prices),// pause + caps, before anything costs money; charges failed calls on unwind
-    new ProviderCallStage(sp.GetRequiredService<IChatClientRegistry>(), providerHealth), // route + provider call
-    new AttributionStage(prices),                    // attribute cost
-]));
+var responseCache = new ResponseCache();
+var rateCounterGlobal = new RateCounter();
+var rateCounterTeams = new RateCounter();
+var classifier = new RegexDataClassifier();
+var denyAllPolicy = new PolicyConfig { AllowedRoutes = new Dictionary<DataClassification, IReadOnlyList<RouteTarget>>() };
+var noPrices = new PriceBook(new Dictionary<string, (decimal, decimal)>());
+builder.Services.AddSingleton(sp =>
+{
+    var liveRegistry = sp.GetRequiredService<IChatClientRegistry>();
+    return new InferencePipeline(
+    [
+        new AuditStage(auditSink),                       // outermost: audits allow, deny, and error alike
+        new AuthStage(new AuthConfig { AllowAnonymous = allowAnonymous, Keys = apiKeys }), // auth first (+ application/profile)
+        new ShapeStage(),                                // refuse shapes governance can't see (images, tools) — audited
+        new ClassifyStage(classifier),                   // classify: max(trusted baseline, detected)
+        new PolicyStage(new PolicyEngine(denyAllPolicy)),// policy v2 on the bound snapshot, fail-closed
+        new CacheStage(responseCache, new CacheConfig()),// cache before budget/provider: a hit skips the model call
+        new RateLimitStage(rateCounterGlobal, rateCounterTeams, new RateLimitConfig()), // rate half of budget/rate; cache hits bypass (free)
+        new BudgetStage(killSwitch, spendLedger, new BudgetConfig { GlobalCapUsd = 0m }, noPrices), // pause + caps; charges failed calls on unwind
+        new ProviderCallStage(liveRegistry, providerHealth,
+            preferRequestClients: liveRegistry is SnapshotChatClientRegistry), // route + provider call on the request's snapshot clients
+        new AttributionStage(noPrices),                  // attribute cost (connection-scoped price book of the snapshot)
+    ]);
+});
 builder.Services.AddHostedService(_ => auditSink);   // drains the audit channel in the background
 
 // ADR-0006: evidence graph — optional, in-perimeter, never load-bearing. No Neo4j:Uri → not registered.
@@ -335,8 +275,9 @@ app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipel
     var request = new InferenceRequest(principal, AnthropicWire.ToCanonical(body), body.Model, tags,
         Stream: body.Stream == true, Credential: credential,
         MaxOutputTokens: body.MaxTokens, UnsupportedFeature: AnthropicWire.Unsupported(body),
-        RequestId: requestId);
+        RequestId: requestId, RequestedProfile: http.Request.Headers[AuthStage.ProfileHeader].FirstOrDefault());
     var ctx = new InferenceContext(request);
+    using var lease = SnapshotLease.Bind(runtime, ctx);   // ADR-0011: one configuration version for the whole request
     var msgId = requestId;
 
     if (request.Stream)
@@ -406,8 +347,9 @@ app.MapGet("/v1/models", (HttpContext http) =>
             new ErrorResponse { Error = "unauthenticated", Reason = "valid API key required" },
             CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status401Unauthorized);
 
-    var models = policy.AllowedRoutes.Values
-        .SelectMany(routes => routes)
+    var models = runtime.Current.Config.Policies
+        .Where(p => p.Enabled && !p.Paused)
+        .SelectMany(p => p.Targets.Where(t => !t.Paused))
         .Select(r => r.ModelId)
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .Select(m => new OpenAiModel { Id = m })
@@ -440,9 +382,11 @@ app.MapPost("/v1/chat/completions",
         Credential: credential,
         MaxOutputTokens: body.MaxCompletionTokens ?? body.MaxTokens,
         UnsupportedFeature: OpenAiWire.Unsupported(body),
-        RequestId: RequestCorrelation.Get(http));
+        RequestId: RequestCorrelation.Get(http),
+        RequestedProfile: http.Request.Headers[AuthStage.ProfileHeader].FirstOrDefault());
 
     var ctx = new InferenceContext(request);
+    using var lease = SnapshotLease.Bind(runtime, ctx);   // ADR-0011: one configuration version for the whole request
 
     // --- Streamed mode (ADR-0002): SSE headers commit lazily on the FIRST delta, so a pre-flight denial still returns a plain JSON error below. ---
     if (request.Stream)
@@ -596,23 +540,59 @@ app.MapGet("/admin/evidence", (HttpContext http) =>
 // never a second source of truth.
 var startedUtc = DateTimeOffset.UtcNow;
 
+// Model-id keyed price view (per 1K) of a configuration, for FinOps' pre-v2 savings math (first entry wins).
+static Dictionary<string, (decimal, decimal)> PricesByModel(CovenantConfig c)
+{
+    var map = new Dictionary<string, (decimal, decimal)>(StringComparer.Ordinal);
+    foreach (var conn in c.Connections)
+        foreach (var m in conn.Models)
+            if (m.Price is { } p) map.TryAdd(m.ModelId, (p.InputPer1M / 1000m, p.OutputPer1M / 1000m));
+    return map;
+}
+
+// Status routes per classification in enum order (Public, Internal, Pii, Phi), targets in policy order.
+static List<(DataClassification Cls, PolicyTarget Target)> RoutesOf(CovenantConfig c)
+{
+    var list = new List<(DataClassification, PolicyTarget)>();
+    foreach (var cls in Enum.GetValues<DataClassification>())
+        foreach (var policyV2 in c.Policies.Where(x => x.Enabled && x.Classifications.Contains(cls)))
+            foreach (var t in policyV2.Targets)
+                list.Add((cls, t));
+    return list;
+}
+
+static string? EndpointSummary(string? endpoint)
+    => endpoint is not null && Uri.TryCreate(endpoint, UriKind.Absolute, out var u)
+        ? $"{u.Scheme}://{u.Host}:{u.Port}{u.AbsolutePath.TrimEnd('/')}" : null;
+
 StatusReport BuildStatus()
 {
+    var snapshot = runtime.Current;
+    var cfg = snapshot.Config;
     var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
     var anchorInfo = AnchorInfo.Read(anchorPath);
     var teamSpend = spendLedger.SnapshotByTeam();
 
+    var teamCaps = cfg.Budgets
+        .Where(b => b.Scope.StartsWith("team:", StringComparison.Ordinal))
+        .GroupBy(b => b.Scope["team:".Length..], StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(g => g.Key, g => g.First().CapUsd, StringComparer.OrdinalIgnoreCase);
     var teams = new List<TeamBudgetStatus>();
-    foreach (var (team, cap) in teamCapsUsd)
+    foreach (var (team, cap) in teamCaps)
         teams.Add(new TeamBudgetStatus { Team = team, CapUsd = cap, SpendUsd = teamSpend.GetValueOrDefault(team) });
     foreach (var (team, spend) in teamSpend)
-        if (!teamCapsUsd.ContainsKey(team))
+        if (!teamCaps.ContainsKey(team))
             teams.Add(new TeamBudgetStatus { Team = team, CapUsd = null, SpendUsd = spend });
 
-    var routes = new List<RouteView>();
-    foreach (var (cls, targets) in policy.AllowedRoutes)
-        foreach (var t in targets)
-            routes.Add(new RouteView { Classification = cls.ToString(), Adapter = t.AdapterKey, Model = t.ModelId });
+    var routes = RoutesOf(cfg)
+        .Select(r => new RouteView { Classification = r.Cls.ToString(), Adapter = r.Target.ConnectionId, Model = r.Target.ModelId })
+        .ToList();
+
+    // FinOps savings baseline: the configured counterfactual (legacy import: the strong model; none in local-only,
+    // where no savings are claimed). The "local" model for the local split is the first local-boundary model.
+    var localModel = cfg.Connections.Where(c => c.Boundary == Boundary.Local).SelectMany(c => c.Models).Select(m => m.ModelId).FirstOrDefault()
+        ?? LegacyImport.UnconfiguredLocalModel;
+    var baselineModel = cfg.SavingsBaseline?.ModelId ?? localModel;
 
     return new StatusReport
     {
@@ -621,23 +601,22 @@ StatusReport BuildStatus()
         KillSwitch = new KillSwitchState { Engaged = killSwitch.IsTripped, Reason = killSwitch.Reason },
         Budget = new BudgetStatus
         {
-            GlobalCapUsd = globalCapUsd,
+            GlobalCapUsd = cfg.Budgets.FirstOrDefault(b => b.Scope == "global")?.CapUsd ?? 0m,
             GlobalSpendUsd = spendLedger.GlobalSpendUsd,
             Teams = teams,
         },
         Routes = routes,
-        // Local-only has no cloud baseline to compare against: no savings are claimed.
-        FinOps = FinOps.Build(entries, localModelId, localOnly ? localModelId : strongModelId, priceMap),
+        FinOps = FinOps.Build(entries, localModel, baselineModel, PricesByModel(cfg)),
         ChainValid = verification.Valid,
         AuditEntries = verification.EntryCount,
         Auth = new AuthStatus { AllowAnonymous = allowAnonymous, KeyCount = apiKeys.Count },
         OtelEnabled = otelEnabled,
-        RoutingThresholdTokens = complexityThreshold,
+        RoutingThresholdTokens = cfg.Policies.FirstOrDefault(p => p.Enabled && p.Strategy == RoutingStrategy.LengthHeuristic)?.ThresholdTokens ?? 400,
         Environment = environmentName,
-        Mode = providerMode,
+        Mode = StartupEgress.ModeString(cfg.Mode),
         AuditPath = Path.GetFullPath(auditPath),
-        CacheTtlSeconds = cacheConfig.TtlSeconds,
-        PromptPreviewChars = promptPreviewChars,
+        CacheTtlSeconds = cfg.Settings.CacheTtlSeconds,
+        PromptPreviewChars = cfg.Settings.PromptPreviewChars,
         Anchor = new AnchorStatus
         {
             Configured = anchorPath is not null,
@@ -646,6 +625,7 @@ StatusReport BuildStatus()
             LastAnchorUtc = anchorInfo.LastUtc,
         },
         Version = typeof(Program).Assembly.GetName().Version?.ToString(),
+        ConfigVersion = cfg.Version,
     };
 }
 
@@ -700,7 +680,8 @@ app.MapGet("/admin/requests", (HttpContext http, int? limit) =>
 {
     if (!Authorized(http)) return Unauthorized();
     http.Response.Headers.CacheControl = "no-store";
-    var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+    var (verification, all) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
+    var entries = all.Where(e => e.IsRequest()).ToList();   // v3: control-plane events → GET /admin/config/versions
     int take = Math.Clamp(limit ?? 200, 1, 1000);
     var page = new RequestsPage
     {
@@ -711,6 +692,7 @@ app.MapGet("/admin/requests", (HttpContext http, int? limit) =>
             ChainValid = verification.Valid,
             FirstUtc = entries.Count > 0 ? entries[0].TimestampUtc : null,
             LastUtc = entries.Count > 0 ? entries[^1].TimestampUtc : null,
+            Events = all.Count - entries.Count,
         },
         Items = Enumerable.Reverse(entries).Take(take).ToList(),
     };
@@ -732,7 +714,7 @@ app.MapGet("/admin/requests/{id}", (HttpContext http, string id) =>
         return Results.Json(new ErrorResponse { Error = "chain_invalid", Reason = $"audit chain verification failed: {lookupVerification.Failure} — evidence cannot be trusted; see /admin/evidence" },
             CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status409Conflict);
     for (int i = entries.Count - 1; i >= 0; i--)
-        if (string.Equals(entries[i].Id, id, StringComparison.Ordinal))
+        if (entries[i].IsRequest() && string.Equals(entries[i].Id, id, StringComparison.Ordinal))
             return Results.Json(entries[i], AuditJsonContext.Default.AuditEntry);
     return Results.Json(new ErrorResponse { Error = "not_found", Reason = "no record with this id in the current audit segment", Scanned = entries.Count },
         CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status404NotFound);
@@ -746,45 +728,94 @@ app.MapGet("/admin/catalog", (HttpContext http) =>
     // Resolved explicitly (not parameter-inferred): the LIVE registration, incl. a test override.
     var liveRegistry = http.RequestServices.GetRequiredService<IChatClientRegistry>();
     http.Response.Headers.CacheControl = "no-store";
+    var snapshot = runtime.Current;
+    var cfg = snapshot.Config;
     var byRoute = new Dictionary<(string, string), List<string>>();
-    foreach (var (cls, targets) in policy.AllowedRoutes)
-        foreach (var t in targets)
-        {
-            if (!byRoute.TryGetValue((t.AdapterKey, t.ModelId), out var list)) byRoute[(t.AdapterKey, t.ModelId)] = list = [];
-            list.Add(cls.ToString());
-        }
-    string? localAuthority = localEndpointRaw is not null && Uri.TryCreate(localEndpointRaw, UriKind.Absolute, out var lu)
-        ? $"{lu.Scheme}://{lu.Host}:{lu.Port}{lu.AbsolutePath.TrimEnd('/')}" : null;
+    foreach (var (cls, t) in RoutesOf(cfg))
+    {
+        if (!byRoute.TryGetValue((t.ConnectionId, t.ModelId), out var list)) byRoute[(t.ConnectionId, t.ModelId)] = list = [];
+        if (!list.Contains(cls.ToString())) list.Add(cls.ToString());
+    }
+
+    (string Basis, decimal? In, decimal? Out) PriceView(ModelConfig? m)
+        => m?.Price is not { } p ? ("unpriced", null, null)
+         : (p.InputPer1M == 0m && p.OutputPer1M == 0m ? "zero" : "configured", p.InputPer1M, p.OutputPer1M);
+
     var models = byRoute.Select(kv =>
     {
-        var (adapter, model) = kv.Key;
-        bool priced = priceMap.TryGetValue(model, out var p);
+        var (connectionId, model) = kv.Key;
+        var conn = snapshot.FindConnection(connectionId);
+        var price = PriceView(snapshot.FindModel(connectionId, model));
         return new CatalogModel
         {
-            Adapter = adapter,
+            Adapter = connectionId,
             ModelId = model,
             Classifications = kv.Value,
-            Registered = model != UnconfiguredLocalModel && liveRegistry.TryResolve(adapter, model, out _),
-            PriceBasis = !priced ? "unpriced" : p.Item1 == 0m && p.Item2 == 0m ? "zero" : "configured",
-            InPer1M = priced ? p.Item1 * 1000m : null,
-            OutPer1M = priced ? p.Item2 * 1000m : null,
-            EndpointHost = adapter == "local" ? localAuthority : null,
-            Health = providerHealth.Get($"{adapter}:{model}"),
+            // Named by policy is not registered: the connection must exist and a client must resolve.
+            Registered = conn is not null && liveRegistry.TryResolve(connectionId, model, out _),
+            PriceBasis = price.Basis,
+            InPer1M = price.In,
+            OutPer1M = price.Out,
+            EndpointHost = conn?.Boundary == Boundary.Local ? EndpointSummary(conn.Endpoint) : null,
+            Health = providerHealth.Get($"{connectionId}:{model}"),
+            ConnectionId = connectionId,
+            Boundary = conn?.Boundary.ToString(),
+            Key = $"{connectionId}:{model}",
         };
     }).ToList();
+
+    var connections = cfg.Connections.Select(c =>
+    {
+        var authority = c.Endpoint is null ? ConfigValidator.DefaultAuthority(c.Kind) : ConfigValidator.EndpointAuthority(c.Endpoint);
+        return new CatalogConnection
+        {
+            Id = c.Id,
+            DisplayName = c.DisplayName,
+            Kind = c.Kind.ToString(),
+            Boundary = c.Boundary.ToString(),
+            Enabled = c.Enabled,
+            Endpoint = EndpointSummary(c.Endpoint),
+            EndpointAllowListed = authority is not null && egressAllowList.Contains(authority),
+            SecretRef = c.SecretRef,
+            SecretAvailable = c.SecretRef is { } r ? secretAvailable(r) : null,
+            Models = c.Models.Select(m =>
+            {
+                var price = PriceView(m);
+                return new CatalogConnectionModel
+                {
+                    Key = $"{c.Id}:{m.ModelId}",
+                    ModelId = m.ModelId,
+                    DisplayName = m.DisplayName,
+                    Registered = liveRegistry.TryResolve(c.Id, m.ModelId, out _),
+                    PriceBasis = price.Basis,
+                    InPer1M = price.In,
+                    OutPer1M = price.Out,
+                    Health = providerHealth.Get($"{c.Id}:{m.ModelId}"),
+                };
+            }).ToList(),
+        };
+    }).ToList();
+
+    // Pre-v2 "local" view: the connection named "local" (legacy import), else the first local-boundary one.
+    var local = snapshot.FindConnection("local") ?? cfg.Connections.FirstOrDefault(c => c.Boundary == Boundary.Local);
+    var localAuthority = EndpointSummary(local?.Endpoint);
+    var localModelId = local?.Models.FirstOrDefault()?.ModelId;
     var report = new CatalogReport
     {
-        Mode = providerMode,
+        Mode = StartupEgress.ModeString(cfg.Mode),
         Models = models,
         Local = new LocalConfigView
         {
-            Configured = localEndpointRaw is not null && localModelRaw is not null,
+            Configured = local is not null && local.Endpoint is not null && localModelId is not null,
             Endpoint = localAuthority,
-            ModelId = localModelRaw,
-            Registered = localModelRaw is not null && liveRegistry.TryResolve("local", localModelRaw, out _),
+            ModelId = localModelId,
+            Registered = local is not null && localModelId is not null && liveRegistry.TryResolve(local.Id, localModelId, out _),
             EndpointHealth = providerHealth.Get($"endpoint:{localAuthority}"),
         },
         ProbeAllowList = probeAllowList.OrderBy(x => x, StringComparer.Ordinal).ToList(),
+        ConfigVersion = cfg.Version,
+        Connections = connections,
+        EgressAllowList = egressAllowList.OrderBy(x => x, StringComparer.Ordinal).ToList(),
     };
     return Results.Json(report, CovenantJsonContext.Default.CatalogReport);
 });
@@ -796,12 +827,15 @@ app.MapPost("/admin/providers/probe", async (ProbeRequest body, HttpContext http
 {
     if (!Authorized(http)) return Unauthorized();
     var result = await ProviderProbe.RunAsync(body.Endpoint, probeAllowList, ct);
-    if (result.Allowed && localEndpointRaw is not null && Uri.TryCreate(localEndpointRaw, UriKind.Absolute, out var applied)
-        && result.Endpoint is not null
-        && string.Equals(result.Endpoint.TrimEnd('/'), $"{applied.Scheme}://{applied.Host}:{applied.Port}{applied.AbsolutePath.TrimEnd('/')}", StringComparison.OrdinalIgnoreCase))
+    // Only an APPLIED connection endpoint (active configuration) records endpoint health; drafts never do.
+    if (result.Allowed && result.Endpoint is not null)
     {
-        var key = $"endpoint:{applied.Scheme}://{applied.Host}:{applied.Port}{applied.AbsolutePath.TrimEnd('/')}";
-        if (result.Reachable) providerHealth.Success(key); else providerHealth.Failure(key, result.Error ?? "unreachable");
+        foreach (var applied in runtime.Current.Config.Connections.Select(c => EndpointSummary(c.Endpoint)).Where(e => e is not null).Distinct())
+            if (string.Equals(result.Endpoint.TrimEnd('/'), applied, StringComparison.OrdinalIgnoreCase))
+            {
+                var key = $"endpoint:{applied}";
+                if (result.Reachable) providerHealth.Success(key); else providerHealth.Failure(key, result.Error ?? "unreachable");
+            }
     }
     return Results.Json(result, CovenantJsonContext.Default.ProbeResult);
 });
@@ -812,6 +846,19 @@ app.MapGet("/admin/ui", (HttpContext http) =>
 {
     http.Response.Headers.CacheControl = "no-store";
     return Results.Content(AdminUi.Html, "text/html");
+});
+
+app.MapConfigAdmin(new ConfigAdminServices
+{
+    Repository = configRepo,
+    Runtime = runtime,
+    Validate = ValidateConfig,
+    Compile = CompileSnapshot,
+    SecretAvailable = secretAvailable,
+    EgressAllowList = egressAllowList,
+    AuditEvents = auditSink,
+    Classifier = classifier,
+    Authorized = Authorized,
 });
 
 app.MapConsole();

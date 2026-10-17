@@ -23,7 +23,11 @@ public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
         if (ctx.Response is { } resp && ctx.Policy?.Route is { } route)
         {
             decimal cost;
-            if (!priceBook.TryGetPrice(route.ModelId, out var p))
+            (decimal InputPer1K, decimal OutputPer1K) p;
+            bool hasPrice = ctx.Configuration is { } cfg
+                ? ConfigPrices.TryGet(cfg, route.AdapterKey, route.ModelId, out p)   // connection-scoped (ADR-0011)
+                : priceBook.TryGetPrice(route.ModelId, out p);
+            if (!hasPrice)
             {
                 cost = 0m;
                 ctx.CostBasis = "unpriced";               // unknown, flagged — never a real $0

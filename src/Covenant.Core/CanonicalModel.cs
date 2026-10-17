@@ -29,7 +29,13 @@ public sealed record InferenceRequest(
     string? Credential = null,
     int? MaxOutputTokens = null,
     string? UnsupportedFeature = null,    // set by ingress when the wire carried something governance cannot see (images, tools) → denied in-pipeline, audited
-    string? RequestId = null);            // server-generated correlation id (ADR-0009); never caller-supplied
+    string? RequestId = null,             // server-generated correlation id (ADR-0009); never caller-supplied
+    string? RequestedProfile = null,      // workload profile asked for (X-Covenant-Profile / console); must be granted (ADR-0012)
+    PreAuthenticatedIdentity? PreAuthenticated = null); // console entry point: identity resolved server-side, no key (ADR-0012)
+
+/// <summary>An application identity resolved by the Host itself (console inference, ADR-0012) — never
+/// taken from a client header. The auth stage still enforces enabled + console testing + profile grant.</summary>
+public sealed record PreAuthenticatedIdentity(string ApplicationId, string Team, string Principal);
 
 /// <summary>Who the pipeline decided the caller is: self-declared until the auth stage overwrites it
 /// on a valid key. Everything downstream reads THIS, never the raw request headers.</summary>

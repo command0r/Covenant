@@ -4,7 +4,11 @@ namespace Covenant.Governance;
 
 /// <summary>One virtual API key: the opaque key value and the identity it resolves to. Keys come from
 /// config (dev: user-secrets; prod: the customer's vault) — never from the repo or image.</summary>
-public sealed record ApiKeyRecord(string Key, string Principal, string Team);
+/// <param name="ApplicationId">Application this key binds to (Auth:Keys:N:Application; default = Principal, ADR-0012).</param>
+public sealed record ApiKeyRecord(string Key, string Principal, string Team, string? ApplicationId = null)
+{
+    public string Application => ApplicationId ?? Principal;
+}
 
 public sealed class AuthConfig
 {
@@ -27,9 +31,33 @@ public sealed class AuthStage : IPipelineStage
         foreach (var k in config.Keys) _byKey[k.Key] = k;
     }
 
+    public const string ProfileHeader = "X-Covenant-Profile";
+
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
         var credential = ctx.Request.Credential;
+
+        // Console entry point (ADR-0012): identity was resolved server-side by the Host from an authorized
+        // admin session; no application key exists in the browser. Still enforced here: application enabled,
+        // console testing allowed, profile granted — governed, audited refusals.
+        if (ctx.Request.PreAuthenticated is { } pre)
+        {
+            if (ctx.Configuration is not { } cfg)
+            {
+                ctx.Deny("console identity requires a runtime configuration", DenialKind.Unauthenticated);
+                return;
+            }
+            ctx.Identity = new CallerIdentity(pre.Principal, ctx.Request.Attribution with { Team = pre.Team });
+            var app = cfg.FindApplication(pre.ApplicationId);
+            if (app is null) { ctx.Deny($"application '{Evidence.Bounded(pre.ApplicationId)}' is not configured"); return; }
+            ctx.ApplicationId = app.Id;
+            ctx.Identity = new CallerIdentity(pre.Principal, ctx.Request.Attribution with { Team = app.Team });
+            if (!app.Enabled) { ctx.Deny($"application '{app.Id}' disabled"); return; }
+            if (!app.ConsoleTesting) { ctx.Deny($"application '{app.Id}' is not enabled for console testing"); return; }
+            if (!ResolveProfile(ctx, cfg, app)) return;
+            await next(ctx, ct);
+            return;
+        }
 
         if (credential is { Length: > 0 })
         {
@@ -38,6 +66,19 @@ public sealed class AuthStage : IPipelineStage
                 ctx.Identity = new CallerIdentity(
                     record.Principal,
                     ctx.Request.Attribution with { Team = record.Team });
+                if (ctx.Configuration is { } cfg)
+                {
+                    // Key → application (ADR-0012). /v1 key authentication itself is unchanged (team from the key);
+                    // the application adds enabled state and profile grants. A key whose application is absent
+                    // from configuration behaves as before: legacy-internal profile.
+                    var app = cfg.FindApplication(record.Application);
+                    if (app is not null)
+                    {
+                        ctx.ApplicationId = app.Id;
+                        if (!app.Enabled) { ctx.Deny($"application '{app.Id}' disabled"); return; }
+                    }
+                    if (!ResolveProfile(ctx, cfg, app)) return;
+                }
                 await next(ctx, ct);
                 return;
             }
@@ -48,10 +89,52 @@ public sealed class AuthStage : IPipelineStage
 
         if (_config.AllowAnonymous)
         {
-            await next(ctx, ct); // identity stays as the request's self-declared values
+            // identity stays as the request's self-declared values; no application ⇒ no grants.
+            if (ctx.Configuration is { } cfg && !ResolveProfile(ctx, cfg, null)) return;
+            await next(ctx, ct);
             return;
         }
 
         ctx.Deny("authentication required: no API key presented", DenialKind.Unauthenticated);
+    }
+
+    private static bool ResolveProfile(InferenceContext ctx, IRequestConfiguration cfg, ApplicationConfig? app)
+    {
+        var r = ProfileResolution.Resolve(cfg, app, ctx.Request.RequestedProfile);
+        if (r.Denial is { } denial) { ctx.Deny(denial); return false; }
+        ctx.ProfileId = r.ProfileId;
+        ctx.BaselineClassification = r.Baseline;
+        return true;
+    }
+}
+
+/// <summary>Workload-profile resolution (ADR-0012), shared by the auth stage and the policy simulator.
+/// Requested profile must be granted to the application; none requested ⇒ the application's default ⇒
+/// legacy-internal (baseline Internal). The baseline comes only from server configuration, never the client.</summary>
+public static class ProfileResolution
+{
+    public readonly record struct Result(string? ProfileId, DataClassification Baseline, string? Denial);
+
+    public static Result Resolve(IRequestConfiguration cfg, ApplicationConfig? app, string? requestedProfile)
+    {
+        var requested = requestedProfile is { Length: > 0 } r && r.Trim().Length > 0 ? r.Trim() : null;
+        string profileId;
+        if (requested is not null)
+        {
+            if (app is null || !app.GrantedProfiles.Contains(requested, StringComparer.Ordinal))
+                return new Result(null, DataClassification.Phi, app is null
+                    ? $"profile '{Evidence.Bounded(requested)}' not granted (no configured application for this caller)"
+                    : $"profile '{Evidence.Bounded(requested)}' not granted to application '{app.Id}'");
+            profileId = requested;
+        }
+        else
+        {
+            profileId = app?.DefaultProfile ?? PolicyEngineV2.LegacyInternalProfile;
+        }
+
+        var profile = cfg.FindProfile(profileId);
+        if (profile is null && profileId != PolicyEngineV2.LegacyInternalProfile)
+            return new Result(null, DataClassification.Phi, $"profile '{Evidence.Bounded(profileId)}' is not configured"); // never guess a baseline
+        return new Result(profileId, profile?.Baseline ?? DataClassification.Internal, null);
     }
 }

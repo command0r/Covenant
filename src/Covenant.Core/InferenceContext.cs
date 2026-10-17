@@ -15,6 +15,31 @@ public sealed class InferenceContext(InferenceRequest request)
     /// stage overwrites it on a valid key. Downstream stages read this, never the raw request.</summary>
     public CallerIdentity Identity { get; set; } = new(request.Principal, request.Attribution);
 
+    // ---- Configuration binding & identity (ADR-0011/0012). Additive; null/defaults when no snapshot. ----
+
+    /// <summary>The configuration version this request is bound to. Set once by the Host at entry (acquired
+    /// snapshot) and never replaced mid-request. Null ⇒ stages use their constructor-injected legacy config.</summary>
+    public IRequestConfiguration? Configuration { get; set; }
+
+    /// <summary>Version of <see cref="Configuration"/> (evidence: audit ConfigVersion).</summary>
+    public int? ConfigVersion { get; set; }
+
+    /// <summary>"v1" (application key on /v1) or "console" (admin-authenticated console inference).</summary>
+    public string EntryPoint { get; set; } = "v1";
+
+    /// <summary>Who operated the console (honest: "shared-admin-token" — one shared credential cannot
+    /// attribute an individual). Null on /v1.</summary>
+    public string? OperatorRef { get; set; }
+
+    /// <summary>Resolved application (written by the auth stage when the configuration knows it).</summary>
+    public string? ApplicationId { get; set; }
+
+    /// <summary>Resolved workload profile (requested-and-granted, application default, or legacy-internal).</summary>
+    public string? ProfileId { get; set; }
+
+    /// <summary>Trusted baseline classification from the profile. Detection may escalate above it, never below.</summary>
+    public DataClassification? BaselineClassification { get; set; }
+
     /// <summary>Written by the classify stage. Defaults to the most restrictive class (fail-closed).</summary>
     public DataClassification Classification { get; set; } = DataClassification.Phi;
 
