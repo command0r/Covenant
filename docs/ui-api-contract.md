@@ -59,3 +59,68 @@ aggregates must count it as unknown, never as $0 saving. `no_call`: refusal/cach
 `/admin/status` gains `environment`, `mode`, `audit_path`, `cache_ttl_seconds`, `prompt_preview_chars`,
 `anchor:{configured, every, anchors_written, last_anchor_utc}`, `version`. `/admin/evidence` gains
 `anchor_configured`, `anchor_count`, `last_anchor_utc`. Nothing in status is a secret.
+
+---
+
+# v2 additions (2026-10-16) — `docs/CONSOLE-V2-IMPLEMENTATION-SPEC.md`, ADR-0011..0014
+
+v2 supersedes the read-only parts above. Everything above stays valid unless restated here. Admin endpoints take
+`X-Covenant-Admin-Token`; JSON is snake_case except audit records (PascalCase, unchanged).
+
+## Configuration (ADR-0011)
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/admin/config` | `{ "version", "etag":"\"vN\"", "config": CovenantConfig (secrets as refs), "secrets": {ref: {"available":bool}}, "allow_list": [...] }`; `ETag` header |
+| POST | `/admin/config/validate` | body `{ "base_version", "config" }` → 200 `{ "valid", "errors":[{"path","code","message"}], "warnings":[…], "impact": Impact }`; never mutates |
+| PUT | `/admin/config` | header `If-Match: "vN"` (required; 428 if absent), body `{ "config", "change_summary" }` → 200 `{ "version", "etag" }`; 412 stale; 422 `{errors, warnings}` (active version unchanged) |
+| GET | `/admin/config/versions?limit=50` | `[{ "version","created_utc","origin","base_version","rolled_back_from","change_summary","active" }]` newest first |
+| GET | `/admin/config/versions/{n}` | snapshot n |
+| POST | `/admin/config/rollback` | `{ "target_version", "expected_active_version" }` → new version (412 if active moved) |
+
+`Impact` = `{ "classifications": [{ "classification","profile","before":"<route summary>|refused","after":… }],
+"applications_affected":[…], "unavailable_destinations":[…], "pricing_gaps":[…], "newly_refused":[…] }`.
+Validation codes include: `duplicate_id`, `unknown_connection`, `unknown_model`, `endpoint_not_allow_listed`,
+`secret_unavailable`, `cloud_in_local_only`, `sensitive_cloud_without_ack` (warning), `ambiguous_policy_overlap`,
+`no_route_for_classification` (warning), `unpriced_paid_target_under_hard_budget`, `invalid_budget_scope`,
+`profile_not_found`, `default_profile_not_granted`.
+
+## Console inference (ADR-0012)
+`POST /admin/playground/requests` body `{ "application_id", "profile_id"?, "messages":[{role,content}], "model"?,
+"max_tokens"?, "stream":bool, "workflow"?, "use_case"?, "client_request_id"? }` → exactly the `/v1/chat/completions`
+response contract (buffered JSON or SSE; `X-Covenant-Request-Id`). 400 `{error:"invalid_request"}` = rejected
+before governance (no audit). 409 `{error:"duplicate_submission","request_id"}` for a repeated `client_request_id`.
+Governed refusals (application disabled / not console-testable / profile not granted) are 403 with an audit record.
+`GET /admin/applications` → `[{ "id","team","enabled","console_testing","granted_profiles","default_profile" }]`
+(no credentials).
+
+## Trace (ADR-0013)
+`GET /admin/requests/{id}/trace` → `{ "request_id","config_version","complete":bool,"events":[TraceEvent] }`;
+404 unknown/expired. `GET /admin/requests/{id}/trace/stream` → SSE `id: <seq>` + `data: TraceEvent`, replay then
+live, honours `Last-Event-ID`; ends with `event: end`. `TraceEvent` = `{ "seq","stage","attempt_id"?,"state",
+"ts_utc","duration_ms"?,"reason_code"?,"target"? }`. Stages: `auth, shape, classify, policy, cache, rate_limit,
+pause, budget, provider, attribution`. States: `pending, running, passed, refused, failed, cancelled, skipped`.
+
+## Policy simulator
+`POST /admin/policies/simulate` `{ "application_id","profile_id"?,"prompt","model"?,"config"? }` → dry-run
+`{ "classification","baseline","detected_signal","policy_id","eligible":[{target, "excluded_reason"?}],
+"decision":"route|refuse","primary","fallbacks":[…],"reason" }`. Uses the real engine; never calls a provider,
+never records spend or audit. Labelled "Dry run" in the UI.
+
+## Budgets (ADR-0014)
+`GET /admin/budgets` → `[{ "id","scope","period","period_id","cap_usd","spent_usd","reserved_usd","remaining_usd",
+"warn_at","warning":"none|warn|critical|exceeded","enforcement" }]`; caps are edited through `/admin/config`.
+`GET /admin/budgets/{id}/requests?limit=` → contributing settled request ids and amounts.
+
+## Requests archive (spec §5)
+`GET /admin/requests?limit=&cursor=&segment=` — `cursor` is an opaque newest-first position; `segment` is an id
+from `GET /admin/audit/segments` (`[{ "id","label","entries","first_utc","last_utc","chain_valid" }]`, the current
+segment plus `*.archived` siblings of the audit file — ids only, never caller-supplied paths).
+`GET /admin/requests/{id}/export` → `{ request record, attempts, trace summary, config_version, integrity }` with no
+prompt/response content.
+
+## Audit record v3 (additive)
+`EventType` (null/"request" | "config.activated" | "budget.recovered"), `ConfigVersion`, `EntryPoint`
+("v1" | "console"), `OperatorRef`, `ApplicationId`, `ProfileId`, `BaselineClassification`, `Attempts[]`
+(`{AttemptId, ConnectionId, ModelId, Outcome, ErrorClass, DurationMs, CostUsd, CostBasis}`), `Trace[]`
+(`{Stage, State, DurationMs}`), `ReservedUsd`, `SettledUsd`. Legacy lines verify unchanged; absent = Not recorded.
+Event entries (`EventType` ≠ request) are excluded from request counts, spend and FinOps.
