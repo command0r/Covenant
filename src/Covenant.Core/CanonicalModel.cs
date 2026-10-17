@@ -51,5 +51,8 @@ public sealed record Usage(long InputTokens, long OutputTokens, decimal CostUsd)
 }
 
 /// <summary>The canonical inference response. UsageReported=false means the provider returned no (or
-/// partial) token counts: Usage tokens are then NOT a real zero (ADR-0009).</summary>
-public sealed record InferenceResponse(ChatMessage Message, Usage Usage, string ServedByModel, bool UsageReported = true);
+/// partial) token counts: Usage tokens are then NOT a real zero (ADR-0009).
+/// <para>FinishReason (additive): the provider's terminal finish reason in OpenAI vocabulary ("stop", "length",
+/// "content_filter", "tool_calls"), null when not reported (legacy compositions, buffered SDK responses without one).
+/// "length" ⇒ the answer was truncated at the enforced output bound.</para></summary>
+public sealed record InferenceResponse(ChatMessage Message, Usage Usage, string ServedByModel, bool UsageReported = true, string? FinishReason = null);

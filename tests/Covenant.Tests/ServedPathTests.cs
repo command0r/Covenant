@@ -67,6 +67,7 @@ public sealed class ServedPathTests : IClassFixture<ServedPathTests.StubFactory>
             yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[..6]);
             yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[6..]);
             yield return new MEAI.ChatResponseUpdate { Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 7, OutputTokenCount = 4 })] };
+            yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop };   // terminal completion (real providers send one)
         }
 
         public object? GetService(Type t, object? key = null) => null;

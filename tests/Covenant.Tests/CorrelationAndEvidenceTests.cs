@@ -117,6 +117,7 @@ internal sealed class ScriptedChatClient : MEAI.IChatClient
         if (fail) throw new HttpRequestException("connection reset mid-stream");
         yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "rest");
         yield return new MEAI.ChatResponseUpdate { Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 7, OutputTokenCount = 3 })] };
+        yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop };   // terminal completion (real providers send one)
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;

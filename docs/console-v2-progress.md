@@ -655,9 +655,9 @@ None. No existing test file was edited. Behaviour changes that existing tests co
 2. **Every request is traced** (`/v1` too), not only console requests — same bounded hub.
 3. **Failed / cancelled attempts are charged their full reservation bound** (input bound + full output bound), the
    conservative "possibly billed" estimate the task specifies — higher than the pre-v2 chars/4 estimate.
-4. **Deadline semantics:** no attempt starts after `deadline_ms`; an attempt still waiting for its response (or, streaming,
-   its first content) at the deadline is cancelled as `timeout`; once streamed content flows the deadline stops applying
-   (a delivered answer is not cut off; the connection timeout governs).
+4. **Deadline semantics:** *superseded by review round 2 (B3)* — `deadline_ms` is one finite deadline for the whole
+   execution, also after streamed content: a hit after content ⇒ partial output kept + terminal failure `timeout`, no
+   fallback. (Originally: the deadline stopped applying once content flowed.)
 5. **Cache key** includes the ordered approved candidate list (stricter than "connection + model": a response is reused only
    for the same eligible route set). Keyed on the primary's enforced output bound.
 6. **Ledger file failure** halts the process (`Environment.FailFast`), consistent with the audit sink.
@@ -893,3 +893,48 @@ Browser (isolated port, `Config:Seed=demo-hybrid` on a fresh `Audit:Path`; both 
 - [ ] Every page: loading skeleton, error banner with Retry (stop the Host), empty states, disabled controls with reasons;
       keyboard-only: Tab through editor bar, drawers trap focus, Esc closes, focus returns to the opener.
 - [ ] No horizontal page scroll at 1280×720 / ~900 px; long model ids and errors wrap.
+
+## Review fixes round 2 (backend) — 2026-10-17
+
+Source: `docs/verification-2026-10-16/v2/CODEX-REVIEW.txt` (+ `cache-collision-probe.cs.txt`/`.log`, `http-archive.log`).
+Not compiled here (no SDK in this environment); every touched file was re-read. New tests: `tests/Covenant.Tests/ReviewRound2Tests.cs`.
+
+| # | Defect | Fix | Regression test(s) |
+|---|---|---|---|
+| B1 | Stream with partial text then EOF / swallowed SSE error served as Allow + `finish_reason:stop` | `ProviderCallStage`: a stream is served only if an update with non-null `FinishReason` was observed and no error; otherwise provider failure `incomplete_stream` (health failed, partial kept → audit `PartialOutputChars`, attempt settled at its estimate, terminal — no fallback, not cached). Buffered `Length` ⇒ served, `Attempts[].Truncated=true`. `InferenceResponse.FinishReason` (additive) relayed as the final SSE chunk's finish reason. | `StreamCompletionTests.*` (no-finish, throw mid-stream, `length` buffered+streamed, Host SSE: `upstream_error`, no `finish_reason:"stop"`) |
+| B2 | Aggregate `CostBasis` "reported" for totals containing estimates | `CostBases.Aggregate` (Core) applied by the audit stage: reported only if every charged attempt is reported; shared basis kept; else `mixed`. FinOps counts `mixed` as estimated. | `AggregateCostBasisTests.*` |
+| B3 | Deadline disabled after first streamed text | Removed `CancelAfter(Infinite)`; `deadline_ms` bounds the whole execution; a hit after content ⇒ `timeout`, partial kept, no fallback. Contract + note 4 above updated. | `DeadlineAfterContentTests.Deadline_after_streamed_content_is_a_timeout_with_partial_output_and_no_fallback` |
+| B4 | Settlement not exception-safe; gate closed slot before durable write | Provider stage settles the served attempt in `finally` after downstream stages. `BudgetAttemptGate.Settle/Release` mark a slot closed only after the ledger write succeeded (in-flight flag, idempotent); `Finish` retries every open slot and rethrows the first failure. Production `FileLedgerStore` write failure still `FailFast`. | `SettlementRobustnessTests.*` (failed settle/release then retry, pipeline unwind retry, persistent failure → boot recovery settles once, exception after attribution) |
+| B5 | Cache key delimiter collisions; bound/provenance | `CacheKeyBuilder`: SHA-256 over length-prefixed UTF-8 fields (presence byte + 4-byte BE length), message count + per-message role/content; identity = config version, application, team, profile, final classification, requested model + requested max_tokens (stream-independent), every candidate (connection, model, effective output bound) in order. Entry stores the ACTUAL served target; a hit sets `ServedTarget` → audit `ServedConnectionId`/`ServedByModel`. | `CacheKeyCollisionTests.*` (reviewer probe both cases, boundary shift, control chars, role, provenance of a fallback-served entry) |
+| B6 | /v1 team from startup key vs console app team | `AuthStage`: with a configuration, identity team = active `ApplicationConfig.Team` (key only resolves the application). Ledger scopes captured at reservation keep history. | `TeamConsistencyTests.*` |
+| B7 | Console request id only with first content | `client_request_id` REQUIRED (1–64 `[A-Za-z0-9_-]`); registered in `TraceHub` before the pipeline (trace TTL); `GET /admin/playground/submissions/{client_request_id}` → `{client_request_id, request_id, state}` / 404. | `EarlyRequestIdTests.*`; `ConsolePlaygroundTests.Invalid_body_*` (new rows); `Playground.Body` now always sends an id |
+| B8 | Pagination duplicates after insert; rotation redirect | Cursor `c2` = {segment id, generation, absolute index from oldest (exclusive)}; newest-first by absolute index; generation mismatch/segment gone/legacy cursor ⇒ 410 `cursor_expired`; `segment.is_current` always present. | `StablePaginationTests.*` |
+| B9 | Ledger created before legacy import (crash window) | `FileLedgerStore.Bootstrap`: legacy-import lines + `bootstrap-complete` marker → temp, fsync, rename. `LedgerBootstrap.OpenOrBootstrap` used by Program. A journal without the marker refuses start (pre-marker journals that already contain post-bootstrap operations are accepted once with a warning and get the marker appended). legacy-import idempotent per (legacy-import, team:x). `EnsureCreated` now writes a marker-only ledger atomically. | `LedgerBootstrapAndReplayTests.Fresh_bootstrap_*`, `Interruption_after_create_*`, `Partway_through_*`, `Interruption_before_the_rename_*`, `Duplicate_legacy_import_*`, `Pre_marker_journal_*` |
+| B10 | Replay accepted unknown ops / negative amounts / bad lifecycle | `LedgerReplay.Validate` (vocabulary, amount ≥ 0, ids, scope syntax, timestamp, lifecycle, marker rules) run by `FileLedgerStore.Open` → refuse start with `line N is invalid: …`; `BudgetLedger` replay throws on unknown ops. Torn tail unchanged (quarantine + rewrite). | `LedgerBootstrapAndReplayTests.A_violation_in_a_non_tail_line_*` (16 rows), `Non_iso_timestamp_*`, `A_valid_full_lifecycle_*` |
+| B11 | Header "local not yet observed" after a successful local call | `/admin/catalog.local` selects the observed/routed local connection (never shadowed by a legacy `local`), adds `connection_id` + `health` (runtime health of that `connection:model`); `/admin/status.connection_health[]`. | `LocalHealthTests.*` |
+| B12 | Requested vs effective bound | Audit v3 `RequestedMaxOutputTokens`, `EffectiveMaxOutputTokens` (served attempt); `Attempts[].EffectiveMaxOutputTokens`; trace attempt events `requested_max_output_tokens` / `effective_max_output_tokens`. | `OutputBoundEvidenceTests.*`; `EarlyRequestIdTests` (trace fields) |
+| B13 | NativeAOT IL2104/IL3053 (Anthropic 12.8.0, Neo4j.Driver 6.2.1) | Not suppressed. ADR-0001 "Status update 2026-10-17" + `docs/demo-runbook.md` §1a: supported artifact = self-contained single-file; unblock path listed. | — (docs) |
+
+Test-kit changes (not weakening): every streaming stub that represents a SUCCESSFUL stream now ends with a terminal
+`FinishReason = Stop` update, as real providers do (`StubChatClient`, `GatedChatClient`, `ScriptedChatClient`,
+`AccountingClient`, PipelineSlice/ServedPath/WireShape stubs). `StubChatClient` gains `StreamNoFinish`, `ServeLength`,
+`Gated` modes.
+
+UI-facing contract changes (docs/ui-api-contract.md): `client_request_id` required + submissions endpoint; SSE terminal
+failure semantics; deadline note; `incomplete_stream` reason/error class; trace attempt bound fields; `CostBasis`
+`mixed`; audit v3 `RequestedMaxOutputTokens`/`EffectiveMaxOutputTokens`/`PartialOutputChars`/`ServedConnectionId`,
+`Attempts[].EffectiveMaxOutputTokens`/`Truncated`; cursor v2 + 410 `cursor_expired` + `segment.is_current`;
+`catalog.local.connection_id`/`health`, `status.connection_health`.
+
+### Verifier commands (not executed here)
+
+```
+dotnet build Covenant.sln -c Release --disable-build-servers
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers --filter "FullyQualifiedName~StreamCompletionTests|FullyQualifiedName~AggregateCostBasisTests|FullyQualifiedName~DeadlineAfterContentTests|FullyQualifiedName~SettlementRobustnessTests|FullyQualifiedName~CacheKeyCollisionTests|FullyQualifiedName~TeamConsistencyTests|FullyQualifiedName~EarlyRequestIdTests|FullyQualifiedName~StablePaginationTests|FullyQualifiedName~LedgerBootstrapAndReplayTests|FullyQualifiedName~LocalHealthTests|FullyQualifiedName~OutputBoundEvidenceTests"
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers     # full suite (stream stubs, ledger, cache, paging regressions)
+dotnet publish src/Covenant.Host -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=true
+```
+Reviewer reproducers to re-run: `cache-collision-probe.cs.txt` (expect `calls=2`, `secondCacheHit=False` twice — the
+probe source compiles unchanged); `ledger-migration-crash.py.txt` (empty/unmarked ledger ⇒ refuse start); HTTP archive
+paging (page1 limit 2, insert, follow `next_cursor` ⇒ no duplicate); SDK stream partial-then-EOF against
+`provider_stub.py` ⇒ SSE `upstream_error`, audit Deny/UpstreamFailure.

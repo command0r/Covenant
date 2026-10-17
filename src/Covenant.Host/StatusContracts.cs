@@ -29,6 +29,8 @@ public sealed class StatusReport
     [JsonPropertyName("version")] public string? Version { get; init; }
     // v2 (ADR-0011): the active configuration version every new request binds to.
     [JsonPropertyName("config_version")] public int? ConfigVersion { get; init; }
+    // Review round 2 (B11): current runtime health of every configured connection + model, keyed "connection_id:model_id".
+    [JsonPropertyName("connection_health")] public List<ConnectionHealthView>? ConnectionHealth { get; init; }
 }
 
 public sealed class AnchorStatus
@@ -229,7 +231,7 @@ public static class FinOps
             // saving are the same error). Legacy records (no CostBasis) keep their old treatment.
             bool usageKnown = e.CostBasis is null or "reported" or "zero_priced" or "no_call";
             if (e.CostBasis is "unpriced" or "unknown_failed_call") unknownCost++;
-            if (e.CostBasis is "estimated_from_text" or "estimated_failed_call") estimatedCost++;
+            if (e.CostBasis is "estimated_from_text" or "estimated_failed_call" or "mixed") estimatedCost++;   // "mixed": the total contains an estimate
 
             if (e.Effect == PolicyEffect.Allow && !usageKnown)
             {

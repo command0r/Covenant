@@ -19,6 +19,20 @@ Optional: `Covenant:Environment` (header label, e.g. `vslive-demo`), `Providers:
 `Local:Endpoint` is as seen **from the Covenant host** (`http://localhost:11434/v1` only if Ollama runs on the
 same machine/container as Covenant). `Local:ModelId` is the exact installed tag (`ollama list`) — nothing guesses it.
 
+## 1a. Supported artifact (2026-10-17)
+
+The supported appliance artifact is a **self-contained single-file publish** (one deployable, no runtime install):
+
+```
+dotnet publish src/Covenant.Host -c Release -r <rid> --self-contained true -p:PublishSingleFile=true
+```
+
+**NativeAOT is not supported yet.** An AOT publish reports IL2104 (trim analysis warnings inside the assembly) /
+IL3053 (AOT analysis warnings inside the assembly) for **Anthropic 12.8.0** and **Neo4j.Driver 6.2.1**. These are not
+suppressed and the build is not claimed AOT-verified. Unblocking needs an AOT-clean release of each library (or
+replacing the Anthropic connector with an AOT-clean `IChatClient`, and moving the optional Neo4j projector out of the
+appliance image), then a clean `PublishAot=true` run. See ADR-0001 "Status update 2026-10-17".
+
 ## 2. Startup and preflight (before the audience arrives)
 
 ```
@@ -31,7 +45,7 @@ dotnet run --project src/Covenant.Host -c Release        # or the published bina
    (first Ollama load can take 10–60 s; do it before the talk).
 4. Evidence: chain "Internal consistency verified". If anchoring is configured, anchors written > 0.
 5. Settings → note prompt retention (`prompt_preview_chars`). Do **not** use Maintenance → Archive & reset as
-   a demo step; it archives evidence and reopens budgets.
+   a demo step; it archives evidence (budgets are NOT reopened — the ledger is independent of audit segments).
 
 ## 3. The A / B / C / D sequence (Playground, optionally Presentation mode)
 

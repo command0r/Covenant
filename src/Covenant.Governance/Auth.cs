@@ -100,6 +100,11 @@ public sealed class AuthStage : IPipelineStage
                         return;
                     }
                     ctx.ApplicationId = app.Id;
+                    // Review round 2 (B6): once a configuration governs, the key only RESOLVES the application; the
+                    // identity's team is the ACTIVE application's team — exactly like the console entry point — so a
+                    // team change applied through configuration governs new charges on both entry points. Historical
+                    // charges keep the scopes recorded at reservation time in the ledger.
+                    ctx.Identity = new CallerIdentity(record.Principal, ctx.Request.Attribution with { Team = app.Team });
                     if (!app.Enabled) { ctx.Deny($"application '{app.Id}' disabled"); return; }
                     if (!ResolveProfile(ctx, cfg, app)) return;
                 }

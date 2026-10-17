@@ -167,10 +167,12 @@ public sealed class InferenceContext(InferenceRequest request)
     public void MarkStageEntered(string stage) => _enteredStages.Add(stage);
 
     /// <summary>Emits one trace event (server UTC time). Bounded: events beyond <see cref="MaxTraceEvents"/> are dropped.</summary>
-    public void Trace(string stage, string state, double? durationMs = null, string? reasonCode = null, string? attemptId = null, string? target = null)
+    public void Trace(string stage, string state, double? durationMs = null, string? reasonCode = null, string? attemptId = null, string? target = null,
+        int? requestedMaxOutputTokens = null, int? effectiveMaxOutputTokens = null)
     {
         if (_trace.Count >= MaxTraceEvents) return;
-        var ev = new PipelineTraceEvent(stage, state, DateTimeOffset.UtcNow, durationMs, reasonCode, attemptId, target);
+        var ev = new PipelineTraceEvent(stage, state, DateTimeOffset.UtcNow, durationMs, reasonCode, attemptId, target,
+            requestedMaxOutputTokens, effectiveMaxOutputTokens);
         _trace.Add(ev);
         if (TraceSink is { } sink)
         {

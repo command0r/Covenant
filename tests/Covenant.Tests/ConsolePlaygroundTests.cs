@@ -18,7 +18,9 @@ internal static class Playground
         if (profile is not null) sb.Append(",\"profile_id\":").Append(JsonSerializer.Serialize(profile, CovenantJsonContext.Default.String));
         sb.Append(",\"messages\":[{\"role\":\"user\",\"content\":").Append(JsonSerializer.Serialize(prompt, CovenantJsonContext.Default.String)).Append("}]");
         sb.Append(",\"stream\":").Append(stream ? "true" : "false");
-        if (clientRequestId is not null) sb.Append(",\"client_request_id\":\"").Append(clientRequestId).Append('"');
+        // Review round 2 (B7): client_request_id is required by the console endpoint — generated when the test names none.
+        clientRequestId ??= "t-" + Guid.NewGuid().ToString("n");
+        sb.Append(",\"client_request_id\":\"").Append(clientRequestId).Append('"');
         if (maxTokens is not null) sb.Append(",\"max_tokens\":").Append(maxTokens.Value);
         if (model is not null) sb.Append(",\"model\":").Append(JsonSerializer.Serialize(model, CovenantJsonContext.Default.String));
         return sb.Append('}').ToString();
@@ -134,6 +136,9 @@ public sealed class ConsolePlaygroundTests : IDisposable
     [InlineData("""{"application_id":"demo-app","messages":[{"role":"user","content":null}]}""")]
     [InlineData("""{"application_id":"demo-app","messages":[{"role":"user","content":"x"}],"max_tokens":0}""")]
     [InlineData("""{"application_id":"demo-app","messages":[{"role":"user","content":"x"}],"client_request_id":"bad id with spaces"}""")]
+    [InlineData("""{"application_id":"demo-app","messages":[{"role":"user","content":"x"}]}""")]                       // B7: client_request_id required
+    [InlineData("""{"application_id":"demo-app","messages":[{"role":"user","content":"x"}],"client_request_id":"a.b:c"}""")]   // B7: [A-Za-z0-9_-] only
+    [InlineData("""{"application_id":"demo-app","messages":[{"role":"user","content":"x"}],"client_request_id":"0123456789012345678901234567890123456789012345678901234567890123x"}""")]   // 65 chars
     public async Task Invalid_body_is_400_before_governance_with_no_audit_record(string json)
     {
         await V2Admin.AuditAsync(_factory.AuditPath, l => l.Count >= 1);   // bootstrap event is on disk

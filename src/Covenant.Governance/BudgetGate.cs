@@ -52,6 +52,8 @@ public sealed class BudgetAttemptGate : IAttemptGate
         public required decimal Reserved { get; init; }
         public required bool Priced { get; init; }
         public bool Closed { get; set; }
+        /// <summary>A durable settle/release write is in progress (closed only after it succeeded).</summary>
+        public bool InFlight { get; set; }
         public AttemptCharge? Charge { get; set; }
     }
 
@@ -122,6 +124,10 @@ public sealed class BudgetAttemptGate : IAttemptGate
         return AttemptAdmission.Ok(amount);
     }
 
+    /// <summary>Settles a started attempt exactly once. The slot is marked closed only AFTER the durable ledger write
+    /// succeeded (review round 2, B4): a failed write leaves the slot — and the ledger reservation — open, so a later call
+    /// (the budget stage's unwind) or boot recovery settles it; it is never silently lost. A concurrent duplicate while a
+    /// write is in flight is answered as a duplicate (Settled = false) and writes nothing.</summary>
     public AttemptCharge Settle(InferenceContext ctx, string attemptId, decimal? costUsd)
     {
         Slot? slot;
@@ -129,45 +135,90 @@ public sealed class BudgetAttemptGate : IAttemptGate
         {
             _slots.TryGetValue(attemptId, out slot);
             if (slot is { Closed: true }) return slot.Charge is { } c ? c with { Settled = false } : new AttemptCharge(0m, "no_call", false, false);
-            if (slot is not null) slot.Closed = true;
+            if (slot is { InFlight: true }) return new AttemptCharge(0m, "no_call", false, false);
+            if (slot is not null) slot.InFlight = true;
         }
 
         bool priced = slot?.Priced ?? false;
         decimal reserved = slot?.Reserved ?? 0m;
         decimal amount = costUsd ?? reserved;
         string basis = costUsd is not null ? "reported" : priced ? "estimated_failed_call" : "unknown_failed_call";
-        var result = _ledger.Settle(_requestId, attemptId, amount, _scopes);
+        SettleResult result;
+        try
+        {
+            result = _ledger.Settle(_requestId, attemptId, amount, _scopes);
+        }
+        catch
+        {
+            lock (_gate)
+                if (slot is not null) slot.InFlight = false;   // still open: retried by Finish, or settled by boot recovery
+            throw;
+        }
         var charge = new AttemptCharge(amount, basis, result.Overrun || (costUsd is { } c2 && c2 > reserved && reserved > 0m), result.Settled || amount == 0m);
         lock (_gate)
-            if (slot is not null) slot.Charge = charge;
-        ctx.SettledUsd = (ctx.SettledUsd ?? 0m) + amount;
+        {
+            if (slot is not null)
+            {
+                slot.Charge = charge;
+                slot.Closed = true;
+                slot.InFlight = false;
+            }
+        }
+        if (charge.Settled) ctx.SettledUsd = (ctx.SettledUsd ?? 0m) + amount;
         return charge;
     }
 
+    /// <summary>Releases an admitted attempt that never started; closed only after the durable release succeeded.</summary>
     public void Release(InferenceContext ctx, string attemptId)
     {
+        Slot? slot;
         lock (_gate)
         {
-            if (!_slots.TryGetValue(attemptId, out var slot) || slot.Closed) return;
-            slot.Closed = true;
+            if (!_slots.TryGetValue(attemptId, out slot) || slot.Closed || slot.InFlight) return;
+            slot.InFlight = true;
         }
-        _ledger.Release(_requestId, attemptId);
+        try
+        {
+            _ledger.Release(_requestId, attemptId);
+        }
+        catch
+        {
+            lock (_gate) slot!.InFlight = false;
+            throw;
+        }
+        lock (_gate)
+        {
+            slot!.Closed = true;
+            slot.InFlight = false;
+        }
     }
 
     /// <summary>Unwind safety net (budget stage finally): an attempt that started but was never settled (an exception
-    /// escaped) is settled at its estimate; an admitted attempt that never started is released. Then the request-level
-    /// failed-call charge and cost basis are derived from the attempts (never a silent $0).</summary>
+    /// escaped, or an earlier durable write failed) is settled at its estimate; an admitted attempt that never started is
+    /// released. Every open slot is tried even if one write fails (the first failure is rethrown afterwards). Then the
+    /// request-level failed-call charge and cost basis are derived from the attempts (never a silent $0).</summary>
     public void Finish(InferenceContext ctx)
     {
         List<string> open;
         lock (_gate) open = _slots.Where(kv => !kv.Value.Closed).Select(kv => kv.Key).ToList();
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
         foreach (var id in open)
         {
-            var started = ctx.Attempts.FirstOrDefault(a => a.AttemptId == id);
-            if (started is null) { Release(ctx, id); continue; }
-            var charge = Settle(ctx, id, null);
-            started.CostUsd ??= charge.CostUsd;
-            started.CostBasis ??= charge.CostBasis;
+            try
+            {
+                var started = ctx.Attempts.FirstOrDefault(a => a.AttemptId == id);
+                if (started is null) { Release(ctx, id); continue; }
+                var charge = Settle(ctx, id, null);
+                if (charge.Settled)
+                {
+                    started.CostUsd ??= charge.CostUsd;
+                    started.CostBasis ??= charge.CostBasis;
+                }
+            }
+            catch (Exception ex)
+            {
+                failure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex);
+            }
         }
 
         if (ctx.Response is null && ctx.Attempts.Count > 0)
@@ -175,5 +226,12 @@ public sealed class BudgetAttemptGate : IAttemptGate
             ctx.FailedCallUsage ??= new Usage(0, 0, ctx.SettledUsd ?? 0m);   // tokens NOT reported; cost is an estimate
             ctx.CostBasis ??= ctx.Attempts[^1].CostBasis ?? "unknown_failed_call";
         }
+        failure?.Throw();
+    }
+
+    /// <summary>Open (unsettled, unreleased) slots — diagnostics/tests.</summary>
+    public int OpenSlots
+    {
+        get { lock (_gate) return _slots.Count(kv => !kv.Value.Closed); }
     }
 }

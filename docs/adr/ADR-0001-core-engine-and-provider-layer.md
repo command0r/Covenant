@@ -38,3 +38,18 @@ Patterns we **study as influences** (logged in `docs/PROVENANCE.md`; not code we
 ## Follow-ups
 - **Spike:** NativeAOT vs self-contained single-file publish for the required connectors (feeds `deploy/`, may warrant its own ADR).
 - **ADR-0002 candidate:** single-tenant vs multi-tenant control plane (already flagged in the PRD).
+
+## Status update 2026-10-17 — NativeAOT spike result
+- **Result:** self-contained single-file publish (`PublishSingleFile=true`, `--self-contained`) is the **supported**
+  appliance artifact; it was verified on osx-arm64 (process start, `/ui` and framework assets served — see
+  `docs/verification-2026-10-16/v2/CODEX-REVIEW.txt`). This is the fallback this ADR anticipated and still satisfies
+  "one deployable".
+- **NativeAOT is blocked by dependencies, not by our code:** an AOT publish emits **IL2104** ("assembly produced trim
+  warnings") and **IL3053** ("assembly produced AOT analysis warnings") for **Anthropic 12.8.0** (the Anthropic
+  connector) and **Neo4j.Driver 6.2.1** (the optional evidence-graph projector, ADR-0006). The warnings are **not
+  suppressed** and the artifact is **not** claimed AOT-verified. Our own projects keep `IsAotCompatible=true` and
+  source-generated JSON only, so the path stays honest.
+- **What would unblock it:** (1) AOT/trim-clean releases of both libraries (re-run the publish; zero IL2104/IL3053), or
+  (2) an AOT-clean in-house `IChatClient` for Anthropic's Messages API (small, already-owned wire surface) and shipping
+  the Neo4j projector as a separate optional component outside the appliance binary; then (3) a CI gate on
+  `PublishAot=true` with warnings-as-errors. Until then `deploy/` targets the single-file artifact.

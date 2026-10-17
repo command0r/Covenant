@@ -15,11 +15,18 @@ public static class ChatCompletions
     /// <summary>Runs the pipeline for <paramref name="ctx"/> and writes the response. The per-request trace buffer is
     /// created BEFORE the pipeline starts (ADR-0013) so a subscriber that connects after submission still gets the
     /// earliest events; it is completed when the pipeline has finished.</summary>
-    public static async Task<IResult> RunAsync(HttpContext http, InferencePipeline pipe, InferenceContext ctx, TraceHub? traces, CancellationToken ct)
+    /// <param name="clientRequestId">Console inference only (B7): registered → request id in the trace hub BEFORE the
+    /// pipeline starts, so <c>GET /admin/playground/submissions/{id}</c> can answer while the provider is still waiting.</param>
+    public static async Task<IResult> RunAsync(HttpContext http, InferencePipeline pipe, InferenceContext ctx, TraceHub? traces, CancellationToken ct,
+        string? clientRequestId = null)
     {
         var request = ctx.Request;
         var buffer = traces?.Begin(request.RequestId!, ctx.ConfigVersion, ctx.Configuration?.Config.Settings.TraceRetentionMinutes ?? 10);
-        if (buffer is not null) ctx.TraceSink = buffer.Append;
+        if (buffer is not null)
+        {
+            ctx.TraceSink = buffer.Append;
+            if (clientRequestId is not null) traces!.RegisterSubmission(clientRequestId, buffer);
+        }
         try
         {
             return await RunCoreAsync(http, pipe, ctx, ct);
@@ -57,16 +64,18 @@ public static class ChatCompletions
                 Usage = usage,
             };
 
+            async ValueTask StartSseAsync(CancellationToken token)
+            {
+                sseStarted = true;
+                resp.StatusCode = StatusCodes.Status200OK;
+                resp.ContentType = "text/event-stream";
+                resp.Headers.CacheControl = "no-cache";
+                await WriteChunkAsync(Chunk("assistant", null, null, null), token);
+            }
+
             ctx.DeltaSink = async (delta, token) =>
             {
-                if (!sseStarted)
-                {
-                    sseStarted = true;
-                    resp.StatusCode = StatusCodes.Status200OK;
-                    resp.ContentType = "text/event-stream";
-                    resp.Headers.CacheControl = "no-cache";
-                    await WriteChunkAsync(Chunk("assistant", null, null, null), token);
-                }
+                if (!sseStarted) await StartSseAsync(token);
                 await WriteChunkAsync(Chunk(null, delta.Content, null, null), token);
             };
 
@@ -74,8 +83,11 @@ public static class ChatCompletions
 
             if (!sseStarted)
             {
-                // Denied before the first byte — same JSON error contract as buffered mode.
-                return DenialResult(ctx);
+                // No byte sent yet. Refused/no response → same JSON error contract as buffered mode. A legitimately
+                // COMPLETED stream with empty content (no deltas) is a success: open the SSE and send its terminal chunk.
+                if (ctx.IsDenied || ctx.Response is null)
+                    return DenialResult(ctx);
+                await StartSseAsync(ct);
             }
 
             if (ctx.IsDenied)
@@ -88,7 +100,9 @@ public static class ChatCompletions
             }
             else if (ctx.Response is { } finalResp)
             {
-                await WriteChunkAsync(Chunk(null, null, "stop", new OpenAiUsage
+                // Only a provider-completed stream reaches here (B1); its own finish reason is relayed ("length" when
+                // truncated at the output bound). A cache hit has none recorded: "stop".
+                await WriteChunkAsync(Chunk(null, null, finalResp.FinishReason ?? "stop", new OpenAiUsage
                 {
                     PromptTokens = finalResp.Usage.InputTokens,
                     CompletionTokens = finalResp.Usage.OutputTokens,
@@ -201,7 +215,7 @@ public static class PlaygroundApi
 {
     public const int MaxMessages = 200;
     public const int MaxContentChars = 200_000;
-    public const int MaxClientRequestIdChars = 128;
+    public const int MaxClientRequestIdChars = 64;
     private const int MaxTagChars = 64;
 
     /// <summary>Body validation BEFORE governance (no audit record, 400). Returns the reason or null when valid.</summary>
@@ -224,11 +238,15 @@ public static class PlaygroundApi
         if (chars > MaxContentChars) return $"messages exceed {MaxContentChars} characters";
         if (body.MaxTokens is < 1) return "max_tokens must be a positive integer";
         if (body.Model is { Length: > 200 }) return "model is too long";
-        if (body.ClientRequestId is { } crid
-            && (crid.Length is 0 or > MaxClientRequestIdChars || !crid.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' or ':')))
-            return $"client_request_id must be 1–{MaxClientRequestIdChars} chars of [A-Za-z0-9-_.:]";
+        // Review round 2 (B7): client_request_id is REQUIRED — it is the handle the console uses to learn the request id
+        // (and subscribe to the live trace) before the first response byte.
+        if (!IsValidClientRequestId(body.ClientRequestId))
+            return $"client_request_id is required: 1–{MaxClientRequestIdChars} chars of [A-Za-z0-9_-]";
         return null;
     }
+
+    public static bool IsValidClientRequestId(string? id)
+        => id is { Length: > 0 and <= MaxClientRequestIdChars } && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
 
     private static string Tag(string? value, string fallback)
     {
@@ -274,7 +292,8 @@ public static class PlaygroundApi
                 return Error("invalid_request", (invalid ?? "request body is required") + " — rejected before governance; no evidence record",
                     StatusCodes.Status400BadRequest);
 
-            if (body.ClientRequestId is { } clientRequestId && !submissions.TryClaim(clientRequestId, requestId, out var original))
+            var clientRequestId = body.ClientRequestId!;
+            if (!submissions.TryClaim(clientRequestId, requestId, out var original))
             {
                 http.Response.Headers[RequestCorrelation.Header] = original;
                 return Error("duplicate_submission", "this client_request_id was already submitted; it is not run again", StatusCodes.Status409Conflict, original);
@@ -295,7 +314,23 @@ public static class PlaygroundApi
             using var lease = SnapshotLease.Bind(runtime, ctx);   // ADR-0011: one configuration version for the whole request
             var team = ctx.Configuration?.FindApplication(appId)?.Team ?? "unknown";
             ctx.BindConsoleIdentity(new PreAuthenticatedIdentity(appId, team, "console:" + appId), ConfigAuditEvents.SharedAdminOperator);
-            return await ChatCompletions.RunAsync(http, pipe, ctx, traces, ct);
+            return await ChatCompletions.RunAsync(http, pipe, ctx, traces, ct, clientRequestId);
+        });
+
+        // Review round 2 (B7): early request id for the live trace. 404 = unknown, never registered, past the trace TTL
+        // or not a well-formed client_request_id (names nothing).
+        app.MapGet("/admin/playground/submissions/{clientRequestId}", (HttpContext http, string clientRequestId) =>
+        {
+            if (!authorized(http)) return Error("unauthorized", "invalid admin token", StatusCodes.Status401Unauthorized);
+            http.Response.Headers.CacheControl = "no-store";
+            if (!IsValidClientRequestId(clientRequestId) || !traces.TryGetSubmission(clientRequestId, out var requestId, out var complete))
+                return Error("not_found", "no console submission with this client_request_id (unknown or expired)", StatusCodes.Status404NotFound);
+            return Results.Json(new PlaygroundSubmissionView
+            {
+                ClientRequestId = clientRequestId,
+                RequestId = requestId,
+                State = complete ? "completed" : "running",
+            }, TraceJsonContext.Default.PlaygroundSubmissionView);
         });
     }
 }

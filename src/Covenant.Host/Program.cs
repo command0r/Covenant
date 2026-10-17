@@ -213,21 +213,18 @@ if (!chainAtBoot.Valid)
 //     open by a crash are settled at their reserved amount (settle-recovered) — never free capacity. ---
 string ledgerPath = StartupValidation.Trimmed(builder.Configuration["Budget:LedgerPath"]) is { Length: > 0 } lp ? lp : auditPath + ".ledger.jsonl";
 var ledgerStore = new FileLedgerStore(ledgerPath);
-var ledgerOpened = ledgerStore.Open();
+// Review round 2 (B9): no journal ⇒ the complete initial ledger (legacy-import per team + bootstrap-complete marker) is
+// written to a temp file, fsynced and renamed into place in ONE step; a journal without the marker refuses start.
+var ledgerOpened = LedgerBootstrap.OpenOrBootstrap(ledgerStore, () => priorEntries
+        .Where(e => e.IsRequest() && e.Usage.CostUsd > 0m)   // control-plane events never carry spend
+        .GroupBy(e => e.Tags.Team, StringComparer.OrdinalIgnoreCase)
+        .Select(g => (Team: g.Key, AmountUsd: g.Sum(e => e.Usage.CostUsd)))
+        .ToList(),
+    DateTimeOffset.UtcNow);
 configErrors.AddRange(ledgerOpened.Errors);
 FailIfConfigErrors();
 foreach (var w in ledgerOpened.Warnings) Console.Error.WriteLine($"covenant: warning — {w}");
 var budgetLedger = new BudgetLedger(ledgerStore, ledgerOpened.Records);
-if (!ledgerOpened.Existed)
-{
-    var legacySpend = priorEntries
-        .Where(e => e.IsRequest() && e.Usage.CostUsd > 0m)   // control-plane events never carry spend
-        .GroupBy(e => e.Tags.Team, StringComparer.OrdinalIgnoreCase)
-        .Select(g => (Team: g.Key, AmountUsd: g.Sum(e => e.Usage.CostUsd)))
-        .ToList();
-    ledgerStore.EnsureCreated();
-    budgetLedger.ImportLegacy(legacySpend);
-}
 var recoveredReservations = budgetLedger.RecoverUnsettled();
 if (recoveredReservations.Count > 0)
     auditSink.TryWrite(new AuditEntry(
@@ -365,24 +362,31 @@ app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipel
             await resp.Body.FlushAsync(token);
         }
 
+        async ValueTask StartSseAsync(CancellationToken token)
+        {
+            sseStarted = true;
+            resp.StatusCode = StatusCodes.Status200OK;
+            resp.ContentType = "text/event-stream";
+            resp.Headers.CacheControl = "no-cache";
+            await WriteEventAsync("message_start", AnthropicWire.MessageStartEvent(msgId, ctx.Response?.ServedByModel ?? ctx.AttemptedModel ?? ctx.Policy?.Route?.ModelId ?? ""), token);
+            await WriteEventAsync("content_block_start", AnthropicWire.ContentBlockStartEvent, token);
+        }
+
         ctx.DeltaSink = async (delta, token) =>
         {
-            if (!sseStarted)
-            {
-                sseStarted = true;
-                resp.StatusCode = StatusCodes.Status200OK;
-                resp.ContentType = "text/event-stream";
-                resp.Headers.CacheControl = "no-cache";
-                await WriteEventAsync("message_start", AnthropicWire.MessageStartEvent(msgId, ctx.AttemptedModel ?? ctx.Policy?.Route?.ModelId ?? ""), token);
-                await WriteEventAsync("content_block_start", AnthropicWire.ContentBlockStartEvent, token);
-            }
+            if (!sseStarted) await StartSseAsync(token);
             await WriteEventAsync("content_block_delta", AnthropicWire.ContentBlockDeltaEvent(delta.Content), token);
         };
 
         await pipe.ExecuteAsync(ctx, ct);
 
         if (!sseStarted)
-            return AnthropicDenial(ctx);            // denied before the first byte — plain JSON error
+        {
+            // Refused/no response → plain JSON error. A completed stream with empty content is a success: open the SSE.
+            if (ctx.IsDenied || ctx.Response is null)
+                return AnthropicDenial(ctx);
+            await StartSseAsync(ct);
+        }
 
         if (ctx.IsDenied)
         {
@@ -613,7 +617,50 @@ StatusReport BuildStatus()
         },
         Version = typeof(Program).Assembly.GetName().Version?.ToString(),
         ConfigVersion = cfg.Version,
+        ConnectionHealth = ConnectionHealthOf(cfg),
     };
+}
+
+// Review round 2 (B11): current runtime health per configured connection + model ("connection_id:model_id"), from real
+// governed attempts and probes — the header reads this (or catalog.local.health), never a legacy model-name key.
+List<ConnectionHealthView> ConnectionHealthOf(CovenantConfig c)
+    => c.Connections.SelectMany(conn => conn.Models.Select(m => new ConnectionHealthView
+    {
+        Key = $"{conn.Id}:{m.ModelId}",
+        ConnectionId = conn.Id,
+        ModelId = m.ModelId,
+        Boundary = conn.Boundary.ToString(),
+        Enabled = conn.Enabled,
+        Health = providerHealth.Get($"{conn.Id}:{m.ModelId}"),
+    })).ToList();
+
+// Review round 2 (B11): which local connection/model the console's "local route" describes. Order: the enabled
+// local-boundary connection/model most recently OBSERVED by a real attempt or probe; else the first one an enabled,
+// unpaused policy target routes to; else a connection named "local" (legacy import); else the first enabled local one.
+// A stale legacy "local" connection therefore never shadows the connection that actually served.
+(ConnectionConfig? Conn, string? ModelId) SelectLocal(CovenantConfig c)
+{
+    var candidates = c.Connections.Where(x => x.Boundary == Boundary.Local && x.Enabled)
+        .SelectMany(x => x.Models.Select(m => (Conn: x, ModelId: m.ModelId))).ToList();
+    if (candidates.Count == 0)
+    {
+        var any = c.Connections.FirstOrDefault(x => x.Id == "local") ?? c.Connections.FirstOrDefault(x => x.Boundary == Boundary.Local);
+        return (any, any?.Models.FirstOrDefault()?.ModelId);
+    }
+    DateTimeOffset? Observed(HealthView h) => h.LastFailureUtc is { } f && (h.LastSuccessUtc is not { } s0 || f > s0) ? f : h.LastSuccessUtc;
+    var observed = candidates
+        .Select(k => (k.Conn, k.ModelId, At: Observed(providerHealth.Get($"{k.Conn.Id}:{k.ModelId}"))))
+        .Where(k => k.At is not null)
+        .OrderByDescending(k => k.At)
+        .FirstOrDefault();
+    if (observed.Conn is not null) return (observed.Conn, observed.ModelId);
+    foreach (var policy in c.Policies.Where(p => p.Enabled && !p.Paused))
+        foreach (var t in policy.Targets.Where(t => !t.Paused))
+            if (candidates.FirstOrDefault(k => k.Conn.Id == t.ConnectionId && k.ModelId == t.ModelId) is { Conn: not null } routed)
+                return (routed.Conn, routed.ModelId);
+    var named = candidates.FirstOrDefault(k => k.Conn.Id == "local");
+    var pick = named.Conn is not null ? named : candidates[0];
+    return (pick.Conn, pick.ModelId);
 }
 
 app.MapGet("/admin/status", (HttpContext http) =>
@@ -760,10 +807,10 @@ app.MapGet("/admin/catalog", (HttpContext http) =>
         };
     }).ToList();
 
-    // Pre-v2 "local" view: the connection named "local" (legacy import), else the first local-boundary one.
-    var local = snapshot.FindConnection("local") ?? cfg.Connections.FirstOrDefault(c => c.Boundary == Boundary.Local);
+    // "local" view (review round 2, B11): the local connection/model actually observed or routed (see SelectLocal),
+    // with the CURRENT runtime health of exactly that connection:model.
+    var (local, localModelId) = SelectLocal(cfg);
     var localAuthority = EndpointSummary(local?.Endpoint);
-    var localModelId = local?.Models.FirstOrDefault()?.ModelId;
     var report = new CatalogReport
     {
         Mode = StartupEgress.ModeString(cfg.Mode),
@@ -775,6 +822,8 @@ app.MapGet("/admin/catalog", (HttpContext http) =>
             ModelId = localModelId,
             Registered = local is not null && localModelId is not null && liveRegistry.TryResolve(local.Id, localModelId, out _),
             EndpointHealth = providerHealth.Get($"endpoint:{localAuthority}"),
+            ConnectionId = local?.Id,
+            Health = local is not null && localModelId is not null ? providerHealth.Get($"{local.Id}:{localModelId}") : null,
         },
         ProbeAllowList = probeAllowList.OrderBy(x => x, StringComparer.Ordinal).ToList(),
         ConfigVersion = cfg.Version,

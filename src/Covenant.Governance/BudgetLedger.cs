@@ -13,8 +13,108 @@ public static class LedgerOps
     public const string Release = "release";
     public const string SettleRecovered = "settle-recovered";
     public const string LegacyImport = "legacy-import";
+    /// <summary>Review round 2 (B9): the last line of the atomically written initial ledger. A journal without it is an
+    /// interrupted bootstrap ⇒ refuse to start (never silently restore capacity).</summary>
+    public const string BootstrapComplete = "bootstrap-complete";
+    public const string BootstrapRequestId = "bootstrap";
 
     public static bool IsCharge(string op) => op is Settle or SettleRecovered or LegacyImport;
+
+    public static bool IsKnown(string op) => op is Reserve or Settle or Release or SettleRecovered or LegacyImport or BootstrapComplete;
+}
+
+/// <summary>Replay validation of a ledger journal (review round 2, B10). Corrupt accounting must never silently disappear:
+/// every record is checked for the op vocabulary, non-negative amounts, non-empty ids, scope syntax, a real timestamp, and
+/// the per-(request, attempt) lifecycle — reserve once; settle once (after a reserve, or a direct overrun settle of an
+/// unreserved zero-bound attempt); release once (after a reserve, possibly after its settle); settle-recovered once, only
+/// for an open reservation; nothing after release/settle-recovered. legacy-import is idempotent per scope key and never
+/// after the bootstrap-complete marker; the marker appears at most once.</summary>
+public static class LedgerReplay
+{
+    private enum State { Reserved, Settled, Closed }
+
+    /// <summary>Null when valid, else (record index, diagnostic) of the FIRST violation.</summary>
+    public static (int Index, string Error)? Validate(IReadOnlyList<LedgerRecord> records)
+    {
+        var states = new Dictionary<(string, string), State>();
+        bool marker = false;
+        for (int i = 0; i < records.Count; i++)
+        {
+            var r = records[i];
+            if (Check(r, states, ref marker) is { } error) return (i, error);
+        }
+        return null;
+    }
+
+    public static bool IsValidScope(string? scope)
+    {
+        if (scope is null) return false;
+        foreach (var ch in scope) if (char.IsControl(ch)) return false;
+        if (scope == BudgetScopes.Global) return true;
+        foreach (var prefix in new[] { "team:", "application:" })
+            if (scope.StartsWith(prefix, StringComparison.Ordinal) && scope.Length > prefix.Length && scope.Length <= 200) return true;
+        return false;
+    }
+
+    private static string? Check(LedgerRecord r, Dictionary<(string, string), State> states, ref bool marker)
+    {
+        if (r.Op is null || !LedgerOps.IsKnown(r.Op)) return $"unknown op '{Evidence.Bounded(r.Op)}'";
+        if (r.AmountUsd < 0m) return $"negative amount {r.AmountUsd.ToString(CultureInfo.InvariantCulture)}";
+        if (string.IsNullOrWhiteSpace(r.RequestId)) return "empty request_id";
+        if (string.IsNullOrWhiteSpace(r.AttemptId)) return "empty attempt_id";
+        if (r.TsUtc == default || r.TsUtc.Year < 2000) return "missing or invalid ts_utc";
+        if (r.Scopes is null) return "missing scopes";
+
+        if (r.Op == LedgerOps.BootstrapComplete)
+        {
+            if (marker) return "duplicate bootstrap-complete marker";
+            if (r.AmountUsd != 0m || r.Scopes.Count != 0) return "bootstrap-complete marker must carry no amount and no scopes";
+            marker = true;
+            return null;
+        }
+        if (r.Scopes.Count == 0) return $"{r.Op} without scopes";
+        foreach (var scope in r.Scopes)
+            if (!IsValidScope(scope)) return $"invalid scope '{Evidence.Bounded(scope)}'";
+
+        var key = (r.RequestId, r.AttemptId);
+        bool known = states.TryGetValue(key, out var state);
+        switch (r.Op)
+        {
+            case LedgerOps.LegacyImport:
+                if (marker) return "legacy-import after the bootstrap-complete marker";
+                if (r.RequestId != LedgerOps.LegacyImport) return "legacy-import must use request_id 'legacy-import'";
+                states[key] = State.Closed;   // idempotent per scope key (a duplicate is ignored on replay)
+                return null;
+            case LedgerOps.Reserve:
+                if (known) return $"second reserve for {Describe(key)}";
+                states[key] = State.Reserved;
+                return null;
+            case LedgerOps.Settle:
+                if (!known)
+                {
+                    if (r.Overrun != true) return $"settle without a reservation for {Describe(key)}";
+                    states[key] = State.Closed;   // direct overrun settle of an unreserved (zero-bound) attempt
+                    return null;
+                }
+                if (state != State.Reserved) return $"second settle for {Describe(key)}";
+                states[key] = State.Settled;
+                return null;
+            case LedgerOps.Release:
+                if (!known) return $"release without a reservation for {Describe(key)}";
+                if (state == State.Closed) return $"release after the attempt was closed for {Describe(key)}";
+                states[key] = State.Closed;
+                return null;
+            case LedgerOps.SettleRecovered:
+                if (!known) return $"settle-recovered without a reservation for {Describe(key)}";
+                if (state != State.Reserved) return $"settle-recovered of an already settled attempt {Describe(key)}";
+                states[key] = State.Closed;
+                return null;
+            default:
+                return $"unknown op '{Evidence.Bounded(r.Op)}'";
+        }
+    }
+
+    private static string Describe((string Req, string Att) key) => $"({Evidence.Bounded(key.Req)}, {Evidence.Bounded(key.Att)})";
 }
 
 /// <summary>One append-only ledger line. Keyed by (RequestId, AttemptId); records the SCOPES charged (global,
@@ -131,8 +231,33 @@ public sealed class BudgetLedger
         _store = store;
         _clock = clock ?? TimeProvider.System;
         if (existing is not null)
-            foreach (var r in existing) Apply(r);
+            foreach (var r in existing)
+            {
+                // Replay never silently drops accounting (B10): an unknown operation is corruption, not a no-op.
+                if (!LedgerOps.IsKnown(r.Op)) throw new InvalidDataException($"budget ledger: unknown operation '{Evidence.Bounded(r.Op)}' on replay");
+                Apply(r);
+            }
     }
+
+    /// <summary>The one-time legacy import records (B9): one per team with spend, charged to global + team, keyed
+    /// (legacy-import, team:&lt;t&gt;) so a replayed duplicate is idempotent. Built by the Host into the atomic bootstrap.</summary>
+    public static IReadOnlyList<LedgerRecord> LegacyImportRecords(IEnumerable<(string Team, decimal AmountUsd)> spendByTeam, DateTimeOffset now)
+        => spendByTeam
+            .Where(t => t.AmountUsd > 0m)
+            .GroupBy(t => t.Team, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new LedgerRecord
+            {
+                Op = LedgerOps.LegacyImport, RequestId = LedgerOps.LegacyImport, AttemptId = "team:" + g.First().Team,
+                Scopes = [BudgetScopes.Global, "team:" + g.First().Team], AmountUsd = g.Sum(t => t.AmountUsd), TsUtc = now,
+            })
+            .ToList();
+
+    /// <summary>The bootstrap-complete marker record (B9).</summary>
+    public static LedgerRecord BootstrapMarker(DateTimeOffset now) => new()
+    {
+        Op = LedgerOps.BootstrapComplete, RequestId = LedgerOps.BootstrapRequestId, AttemptId = LedgerOps.BootstrapComplete,
+        Scopes = [], AmountUsd = 0m, TsUtc = now,
+    };
 
     public TimeProvider Clock => _clock;
 
@@ -258,11 +383,9 @@ public sealed class BudgetLedger
         lock (_gate)
         {
             var now = _clock.GetUtcNow();
-            var records = spendByTeam.Where(t => t.AmountUsd > 0m).Select(t => new LedgerRecord
-            {
-                Op = LedgerOps.LegacyImport, RequestId = LedgerOps.LegacyImport, AttemptId = "team:" + t.Team,
-                Scopes = ["global", "team:" + t.Team], AmountUsd = t.AmountUsd, TsUtc = now,
-            }).ToList();
+            var records = LegacyImportRecords(spendByTeam, now)
+                .Where(r => !_closed.Contains((r.RequestId, r.AttemptId)))   // idempotent per scope key
+                .ToList();
             if (records.Count == 0) return [];
             _store.Append(records);
             foreach (var r in records) Apply(r);
@@ -338,8 +461,12 @@ public sealed class BudgetLedger
                 Close(key);
                 return;
             case LedgerOps.LegacyImport:
+                if (_closed.Contains(key)) return;   // idempotent per (legacy-import, team:<t>) — B9
                 Charge(r);
+                Close(key);
                 return;
+            case LedgerOps.BootstrapComplete:
+                return;   // marker only
         }
     }
 

@@ -1,3 +1,5 @@
+using System.Buffers.Binary;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using Covenant.Core;
@@ -11,29 +13,37 @@ public sealed class CacheConfig
     public int MaxEntries { get; init; } = 1_000;
 }
 
-/// <summary>In-memory, TTL-bound response cache. Never persisted; entries die with the process.</summary>
+/// <summary>In-memory, TTL-bound response cache. Never persisted; entries die with the process. Each entry keeps the
+/// provenance of the attempt that actually produced it (connection + model — possibly an approved fallback).</summary>
 public sealed class ResponseCache(TimeProvider? clock = null)
 {
     private readonly TimeProvider _clock = clock ?? TimeProvider.System;
     private readonly object _gate = new();
-    private readonly Dictionary<string, (InferenceResponse Response, DateTimeOffset Expires)> _entries = new();
+    private readonly Dictionary<string, (InferenceResponse Response, RouteTarget? ServedTarget, DateTimeOffset Expires)> _entries = new();
 
-    public bool TryGet(string key, out InferenceResponse response)
+    public bool TryGet(string key, out InferenceResponse response) => TryGet(key, out response, out _);
+
+    public bool TryGet(string key, out InferenceResponse response, out RouteTarget? servedTarget)
     {
         lock (_gate)
         {
             if (_entries.TryGetValue(key, out var e) && e.Expires > _clock.GetUtcNow())
             {
                 response = e.Response;
+                servedTarget = e.ServedTarget;
                 return true;
             }
             _entries.Remove(key);
             response = null!;
+            servedTarget = null;
             return false;
         }
     }
 
     public void Store(string key, InferenceResponse response, TimeSpan ttl, int maxEntries)
+        => Store(key, response, ttl, maxEntries, null);
+
+    public void Store(string key, InferenceResponse response, TimeSpan ttl, int maxEntries, RouteTarget? servedTarget)
     {
         lock (_gate)
         {
@@ -45,9 +55,57 @@ public sealed class ResponseCache(TimeProvider? clock = null)
                 if (_entries.Count >= maxEntries)
                     _entries.Remove(_entries.OrderBy(kv => kv.Value.Expires).First().Key);
             }
-            _entries[key] = (response, _clock.GetUtcNow() + ttl);
+            _entries[key] = (response, servedTarget, _clock.GetUtcNow() + ttl);
         }
     }
+}
+
+/// <summary>Unambiguous canonical cache-key encoding (review round 2, B5): every field is written into an incremental
+/// SHA-256 as a presence byte (0 = null, 1 = value) followed by a 4-byte big-endian length and the UTF-8 bytes. No
+/// delimiter can be forged by content: "x\u001fAssistant:y" in one message and ["x","y"] in two messages, or a shifted
+/// message boundary, always hash differently. Lists are prefixed with their count.</summary>
+public sealed class CacheKeyBuilder : IDisposable
+{
+    private readonly IncrementalHash _hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+    public CacheKeyBuilder(string domain) => Add(domain);
+
+    public CacheKeyBuilder Add(string? value)
+    {
+        Span<byte> header = stackalloc byte[5];
+        if (value is null)
+        {
+            header[0] = 0;
+            BinaryPrimitives.WriteInt32BigEndian(header[1..], 0);
+            _hash.AppendData(header);
+            return this;
+        }
+        var bytes = Encoding.UTF8.GetBytes(value);
+        header[0] = 1;
+        BinaryPrimitives.WriteInt32BigEndian(header[1..], bytes.Length);
+        _hash.AppendData(header);
+        _hash.AppendData(bytes);
+        return this;
+    }
+
+    public CacheKeyBuilder Add(int? value) => Add(value?.ToString(CultureInfo.InvariantCulture));
+
+    public CacheKeyBuilder Count(int count) => Add(count);
+
+    public CacheKeyBuilder Messages(IReadOnlyList<ChatMessage> messages)
+    {
+        Count(messages.Count);
+        foreach (var m in messages)
+        {
+            Add(m.Role.ToString());
+            Add(m.Content);
+        }
+        return this;
+    }
+
+    public string Finish() => Convert.ToHexString(_hash.GetHashAndReset());
+
+    public void Dispose() => _hash.Dispose();
 }
 
 /// <summary>Cache stage (src/CLAUDE.md ordering: cache before budget/provider — a hit skips the model call).
@@ -66,20 +124,12 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
             return;
         }
 
-        // v2 key (ADR-0013): SHA-256 over application, team, profile, FINAL classification, configuration version, the
-        // ordered approved candidates (connection id + model id), the enforced output bound sent to the provider and the
-        // message content — so a new activation, another identity or another eligible route set never reuses an entry.
-        IReadOnlyList<RouteTarget> candidates = ctx.Policy!.Candidates.Count > 0 ? ctx.Policy.Candidates : new[] { route };
-        var key = ctx.Configuration is { } cfg
-            ? Key(string.Join('\u001e', "v3", cfg.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    ctx.ApplicationId ?? "", ctx.ProfileId ?? "", ctx.Classification.ToString(), ctx.Identity.Tags.Team,
-                    string.Join('\u001d', candidates.Select(c => c.AdapterKey + "/" + c.ModelId))),
-                route.ModelId, ctx.Request.Messages, RequestBounds.OutputTokenBound(ctx, route))
-            : Key(ctx.Identity.Tags.Team, route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens);
-        if (cache.TryGet(key, out var hit))
+        var key = KeyFor(ctx, route);
+        if (cache.TryGet(key, out var hit, out var servedTarget))
         {
             ctx.ServedFromCache = true;
             ctx.CostBasis = "no_call";
+            ctx.ServedTarget = servedTarget;   // provenance: the attempt that produced the entry (maybe a fallback)
             ctx.Response = hit with { Usage = hit.Usage with { CostUsd = 0m } };
             if (ctx.Request.Stream && ctx.DeltaSink is { } sink)
                 await sink(new ChatDelta(hit.Message.Content), ct); // one delta: the cached text
@@ -88,15 +138,37 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
 
         await next(ctx, ct);
 
-        if (!ctx.IsDenied && ctx.Response is { } fresh)
-            cache.Store(key, fresh, TimeSpan.FromSeconds(ttl), Math.Max(1, maxEntries));
+        if (!ctx.IsDenied && ctx.Response is { } fresh && !ctx.ServedFromCache)
+            cache.Store(key, fresh, TimeSpan.FromSeconds(ttl), Math.Max(1, maxEntries), ctx.ServedTarget ?? route);
     }
 
-    private static string Key(string team, string modelId, IReadOnlyList<ChatMessage> messages, int? maxOutputTokens)
+    /// <summary>v4 key (review round 2). Configured: application, team, profile, FINAL classification, configuration
+    /// version, the ORIGINAL request parameters (requested model override, requested max_tokens — stream-independent),
+    /// every candidate target in order with its EFFECTIVE output bound, then the messages (count, role, content).
+    /// Legacy (no configuration): team, route model, requested max_tokens, messages.</summary>
+    public static string KeyFor(InferenceContext ctx, RouteTarget route)
     {
+        if (ctx.Configuration is { } cfg)
+        {
+            IReadOnlyList<RouteTarget> candidates = ctx.Policy!.Candidates.Count > 0 ? ctx.Policy.Candidates : new[] { route };
+            using var k = new CacheKeyBuilder("covenant-cache-v4");
+            k.Add(cfg.Version)
+             .Add(ctx.ApplicationId)
+             .Add(ctx.Identity.Tags.Team)
+             .Add(ctx.ProfileId)
+             .Add(ctx.Classification.ToString())
+             .Add(ctx.Request.RequestedModel)
+             .Add(ctx.Request.MaxOutputTokens)
+             .Count(candidates.Count);
+            foreach (var c in candidates)
+                k.Add(c.AdapterKey).Add(c.ModelId).Add(RequestBounds.OutputTokenBound(ctx, c));
+            k.Messages(ctx.Request.Messages);
+            return k.Finish();
+        }
+
         // max_tokens is part of the contract: a 400-token cached answer must not serve a max_tokens=5 ask.
-        var sb = new StringBuilder(team).Append('\u001f').Append(modelId).Append('\u001f').Append(maxOutputTokens?.ToString() ?? "");
-        foreach (var m in messages) sb.Append('\u001f').Append(m.Role).Append(':').Append(m.Content);
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString())));
+        using var legacy = new CacheKeyBuilder("covenant-cache-legacy-v2");
+        legacy.Add(ctx.Identity.Tags.Team).Add(route.ModelId).Add(ctx.Request.MaxOutputTokens).Messages(ctx.Request.Messages);
+        return legacy.Finish();
     }
 }

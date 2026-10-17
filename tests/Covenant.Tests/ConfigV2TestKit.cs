@@ -145,6 +145,7 @@ internal sealed class GatedChatClient(string reply = "gated reply") : MEAI.IChat
         Interlocked.Increment(ref _calls);
         await Task.Yield();
         yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply);
+        yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop };   // terminal completion (real providers send one)
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;

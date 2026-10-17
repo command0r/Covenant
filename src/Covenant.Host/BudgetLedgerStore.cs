@@ -13,18 +13,26 @@ public sealed class LedgerOpenResult
     public List<LedgerRecord> Records { get; } = [];
     public List<string> Errors { get; } = [];
     public List<string> Warnings { get; } = [];
-    /// <summary>False when no journal file existed before this boot (⇒ the one-time legacy import runs).</summary>
+    /// <summary>False when no journal file existed before this boot (⇒ the one-time bootstrap/legacy import runs).</summary>
     public bool Existed { get; init; }
 }
 
 /// <summary>Append-only JSONL journal of the budget ledger (ADR-0014), <c>Budget:LedgerPath</c> (default
 /// <c>&lt;Audit:Path&gt;.ledger.jsonl</c>), independent of audit segments (an audit archive never touches it).
-/// Torn-tail handling mirrors the configuration activation journal (ADR-0011): a final line without its newline that does
-/// not parse (an interrupted append) is quarantined to <c>…ledger.jsonl.torn-&lt;utc&gt;</c> and the journal is rewritten
-/// atomically with only the complete lines BEFORE anything can append; a complete last line whose newline never landed
-/// is terminated; any other corrupt line refuses start. Appends are refused onto an unterminated line, and every append
-/// is flushed to disk before it returns. A failed append halts the process (like a failed audit write): an appliance
-/// that cannot record spend must not keep spending.</summary>
+/// <para>Bootstrap (review round 2, B9): a ledger is born ATOMICALLY — the complete initial content (every legacy-import
+/// line + a final <c>bootstrap-complete</c> marker) is written to a temp file, fsynced and renamed into place. A crash
+/// before the rename leaves no ledger (the next boot simply bootstraps again); a journal that exists WITHOUT the marker is
+/// an interrupted pre-marker bootstrap and refuses start — it never silently restores capacity. Exception (upgrade from
+/// the unreleased pre-marker build): a journal that already contains post-bootstrap operations (reserve/settle/…) proves
+/// the old bootstrap finished; it is accepted with a warning and the marker is appended.</para>
+/// <para>Replay validation (B10): every complete line must parse AND pass <see cref="LedgerReplay"/> (op vocabulary,
+/// non-negative amounts, ids, scopes, timestamps, lifecycle); any violation refuses start with the line number.</para>
+/// <para>Torn-tail handling mirrors the configuration activation journal (ADR-0011): a final line without its newline
+/// that does not parse (an interrupted append) is quarantined to <c>…ledger.jsonl.torn-&lt;utc&gt;</c> and the journal is
+/// rewritten atomically with only the complete lines BEFORE anything can append; a complete last line whose newline never
+/// landed is terminated. Appends are refused onto an unterminated line, and every append is flushed to disk before it
+/// returns. A failed append halts the process (like a failed audit write): an appliance that cannot record spend must not
+/// keep spending.</para></summary>
 public sealed class FileLedgerStore : ILedgerStore
 {
     private readonly object _gate = new();
@@ -47,6 +55,7 @@ public sealed class FileLedgerStore : ILedgerStore
             while (last >= 0 && lines[last].Trim().Length == 0) last--;
             string? tornTail = null;
             var good = new StringBuilder();
+            var lineNumbers = new List<int>();
             for (int i = 0; i <= last; i++)
             {
                 var raw = lines[i];
@@ -55,19 +64,45 @@ public sealed class FileLedgerStore : ILedgerStore
                 LedgerRecord? rec = null;
                 try { rec = JsonSerializer.Deserialize(line, LedgerJsonContext.Default.LedgerRecord); }
                 catch (JsonException) { }
-                if (rec is { Op.Length: > 0, RequestId.Length: > 0, AttemptId: not null, Scopes: not null })
+                if (rec is { Op: not null, RequestId: not null, AttemptId: not null, Scopes: not null })
                 {
                     result.Records.Add(rec);
+                    lineNumbers.Add(i + 1);
                     good.Append(line).Append('\n');
                     continue;
                 }
                 if (i == last && !endsWithNewline) tornTail = raw;
                 else
                 {
-                    result.Errors.Add($"Budget:LedgerPath {Path} — line {i + 1} is corrupt; accrued spend cannot be trusted. Restore the ledger from backup (never delete it).");
+                    result.Errors.Add($"Budget:LedgerPath {Path} — line {i + 1} is corrupt (not a ledger record); accrued spend cannot be trusted. Restore the ledger from backup (never delete it).");
                     return result;
                 }
             }
+
+            // B10: semantic replay validation of every complete record — corrupt accounting refuses start, precisely.
+            if (Covenant.Governance.LedgerReplay.Validate(result.Records) is { } violation)
+            {
+                result.Errors.Add($"Budget:LedgerPath {Path} — line {lineNumbers[violation.Index]} is invalid: {violation.Error}; accrued spend cannot be trusted. Restore the ledger from backup (never delete or hand-edit it).");
+                return result;
+            }
+
+            // B9: the bootstrap-complete marker must be present.
+            bool marked = result.Records.Any(r => r.Op == LedgerOps.BootstrapComplete);
+            bool appendMarker = false;
+            if (!marked)
+            {
+                bool postBootstrap = result.Records.Any(r => r.Op is not LedgerOps.LegacyImport);
+                if (!postBootstrap)
+                {
+                    result.Errors.Add($"Budget:LedgerPath {Path} — the ledger has no bootstrap-complete marker: its one-time legacy import was interrupted "
+                        + "(created but not completed). Refusing to start rather than silently restoring budget capacity. Move the file aside (keep it as evidence) "
+                        + "and restart: the import is rebuilt atomically from the current audit segment.");
+                    return result;
+                }
+                result.Warnings.Add("budget ledger: pre-marker journal with recorded operations accepted (its bootstrap evidently completed); bootstrap-complete marker appended");
+                appendMarker = true;
+            }
+
             if (tornTail is null && !endsWithNewline && last >= 0) tornTail = "";   // parsed, but its newline never landed
             if (tornTail is not null)
             {
@@ -86,58 +121,86 @@ public sealed class FileLedgerStore : ILedgerStore
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
                     result.Errors.Add($"Budget:LedgerPath {Path} — torn tail could not be repaired ({ex.Message}); refusing to start.");
+                    return result;
                 }
             }
             _terminated = true;
+            if (appendMarker)
+            {
+                var m = BudgetLedger.BootstrapMarker(DateTimeOffset.UtcNow);
+                AppendLocked(Serialize([m]));
+                result.Records.Add(m);
+            }
             return result;
         }
     }
 
-    /// <summary>Creates an empty journal (marks the one-time legacy import as done).</summary>
-    public void EnsureCreated()
+    /// <summary>Atomic bootstrap (B9): writes <paramref name="initial"/> (legacy-import records) plus the bootstrap-complete
+    /// marker to <c>&lt;path&gt;.bootstrap.tmp</c>, fsyncs, then renames it into place. Refuses (throws) when a ledger
+    /// already exists — never overwrites accounting.</summary>
+    public void Bootstrap(IReadOnlyList<LedgerRecord> initial, DateTimeOffset now)
     {
         lock (_gate)
         {
-            if (File.Exists(Path)) return;
+            if (File.Exists(Path)) throw new IOException($"budget ledger {Path} already exists; refusing to bootstrap over it");
             if (System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(Path)) is { Length: > 0 } dir) Directory.CreateDirectory(dir);
-            WriteDurable(Path, []);
+            var records = initial.Where(r => r.Op == LedgerOps.LegacyImport).Append(BudgetLedger.BootstrapMarker(now)).ToList();
+            var tmp = Path + ".bootstrap.tmp";
+            WriteDurable(tmp, Serialize(records));
+            File.Move(tmp, Path, overwrite: false);
+            _terminated = true;
         }
+    }
+
+    /// <summary>Creates an empty, COMPLETE journal (marker only) atomically — kept for callers that need a fresh ledger
+    /// with no legacy spend.</summary>
+    public void EnsureCreated()
+    {
+        if (File.Exists(Path)) return;
+        Bootstrap([], DateTimeOffset.UtcNow);
     }
 
     public void Append(IReadOnlyList<LedgerRecord> records)
     {
         if (records.Count == 0) return;
+        var bytes = Serialize(records);
+        lock (_gate) AppendLocked(bytes);
+    }
+
+    private static byte[] Serialize(IReadOnlyList<LedgerRecord> records)
+    {
         var sb = new StringBuilder();
         foreach (var r in records) sb.Append(JsonSerializer.Serialize(r, LedgerJsonContext.Default.LedgerRecord)).Append('\n');
-        var bytes = Encoding.UTF8.GetBytes(sb.ToString());
-        lock (_gate)
+        return Encoding.UTF8.GetBytes(sb.ToString());
+    }
+
+    private void AppendLocked(byte[] bytes)
+    {
+        try
         {
-            try
+            // Defence in depth: never append onto an unterminated line (Open() repairs torn tails first).
+            if (!_terminated && File.Exists(Path))
             {
-                // Defence in depth: never append onto an unterminated line (Open() repairs torn tails first).
-                if (!_terminated && File.Exists(Path))
+                var info = new FileInfo(Path);
+                if (info.Length > 0)
                 {
-                    var info = new FileInfo(Path);
-                    if (info.Length > 0)
-                    {
-                        using var check = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                        check.Seek(-1, SeekOrigin.End);
-                        if (check.ReadByte() != '\n')
-                            throw new IOException("ledger does not end with a newline; refusing to append (restart to repair the torn tail)");
-                    }
+                    using var check = new FileStream(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    check.Seek(-1, SeekOrigin.End);
+                    if (check.ReadByte() != '\n')
+                        throw new IOException("ledger does not end with a newline; refusing to append (restart to repair the torn tail)");
                 }
-                _terminated = false;
-                using (var fs = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read))
-                {
-                    fs.Write(bytes);
-                    fs.Flush(flushToDisk: true);
-                }
-                _terminated = true;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            _terminated = false;
+            using (var fs = new FileStream(Path, FileMode.Append, FileAccess.Write, FileShare.Read))
             {
-                Environment.FailFast($"covenant: budget ledger write failed ({ex.Message}) — halting rather than spending unrecorded.");
+                fs.Write(bytes);
+                fs.Flush(flushToDisk: true);
             }
+            _terminated = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Environment.FailFast($"covenant: budget ledger write failed ({ex.Message}) — halting rather than spending unrecorded.");
         }
     }
 
@@ -146,6 +209,38 @@ public sealed class FileLedgerStore : ILedgerStore
         using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
         fs.Write(content);
         fs.Flush(flushToDisk: true);
+    }
+}
+
+/// <summary>Boot sequence of the ledger (B9), shared by Program and the tests: open; when no journal exists, build the
+/// complete initial content from the current audit segment's recorded spend and bootstrap it atomically, then reopen.
+/// Errors ⇒ the caller refuses to start.</summary>
+public static class LedgerBootstrap
+{
+    public static LedgerOpenResult OpenOrBootstrap(FileLedgerStore store, Func<IEnumerable<(string Team, decimal AmountUsd)>> legacySpend, DateTimeOffset now)
+    {
+        var opened = store.Open();
+        if (opened.Errors.Count > 0 || opened.Existed) return opened;
+        try
+        {
+            store.Bootstrap(BudgetLedger.LegacyImportRecords(legacySpend(), now), now);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            var failed = new LedgerOpenResult { Existed = false };
+            failed.Errors.Add($"Budget:LedgerPath {store.Path} — the initial ledger could not be written atomically ({ex.Message}); refusing to start.");
+            return failed;
+        }
+        var reopened = store.Open();
+        return new LedgerOpenResult { Existed = false }.With(reopened);
+    }
+
+    private static LedgerOpenResult With(this LedgerOpenResult target, LedgerOpenResult source)
+    {
+        target.Records.AddRange(source.Records);
+        target.Errors.AddRange(source.Errors);
+        target.Warnings.AddRange(source.Warnings);
+        return target;
     }
 }
 

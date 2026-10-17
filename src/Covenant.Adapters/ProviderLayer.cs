@@ -80,10 +80,18 @@ public class BclProviderFailureClassifier : IProviderFailureClassifier
 /// <c>retry.on</c>, within <c>maxAttempts</c> and <c>deadlineMs</c>, and NEVER after any content reached the client;
 /// never on caller cancellation (rethrown) or non-retryable errors. Every started attempt is recorded
 /// (<see cref="InferenceContext.Attempts"/>) and settled exactly once; health is recorded per connection:model.</para>
-/// <para>Deadline semantics: no attempt starts after <c>deadlineMs</c>; an attempt still waiting for its response (or,
-/// streaming, its first content) at the deadline is cancelled and classified <c>timeout</c>. Once streamed content is
-/// flowing the deadline no longer applies (the connection timeout does) — a delivered answer is never cut off by the
-/// fallback budget.</para></summary>
+/// <para>Deadline semantics (review round 2): <c>deadlineMs</c> is ONE finite deadline for the whole execution — every
+/// attempt, buffered or streamed, before or after the first content. No attempt starts after it; an attempt still running
+/// when it fires is cancelled and classified <c>timeout</c>. If content was already emitted, the partial output is
+/// preserved and recorded and the request ends with a terminal failure (no fallback — content is never continued by a
+/// second provider).</para>
+/// <para>Stream completion (review round 2): a streamed attempt counts as served ONLY when a terminal update with a
+/// non-null finish reason was observed and no error occurred. A stream that just ends (or whose SSE error the SDK
+/// swallowed) is a provider failure <c>incomplete_stream</c>: partial output kept, attempt charged its estimate, never
+/// cached, no fallback. Finish reason <c>length</c> (buffered or streamed) is served and recorded as truncated.</para>
+/// <para>Settlement (review round 2): the served attempt is settled in a <c>finally</c> after the downstream stages, so an
+/// exception in attribution (or anything after it) still settles it exactly once (at its estimate when no priced cost
+/// exists); the budget stage's unwind is the second, idempotent backstop.</para></summary>
 /// <param name="preferRequestClients">ADR-0011: resolve against the provider clients compiled into the request's
 /// bound configuration snapshot (so a request keeps the clients of the version it started on). The Host sets it
 /// only when its own snapshot-backed registry is the DI registration; a test-substituted registry always wins.</param>
@@ -157,14 +165,23 @@ public sealed class ProviderCallStage(
                 ConnectionId = target.AdapterKey,
                 ModelId = target.ModelId,
                 ReservedUsd = ctx.AttemptGate is null ? null : ctx.ActiveReservationUsd,
+                EffectiveMaxOutputTokens = RequestBounds.OutputTokenBound(ctx, target),
             };
             ctx.Attempts.Add(attempt);
             var (end, errorClass, message) = await AttemptAsync(ctx, client, target, attempt, messages, deadline, ct);
 
             if (end == AttemptEnd.Served)
             {
-                await next(ctx, ct);
-                SettleServed(ctx, attempt);
+                try
+                {
+                    await next(ctx, ct);
+                }
+                finally
+                {
+                    // Exactly once even when attribution (or anything downstream) throws: without a priced cost the
+                    // attempt settles at its conservative estimate. The gate is idempotent per attempt id.
+                    SettleServed(ctx, attempt);
+                }
                 return;
             }
             if (end == AttemptEnd.ClientGone)
@@ -197,9 +214,10 @@ public sealed class ProviderCallStage(
         var targetLabel = $"{target.AdapterKey}/{target.ModelId}";
         var callToken = deadline?.Token ?? ct;
         ctx.AttemptedModel = target.ModelId;   // a call is now actually started (not merely selected)
-        ctx.Trace(Stage, TraceStates.Running, attemptId: attempt.AttemptId, target: targetLabel);
+        ctx.Trace(Stage, TraceStates.Running, attemptId: attempt.AttemptId, target: targetLabel,
+            requestedMaxOutputTokens: ctx.Request.MaxOutputTokens, effectiveMaxOutputTokens: attempt.EffectiveMaxOutputTokens);
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        var options = new MEAI.ChatOptions { ModelId = target.ModelId, MaxOutputTokens = RequestBounds.OutputTokenBound(ctx, target) };
+        var options = new MEAI.ChatOptions { ModelId = target.ModelId, MaxOutputTokens = attempt.EffectiveMaxOutputTokens };
 
         try
         {
@@ -209,14 +227,16 @@ public sealed class ProviderCallStage(
             {
                 var text = new StringBuilder();
                 MEAI.UsageDetails? usageDetails = null;
+                MEAI.ChatFinishReason? finish = null;
+                // No deadline relaxation once content flows (review round 2): the policy deadline bounds the whole stream.
                 await foreach (var update in client.GetStreamingResponseAsync(messages, options, callToken))
                 {
                     foreach (var uc in update.Contents.OfType<MEAI.UsageContent>())
                         usageDetails = uc.Details;
+                    if (update.FinishReason is { } fr) finish = fr;
 
                     if (update.Text is { Length: > 0 } fragment)
                     {
-                        if (text.Length == 0) deadline?.CancelAfter(Timeout.Infinite);   // content flowing: deadline no longer applies
                         text.Append(fragment);
                         ctx.PartialOutputChars = text.Length;
                         try
@@ -232,18 +252,34 @@ public sealed class ProviderCallStage(
                     }
                 }
 
+                if (finish is not { } completed)
+                {
+                    // The stream ended without a terminal completion (or the SDK swallowed the SSE error): a provider
+                    // failure — never "served" with a synthesized finish_reason. Partial output stays recorded.
+                    const string why = "stream ended without a terminal completion (no finish reason)";
+                    health?.RecordFailure(target.AdapterKey, target.ModelId, why);
+                    End(ctx, attempt, watch, TraceStates.Failed, TraceReasons.IncompleteStream, targetLabel);
+                    SettleIncomplete(ctx, attempt);
+                    return (AttemptEnd.Failed, TraceReasons.IncompleteStream,
+                        $"provider '{target.AdapterKey}' {why}; {text.Length.ToString(System.Globalization.CultureInfo.InvariantCulture)} chars were emitted");
+                }
+
                 health?.RecordSuccess(target.AdapterKey, target.ModelId);
+                attempt.Truncated = completed == MEAI.ChatFinishReason.Length ? true : null;
                 ctx.ServedTarget = target;
                 ctx.Response = new InferenceResponse(
                     Message: new ChatMessage(ChatRole.Assistant, text.ToString()),
                     Usage: new Usage(usageDetails?.InputTokenCount ?? 0, usageDetails?.OutputTokenCount ?? 0, 0m),
                     ServedByModel: target.ModelId,
-                    UsageReported: usageDetails?.InputTokenCount is not null && usageDetails.OutputTokenCount is not null);
+                    UsageReported: usageDetails?.InputTokenCount is not null && usageDetails.OutputTokenCount is not null,
+                    FinishReason: completed.Value);
             }
             else
             {
+                // Buffered SDK responses either complete or throw; a "length" finish is served and flagged truncated.
                 var response = await client.GetResponseAsync(messages, options, callToken);
                 health?.RecordSuccess(target.AdapterKey, target.ModelId);
+                attempt.Truncated = response.FinishReason == MEAI.ChatFinishReason.Length ? true : null;
                 ctx.ServedTarget = target;
                 ctx.Response = new InferenceResponse(
                     Message: new ChatMessage(ChatRole.Assistant, response.Text ?? string.Empty),
@@ -252,7 +288,8 @@ public sealed class ProviderCallStage(
                         OutputTokens: response.Usage?.OutputTokenCount ?? 0,
                         CostUsd: 0m), // cost is computed by the attribution stage
                     ServedByModel: target.ModelId,
-                    UsageReported: response.Usage?.InputTokenCount is not null && response.Usage.OutputTokenCount is not null);
+                    UsageReported: response.Usage?.InputTokenCount is not null && response.Usage.OutputTokenCount is not null,
+                    FinishReason: response.FinishReason?.Value);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -266,11 +303,13 @@ public sealed class ProviderCallStage(
         {
             // Adapter contract: error mapping (src/CLAUDE.md). An upstream failure is a governed, audited outcome —
             // never an unhandled exception escaping the pipeline as a 500. The deadline firing is a timeout.
-            var errorClass = deadline is { IsCancellationRequested: true } && !ct.IsCancellationRequested
-                ? TraceReasons.Timeout
-                : _classifier.Classify(ex);
+            bool deadlineHit = deadline is { IsCancellationRequested: true } && !ct.IsCancellationRequested;
+            var errorClass = deadlineHit ? TraceReasons.Timeout : _classifier.Classify(ex);
             var verb = ctx.Request.Stream && ctx.DeltaSink is not null ? "stream failed" : "call failed";
-            var message = $"provider '{target.AdapterKey}' {verb}: {Bound(ex.Message)}";
+            var message = deadlineHit
+                ? $"provider '{target.AdapterKey}' {verb}: the policy deadline (deadline_ms) was exceeded"
+                    + (ctx.PartialOutputChars > 0 ? $" after {ctx.PartialOutputChars.ToString(System.Globalization.CultureInfo.InvariantCulture)} chars were emitted" : "")
+                : $"provider '{target.AdapterKey}' {verb}: {Bound(ex.Message)}";
             health?.RecordFailure(target.AdapterKey, target.ModelId, Bound(ex.Message));
             End(ctx, attempt, watch, TraceStates.Failed, errorClass, targetLabel);
             SettleIncomplete(ctx, attempt);
@@ -279,7 +318,8 @@ public sealed class ProviderCallStage(
 
         attempt.Outcome = "served";
         attempt.DurationMs = watch.Elapsed.TotalMilliseconds;
-        ctx.Trace(Stage, TraceStates.Passed, attempt.DurationMs, attemptId: attempt.AttemptId, target: targetLabel);
+        ctx.Trace(Stage, TraceStates.Passed, attempt.DurationMs, attemptId: attempt.AttemptId, target: targetLabel,
+            requestedMaxOutputTokens: ctx.Request.MaxOutputTokens, effectiveMaxOutputTokens: attempt.EffectiveMaxOutputTokens);
         return (AttemptEnd.Served, null, "served");
     }
 
@@ -288,7 +328,8 @@ public sealed class ProviderCallStage(
         attempt.Outcome = state == TraceStates.Cancelled ? "cancelled" : "failed";
         attempt.ErrorClass = errorClass;
         attempt.DurationMs = watch.Elapsed.TotalMilliseconds;
-        ctx.Trace(Stage, state, attempt.DurationMs, errorClass, attempt.AttemptId, target);
+        ctx.Trace(Stage, state, attempt.DurationMs, errorClass, attempt.AttemptId, target,
+            ctx.Request.MaxOutputTokens, attempt.EffectiveMaxOutputTokens);
     }
 
     /// <summary>A started attempt that produced no complete response may still be billed (ADR-0009/0014): settled at the

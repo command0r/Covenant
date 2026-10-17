@@ -135,13 +135,32 @@ Implementation details (T05, binding):
   are the ORIGINAL request's id (the duplicate is not run; window 10 min, claimed atomically before the pipeline runs).
 - 400 rules: malformed JSON; `application_id` missing/blank or > 64 chars; `profile_id` > 64; `messages` missing/empty
   or > 200; a null message; `role` not `system|user|assistant`; `content` not a string; total content > 200 000 chars;
-  `max_tokens` < 1; `model` > 200 chars; `client_request_id` not 1–128 chars of `[A-Za-z0-9-_.:]`. Body:
+  `max_tokens` < 1; `model` > 200 chars; `client_request_id` **missing** or not 1–64 chars of `[A-Za-z0-9_-]`
+  (review round 2: REQUIRED). Body:
   `{ "error":"invalid_request", "reason":"… — rejected before governance; no evidence record" }`.
 - An unknown `application_id` is a governed 403 at `auth` ("application 'x' is not configured"), audited.
 - Audit: `EntryPoint="console"`, `OperatorRef="shared-admin-token"`, `ApplicationId`, `Tags.Team` = the application's
   team, `Principal="console:<application id>"`, `Tags.Workflow`/`UseCase` from the body (default `console`/`playground`,
   bounded to 64 chars).
 - Cancellation (client disconnect) propagates to the provider call (`RequestAborted`); the record is `Cancelled`.
+- **Early request id (review round 2, B7, binding).** `client_request_id` is required. Before the pipeline starts the Host
+  registers `client_request_id → request_id` (kept for the trace TTL). The console may poll
+  `GET /admin/playground/submissions/{client_request_id}` (admin token; 401 otherwise) right after submitting:
+  - 200 `{ "client_request_id": "...", "request_id": "req_<32 hex>", "state": "running" | "completed" }`
+  - 404 `{ "error": "not_found", "reason": "..." }` — unknown, never registered, past the trace TTL, or malformed id.
+  With the `request_id` it subscribes to `/admin/requests/{id}/trace/stream` while the provider is still waiting (no
+  faked timings). `/v1` is unchanged.
+- **Stream completion (review round 2, B1).** A stream is served ONLY when the provider sent a terminal completion (a
+  finish reason) and no error occurred. Otherwise (stream just ended, SDK swallowed the SSE error, error mid-stream,
+  deadline hit) the SSE ends with the existing `data: {"error":"upstream_error","reason":…,"request_id":…}` event and
+  `data: [DONE]` — **no** chunk with `finish_reason:"stop"`; the record is `Effect=Deny`, `DenialKind=UpstreamFailure`,
+  `ErrorClass` `incomplete_stream` (or the failure class), `PartialOutputChars` set, never cached, never continued by a
+  fallback, the attempt charged its estimate. A completed stream's last chunk carries the provider's own finish reason
+  (`"stop"`, or `"length"` when truncated at the output bound).
+- **Deadline (review round 2, B3; supersedes the earlier "the deadline stops applying once content flows").** The
+  policy `retry.deadline_ms` is ONE finite deadline for the whole execution (all attempts, before AND after the first
+  streamed content). If it fires after content was emitted: partial output kept and recorded, terminal failure with
+  `ErrorClass`/`reason_code` `timeout`, SSE ends with `upstream_error`, no fallback.
 
 ## Trace (ADR-0013)
 `GET /admin/requests/{id}/trace` → `{ "request_id","config_version","complete":bool,"events":[TraceEvent] }`;
@@ -165,7 +184,10 @@ Implementation details (T05, binding — supersedes "404 unknown/expired" above)
 - `reason_code` vocabulary (bounded, never provider text or content): `cache_hit`, `not_reached`, `paused`,
   `budget_exceeded`, `governance_denied`, `unauthenticated`, `rate_limited`, `unsupported`, `upstream_failure`,
   `client_cancelled`, `client_disconnected`, `no_client`, `error`, and the failure classes `connect`, `timeout`, `429`,
-  `5xx`, `non_retryable`.
+  `5xx`, `non_retryable`, `incomplete_stream` (review round 2: stream ended without a terminal completion).
+- Provider attempt events (`attempt_id` set) additionally carry `requested_max_output_tokens` (the request's own
+  `max_tokens`; omitted when the caller sent none) and `effective_max_output_tokens` (the bound actually sent to the
+  provider for that attempt = min(request, application, model)) — review round 2, B12.
 - Stream: replay of `seq > Last-Event-ID`, then live; `: keep-alive` comment every 15 s while idle; `event: end` +
   `data: {}` once complete. Clients de-duplicate by `seq`.
 - Bounds: ≤ 64 events/request, ≤ 2 000 requests (oldest completed evicted first), retention = the request's configuration
@@ -214,8 +236,15 @@ Implementation details (T06, binding):
   `archived_utc`. No paths. Archived chains are verified with their archived anchor file when one exists.
 - `GET /admin/requests`: `segment` default `current`; an id outside the enumerated set (path, `..`, unknown) → **400**
   `{error:"unknown_segment"}`. `limit` 1–1000 (default 200). Response = the existing `RequestsPage` plus
-  `segment.id`, `segment.label` and `next_cursor` (null on the last page). A cursor encodes its segment; `cursor` alone is
-  enough for the next page; a malformed cursor or one for another segment → **400** `{error:"invalid_cursor"}`.
+  `segment.id`, `segment.label`, **`segment.is_current`** (always present — never infer the segment from the first row)
+  and `next_cursor` (null on the last page). A cursor encodes its segment; `cursor` alone is enough for the next page.
+- **Stable paging (review round 2, B8, binding).** `next_cursor` is opaque base64url of {segment id, segment generation,
+  absolute index counted from the OLDEST request record of the segment (exclusive upper bound)}. Pages are newest-first by
+  absolute index, so records appended between pages never shift a page: no duplicates, no gaps (new records appear on a
+  fresh first page). Errors: malformed cursor or one for another `segment` → **400** `{error:"invalid_cursor"}`; the
+  segment was rotated/replaced since the cursor was issued (generation mismatch, segment gone, or a pre-round-2 cursor) →
+  **410** `{error:"cursor_expired"}` — the client reloads the first page; a cursor is never silently redirected to another
+  segment.
 - `GET /admin/requests/{id}/export?segment=` (default: search current, then archived newest first) → `{ "exported_utc",
   "request_id", "segment": SegmentView, "config_version", "record": AuditEntry (PascalCase, `PromptPreview` removed),
   "attempts", "trace", "integrity": { "segment_id","chain_valid","chain_failure","line","previous_hash","entry_hash",
@@ -244,7 +273,32 @@ Implementation details (T04–T06, binding):
   produced the response (a fallback when one served). `CostBasis` (v2 meaning): `estimated_from_text` = served, usage not
   reported, charged the reservation bound; `estimated_failed_call` = failed/cancelled attempt charged its reservation
   bound; `no_call`, `reported`, `zero_priced`, `unpriced`, `unknown_failed_call` unchanged.
+- **Request-level `CostBasis` (review round 2, B2):** describes the TOTAL (`Usage.CostUsd` = `SettledUsd`) over the
+  charged attempts (cost > 0): `reported` only if every charged attempt is `reported`; if all charged attempts share one
+  basis (e.g. all `estimated_failed_call`) that basis; if they differ → **`mixed`** (new value: e.g. a failed attempt's
+  estimate plus a reported fallback). With no positive charge the served/last attempt's basis stands. FinOps counts
+  `mixed` as an estimated-cost request and excludes it from savings claims; the UI labels it "Mixed (includes estimates)".
+- **Additive v3 fields (review round 2, nullable, absent on older lines ⇒ Not recorded):**
+  `RequestedMaxOutputTokens` (the request's own max_tokens, null when none was sent), `EffectiveMaxOutputTokens` (the
+  bound sent to the provider for the SERVED attempt; null when nothing served), `PartialOutputChars` (characters already
+  emitted to the client before a stream failed; only on non-served records), `ServedConnectionId` (connection of the
+  attempt that served — a fallback when one served; on a cache hit the connection that produced the cached entry, so
+  `ServedConnectionId`/`ServedByModel` of a hit are the ACTUAL served provenance, not the policy primary).
+  `Attempts[]` items add `EffectiveMaxOutputTokens` (bound sent for that attempt) and `Truncated` (true when the provider
+  finished with `length`). `ErrorClass` vocabulary adds `incomplete_stream`. Label requested vs effective explicitly
+  (e.g. "Requested 256 · enforced 64").
 - `budget.recovered` events record reservations a crash left open, settled at boot at their reserved amount.
+
+## Header local health (review round 2, B11, binding)
+- `/admin/catalog.local` adds `connection_id` (the local-boundary connection it describes) and `health`
+  (`{state, last_success_utc, last_failure_utc, last_error}` — CURRENT runtime health of exactly
+  `connection_id:model_id`, from real governed attempts). Selection: the enabled local connection/model most recently
+  observed by a real attempt or probe; else the first one routed by an enabled, unpaused policy target; else a connection
+  named `local`; else the first enabled local one. A stale legacy `local` connection never shadows the one that served.
+  The header uses `local.health` (fall back to `local.endpoint_health` only when `health.state` is `unknown`); it must not
+  match on an adapter literally named `local`.
+- `/admin/status` adds `connection_health: [{ "key":"connection_id:model_id", "connection_id", "model_id", "boundary",
+  "enabled", "health": {…} }]` for every configured connection model.
 
 ## Status FinOps savings (T06)
 `/admin/status.finops.savings` = `{ "label":"Estimated provider charge avoided", "baseline":"connection/model",

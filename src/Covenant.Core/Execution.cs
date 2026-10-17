@@ -40,6 +40,11 @@ public static class TraceReasons
     public const string ServerError5xx = "5xx";
     public const string NonRetryable = "non_retryable";
 
+    /// <summary>A provider stream that ended (or whose SSE error was swallowed by the SDK) WITHOUT a terminal update
+    /// carrying a finish reason: a provider failure, never a served answer. Not a retry class (content may already have
+    /// been emitted; never continued by another provider).</summary>
+    public const string IncompleteStream = "incomplete_stream";
+
     /// <summary>Default code of a denial when the denying stage did not name a finer one.</summary>
     public static string ForDenial(DenialKind kind) => kind switch
     {
@@ -62,7 +67,9 @@ public sealed record PipelineTraceEvent(
     double? DurationMs = null,
     string? ReasonCode = null,
     string? AttemptId = null,
-    string? Target = null);
+    string? Target = null,
+    int? RequestedMaxOutputTokens = null,
+    int? EffectiveMaxOutputTokens = null);
 
 /// <summary>Mutable record of one provider attempt while the request runs; the audit stage freezes it into an
 /// <see cref="AuditAttempt"/>. Created immediately before the provider call starts (Started = true).</summary>
@@ -79,8 +86,36 @@ public sealed class AttemptRecord
     public string? CostBasis { get; set; }
     public decimal? ReservedUsd { get; set; }
     public bool? Overrun { get; set; }
+    /// <summary>The output bound actually SENT to the provider for this attempt (ADR-0014): min(request max_tokens,
+    /// application max, model max). Null on legacy compositions without a bound.</summary>
+    public int? EffectiveMaxOutputTokens { get; set; }
+    /// <summary>True when the provider finished with reason "length" (answer cut at the output bound).</summary>
+    public bool? Truncated { get; set; }
 
-    public AuditAttempt ToAudit() => new(AttemptId, ConnectionId, ModelId, Outcome, ErrorClass, DurationMs, CostUsd, CostBasis, ReservedUsd, Overrun);
+    public AuditAttempt ToAudit() => new(AttemptId, ConnectionId, ModelId, Outcome, ErrorClass, DurationMs, CostUsd, CostBasis, ReservedUsd, Overrun,
+        EffectiveMaxOutputTokens, Truncated);
+}
+
+/// <summary>Request-level cost basis over the CHARGED attempts (ADR-0014, review round 2): a request's total is
+/// "reported" only when every attempt that was charged (cost &gt; 0) is "reported"; when all charged attempts share one
+/// basis that basis is the request's; when they differ the total is "mixed" (e.g. a failed attempt's estimate plus a
+/// reported fallback). With no positive charge the served/last attempt's basis stands.</summary>
+public static class CostBases
+{
+    public const string Mixed = "mixed";
+
+    public static string? Aggregate(IReadOnlyList<AttemptRecord> attempts, string? current)
+    {
+        string? single = null;
+        bool any = false;
+        foreach (var a in attempts)
+        {
+            if (a.CostUsd is not > 0m || a.CostBasis is null) continue;
+            if (!any) { single = a.CostBasis; any = true; }
+            else if (!string.Equals(single, a.CostBasis, StringComparison.Ordinal)) return Mixed;
+        }
+        return any ? single : current;
+    }
 }
 
 /// <summary>Result of asking the gate whether an attempt may start.</summary>

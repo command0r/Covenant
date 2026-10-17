@@ -116,25 +116,46 @@ public sealed partial class AuditSegments(string auditPath, string? anchorPath)
         };
     }
 
-    public static string Cursor(string segmentId, int offset)
-        => Base64Url(Encoding.UTF8.GetBytes($"c1|{segmentId}|{offset.ToString(CultureInfo.InvariantCulture)}"));
-
-    /// <summary>Opaque newest-first position: (segment id, number of newest items already returned). Null when malformed.</summary>
-    public static (string SegmentId, int Offset)? ParseCursor(string? cursor)
+    /// <summary>Segment generation (review round 2, B8): identifies the FILE a cursor was issued for, so a rotation (the
+    /// current segment archived and a new one started) or a different archive can never be silently substituted. Current:
+    /// derived from the first entry's id + timestamp ("empty" while it has none); archived: also the archive file name.
+    /// 16 hex of SHA-256 — opaque, no path.</summary>
+    public static string Generation(AuditSegment segment, IReadOnlyList<AuditEntry> all)
     {
-        if (string.IsNullOrEmpty(cursor) || cursor.Length > 200) return null;
+        var basis = all.Count == 0
+            ? "empty"
+            : all[0].Id + "|" + all[0].TimestampUtc.ToString("O", CultureInfo.InvariantCulture);
+        if (!segment.Current) basis += "|" + Path.GetFileName(segment.FilePath);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(basis))).ToLowerInvariant()[..16];
+    }
+
+    /// <summary>Opaque cursor v2: segment id, segment generation and the ABSOLUTE index (from the OLDEST request record of
+    /// the segment, exclusive upper bound) of the next page. Appends never shift it.</summary>
+    public static string Cursor(string segmentId, string generation, int beforeIndex)
+        => Base64Url(Encoding.UTF8.GetBytes($"c2|{segmentId}|{generation}|{beforeIndex.ToString(CultureInfo.InvariantCulture)}"));
+
+    public enum CursorKind { Valid, Malformed, Legacy }
+
+    /// <summary>Parses a cursor. A well-formed pre-round-2 "c1" (offset) cursor is reported as <see cref="CursorKind.Legacy"/>
+    /// (answered 410 cursor_expired — it cannot be anchored safely).</summary>
+    public static (CursorKind Kind, string SegmentId, string Generation, int Before) ParseCursor(string? cursor)
+    {
+        var bad = (CursorKind.Malformed, "", "", 0);
+        if (string.IsNullOrEmpty(cursor) || cursor.Length > 300) return bad;
         try
         {
             var s = cursor.Replace('-', '+').Replace('_', '/');
             s = s.PadRight(s.Length + (4 - s.Length % 4) % 4, '=');
             var parts = Encoding.UTF8.GetString(Convert.FromBase64String(s)).Split('|');
-            if (parts.Length != 3 || parts[0] != "c1") return null;
-            if (!int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out var offset) || offset < 0) return null;
-            return (parts[1], offset);
+            if (parts.Length == 3 && parts[0] == "c1")
+                return int.TryParse(parts[2], NumberStyles.None, CultureInfo.InvariantCulture, out _) ? (CursorKind.Legacy, parts[1], "", 0) : bad;
+            if (parts.Length != 4 || parts[0] != "c2" || parts[1].Length == 0 || parts[2].Length != 16) return bad;
+            if (!int.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var before) || before < 0) return bad;
+            return (CursorKind.Valid, parts[1], parts[2], before);
         }
         catch (FormatException)
         {
-            return null;
+            return bad;
         }
     }
 
@@ -188,24 +209,43 @@ public static class ArchiveApi
         {
             if (!authorized(http)) return Error("unauthorized", "invalid admin token", StatusCodes.Status401Unauthorized);
             http.Response.Headers.CacheControl = "no-store";
-            int offset = 0;
             string? segmentId = segment;
+            var parsed = cursor is null ? default : AuditSegments.ParseCursor(cursor);
             if (cursor is not null)
             {
-                if (AuditSegments.ParseCursor(cursor) is not { } c)
+                if (parsed.Kind == AuditSegments.CursorKind.Malformed)
                     return Error("invalid_cursor", "cursor is malformed (use next_cursor from a previous page)", StatusCodes.Status400BadRequest);
-                if (segmentId is not null && segmentId != c.SegmentId)
+                if (segmentId is not null && segmentId != parsed.SegmentId)
                     return Error("invalid_cursor", "cursor belongs to another segment", StatusCodes.Status400BadRequest);
-                segmentId = c.SegmentId;
-                offset = c.Offset;
+                if (parsed.Kind == AuditSegments.CursorKind.Legacy)
+                    return Error("cursor_expired", "this cursor predates stable paging; reload the first page", StatusCodes.Status410Gone);
+                segmentId = parsed.SegmentId;
             }
             if (segments.Resolve(segmentId) is not { } seg)
+            {
+                // A cursor naming a segment that no longer exists (e.g. "current" was archived and a new one started is
+                // still "current"; an archive removed) is expired, never redirected.
+                if (cursor is not null)
+                    return Error("cursor_expired", "the segment this cursor was issued for no longer exists; reload the first page", StatusCodes.Status410Gone);
                 return Error("unknown_segment", "segment must be an id from GET /admin/audit/segments", StatusCodes.Status400BadRequest);
+            }
 
             var (verification, all) = AuditSegments.Read(seg);
             var entries = all.Where(e => e.IsRequest()).ToList();   // v3: control-plane events → GET /admin/config/versions
+            var generation = AuditSegments.Generation(seg, all);
+            int upper = entries.Count;   // exclusive upper bound, absolute index from the OLDEST request record
+            if (cursor is not null)
+            {
+                if (!string.Equals(parsed.Generation, generation, StringComparison.Ordinal))
+                    return Error("cursor_expired", "the segment was rotated or replaced since this cursor was issued; reload the first page", StatusCodes.Status410Gone);
+                if (parsed.Before > entries.Count)
+                    return Error("invalid_cursor", "cursor position is outside this segment", StatusCodes.Status400BadRequest);
+                upper = parsed.Before;
+            }
             int take = Math.Clamp(limit ?? 200, 1, 1000);
-            var items = Enumerable.Reverse(entries).Skip(offset).Take(take).ToList();
+            int start = Math.Max(0, upper - take);
+            var items = new List<AuditEntry>(upper - start);
+            for (int i = upper - 1; i >= start; i--) items.Add(entries[i]);   // newest first within the page
             var view = AuditSegments.View(seg, verification, all);
             var page = new RequestsPage
             {
@@ -219,9 +259,10 @@ public static class ArchiveApi
                     Events = view.Events,
                     Id = seg.Id,
                     Label = seg.Label,
+                    IsCurrent = seg.Current,
                 },
                 Items = items,
-                NextCursor = offset + items.Count < entries.Count ? AuditSegments.Cursor(seg.Id, offset + items.Count) : null,
+                NextCursor = start > 0 ? AuditSegments.Cursor(seg.Id, generation, start) : null,
             };
             return Results.Json(page, AuditJsonContext.Default.RequestsPage);
         });

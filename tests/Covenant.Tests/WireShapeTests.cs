@@ -167,7 +167,7 @@ public class WireShapeTests
         public Task<MEAI.ChatResponse> GetResponseAsync(IEnumerable<MEAI.ChatMessage> m, MEAI.ChatOptions? o = null, CancellationToken ct = default)
         { Seen = o; return Task.FromResult(new MEAI.ChatResponse(new MEAI.ChatMessage(MEAI.ChatRole.Assistant, "ok")) { Usage = new MEAI.UsageDetails { InputTokenCount = 1, OutputTokenCount = 1 } }); }
         public async IAsyncEnumerable<MEAI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<MEAI.ChatMessage> m, MEAI.ChatOptions? o = null, [EnumeratorCancellation] CancellationToken ct = default)
-        { Seen = o; await Task.Yield(); yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "ok"); }
+        { Seen = o; await Task.Yield(); yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "ok"); yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop }; }
         public object? GetService(Type t, object? k = null) => null;
         public void Dispose() { }
     }

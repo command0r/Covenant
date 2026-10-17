@@ -19,6 +19,19 @@ public sealed class TraceEventView
     [JsonPropertyName("duration_ms")] public double? DurationMs { get; init; }
     [JsonPropertyName("reason_code")] public string? ReasonCode { get; init; }
     [JsonPropertyName("target")] public string? Target { get; init; }
+    /// <summary>Provider attempt events only: the request's own max_tokens (null when the caller sent none).</summary>
+    [JsonPropertyName("requested_max_output_tokens")] public int? RequestedMaxOutputTokens { get; init; }
+    /// <summary>Provider attempt events only: the bound actually sent to the provider for this attempt.</summary>
+    [JsonPropertyName("effective_max_output_tokens")] public int? EffectiveMaxOutputTokens { get; init; }
+}
+
+/// <summary>GET /admin/playground/submissions/{client_request_id} (review round 2, B7).</summary>
+public sealed class PlaygroundSubmissionView
+{
+    [JsonPropertyName("client_request_id")] public required string ClientRequestId { get; init; }
+    [JsonPropertyName("request_id")] public required string RequestId { get; init; }
+    /// <summary>running | completed.</summary>
+    [JsonPropertyName("state")] public required string State { get; init; }
 }
 
 public sealed class TraceSnapshotView
@@ -34,6 +47,7 @@ public sealed class TraceSnapshotView
 [JsonSourceGenerationOptions(DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(TraceEventView))]
 [JsonSerializable(typeof(TraceSnapshotView))]
+[JsonSerializable(typeof(PlaygroundSubmissionView))]
 public partial class TraceJsonContext : JsonSerializerContext;
 
 /// <summary>Per-request event buffer. Created by the Host BEFORE the pipeline starts, so the earliest stage events are
@@ -86,6 +100,8 @@ public sealed class TraceBuffer
                 DurationMs = e.DurationMs is { } d ? Math.Round(d, 3) : null,
                 ReasonCode = e.ReasonCode,
                 Target = e.Target,
+                RequestedMaxOutputTokens = e.RequestedMaxOutputTokens,
+                EffectiveMaxOutputTokens = e.EffectiveMaxOutputTokens,
             });
             signal = _changed;
             _changed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -161,6 +177,43 @@ public sealed class TraceHub(TimeProvider? clock = null, int maxRequests = 2000,
     }
 
     public enum Lookup { Found, Unknown, Expired }
+
+    private const int MaxSubmissions = 4000;
+    private readonly Dictionary<string, TraceBuffer> _submissions = new(StringComparer.Ordinal);
+    private readonly Queue<string> _submissionOrder = new();
+
+    /// <summary>Console inference (review round 2, B7): maps the browser's client_request_id to the server request id
+    /// BEFORE the pipeline starts, so the console can subscribe to the live trace while the provider is still waiting.
+    /// Kept for the trace TTL (until the buffer expires after completion); bounded (oldest dropped first).</summary>
+    public void RegisterSubmission(string clientRequestId, TraceBuffer buffer)
+    {
+        lock (_gate)
+        {
+            if (!_submissions.ContainsKey(clientRequestId)) _submissionOrder.Enqueue(clientRequestId);
+            _submissions[clientRequestId] = buffer;
+            while (_submissions.Count > MaxSubmissions && _submissionOrder.Count > 0) _submissions.Remove(_submissionOrder.Dequeue());
+        }
+    }
+
+    /// <summary>The request a client_request_id was registered for, and whether it is still running. False when unknown
+    /// or past the trace retention.</summary>
+    public bool TryGetSubmission(string clientRequestId, out string requestId, out bool complete)
+    {
+        lock (_gate)
+        {
+            var now = _clock.GetUtcNow();
+            if (_submissions.TryGetValue(clientRequestId, out var buffer) && !buffer.IsExpired(now))
+            {
+                requestId = buffer.RequestId;
+                complete = buffer.IsComplete;
+                return true;
+            }
+            _submissions.Remove(clientRequestId);
+            requestId = "";
+            complete = false;
+            return false;
+        }
+    }
 
     public Lookup TryGet(string requestId, out TraceBuffer? buffer)
     {

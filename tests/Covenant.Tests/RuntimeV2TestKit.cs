@@ -25,7 +25,18 @@ internal sealed class SettableClock(DateTimeOffset start) : TimeProvider
 /// behaviour (the last one repeats). Records the ChatOptions it saw.</summary>
 internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatClient
 {
-    public enum Mode { Serve, ServeNoUsage, Throw, Hang, StreamThenThrow, ServeHugeUsage, StreamGated }
+    public enum Mode
+    {
+        Serve, ServeNoUsage, Throw, Hang, StreamThenThrow, ServeHugeUsage, StreamGated,
+        /// <summary>Streams text, then ends WITHOUT a terminal update carrying a finish reason (review round 2, B1).</summary>
+        StreamNoFinish,
+        /// <summary>Buffered/streamed: served with finish reason "length" (truncated at the output bound).</summary>
+        ServeLength,
+        /// <summary>Buffered: waits for <see cref="Gate"/> before serving (B7 early request id).</summary>
+        Gated,
+        /// <summary>Streamed: a legitimately COMPLETED stream with no text at all (terminal update only).</summary>
+        StreamEmptyComplete,
+    }
 
     /// <summary>StreamGated: the first chunk is sent, then the stream waits for this gate before finishing.</summary>
     public TaskCompletionSource? Gate { get; set; }
@@ -69,6 +80,9 @@ internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatCl
             case Mode.Hang:
                 await Task.Delay(Timeout.Infinite, cancellationToken);
                 break;
+            case Mode.Gated when Gate is { } g:
+                await g.Task.WaitAsync(cancellationToken);
+                break;
         }
         var usage = mode switch
         {
@@ -76,7 +90,11 @@ internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatCl
             Mode.ServeHugeUsage => new MEAI.UsageDetails { InputTokenCount = 1_000_000, OutputTokenCount = 1_000_000 },
             _ => new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 },
         };
-        return new MEAI.ChatResponse(new MEAI.ChatMessage(MEAI.ChatRole.Assistant, reply)) { Usage = usage };
+        return new MEAI.ChatResponse(new MEAI.ChatMessage(MEAI.ChatRole.Assistant, reply))
+        {
+            Usage = usage,
+            FinishReason = mode == Mode.ServeLength ? MEAI.ChatFinishReason.Length : MEAI.ChatFinishReason.Stop,
+        };
     }
 
     public async IAsyncEnumerable<MEAI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<MEAI.ChatMessage> messages, MEAI.ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
@@ -89,11 +107,25 @@ internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatCl
         await Task.Yield();
         if (mode == Mode.Throw) throw error?.Invoke() ?? new HttpRequestException("stub failure");
         if (mode == Mode.Hang) await Task.Delay(Timeout.Infinite, cancellationToken);
+        if (mode == Mode.StreamEmptyComplete)
+        {
+            yield return new MEAI.ChatResponseUpdate
+            {
+                Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 0 })],
+                FinishReason = MEAI.ChatFinishReason.Stop,
+            };
+            yield break;
+        }
         yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "partial ");
         if (mode == Mode.StreamGated && Gate is { } gate) await gate.Task.WaitAsync(cancellationToken);
         if (mode == Mode.StreamThenThrow) throw error?.Invoke() ?? new HttpRequestException("connection reset mid-stream", null, HttpStatusCode.ServiceUnavailable);
         yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply);
-        yield return new MEAI.ChatResponseUpdate { Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 })] };
+        if (mode == Mode.StreamNoFinish) yield break;   // EOF with no terminal completion (e.g. a swallowed SSE error)
+        yield return new MEAI.ChatResponseUpdate
+        {
+            Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 })],
+            FinishReason = mode == Mode.ServeLength ? MEAI.ChatFinishReason.Length : MEAI.ChatFinishReason.Stop,
+        };
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;

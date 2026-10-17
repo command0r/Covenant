@@ -78,7 +78,13 @@ public sealed record AuditEntry(
     IReadOnlyList<AuditAttempt>? Attempts = null,
     IReadOnlyList<AuditTraceStep>? Trace = null,
     decimal? ReservedUsd = null,
-    decimal? SettledUsd = null);
+    decimal? SettledUsd = null,
+    // ---- v3 continued (review round 2, additive, nullable): requested vs effective output bound, emitted partial
+    // output of a failed stream, and the connection that actually served (primary, fallback or the cached entry's).
+    int? RequestedMaxOutputTokens = null,
+    int? EffectiveMaxOutputTokens = null,
+    int? PartialOutputChars = null,
+    string? ServedConnectionId = null);
 
 /// <summary>One provider attempt in an audit v3 record (ADR-0013): which connection/model was called, how it ended,
 /// the bounded error class, its measured duration and its charge (ADR-0014). Outcome ∈ served | failed | cancelled.
@@ -94,7 +100,9 @@ public sealed record AuditAttempt(
     decimal? CostUsd,
     string? CostBasis,
     decimal? ReservedUsd = null,
-    bool? Overrun = null);
+    bool? Overrun = null,
+    int? EffectiveMaxOutputTokens = null,
+    bool? Truncated = null);
 
 /// <summary>Compact persisted trace step (ADR-0013): stage, terminal state and measured duration. Provider steps are
 /// per attempt (AttemptId). No content, no credentials, no provider free text — ReasonCode is a bounded code.</summary>
