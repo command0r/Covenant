@@ -6,9 +6,10 @@ using Xunit;
 
 namespace Covenant.Tests;
 
-/// <summary>ADR-0011 repository guarantees: monotonic versions, write ordering (version file before pointer),
-/// crash recovery (orphan version ignored + reported; corrupt pointer / hash mismatch refuse to start),
-/// rollback as a NEW version, and single-writer optimistic concurrency.</summary>
+/// <summary>ADR-0011 repository guarantees: monotonic versions, write ordering (compile → version file → pointer →
+/// activation journal), crash recovery (orphan version excluded from history + reported + never reused; journal
+/// repaired when the pointer moved but the journal line is missing; corrupt pointer / hash mismatch / corrupt journal
+/// refuse to start), rollback as a NEW version, redacted bounded summaries, single-writer optimistic concurrency.</summary>
 public sealed class ConfigRepositoryTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), $"covenant-cfgrepo-{Guid.NewGuid():n}");
@@ -92,9 +93,117 @@ public sealed class ConfigRepositoryTests : IDisposable
         Assert.Equal(1, open.Active!.Version);
         Assert.Contains(open.Warnings, w => w.Contains("v2 was written but never activated", StringComparison.Ordinal));
 
+        Assert.Null(reopened.GetVersion(2));                        // an orphan is not history: GET n / rollback see nothing
+        Assert.False(reopened.IsActivated(2));
+
         var next = await Apply(reopened, V2.Hybrid(), 1);
         Assert.Equal(3, next.Applied!.Version);                     // monotonic: v2 is never overwritten or reused
-        Assert.DoesNotContain(2, reopened.ListVersions(10).Select(c => c.Version));
+        // Review fix 10: history comes from the activation journal only — the orphan never appears.
+        Assert.Equal(new[] { 3, 1 }, reopened.ListVersions(10).Select(c => c.Version).ToList());
+        Assert.Equal(new[] { 1, 3 }, reopened.Journal().Select(j => j.Version).ToList());
+        Assert.Null(reopened.GetVersion(2));
+
+        // Still true after another restart (journal is durable), and the next number stays above the orphan.
+        var again = new ConfigRepository(_dir);
+        var reopen2 = again.Open();
+        Assert.Empty(reopen2.Errors);
+        Assert.Equal(3, reopen2.Active!.Version);
+        Assert.Equal(new[] { 3, 1 }, again.ListVersions(10).Select(c => c.Version).ToList());
+        Assert.Contains(reopen2.Warnings, w => w.Contains("v2 was written but never activated", StringComparison.Ordinal));
+        Assert.Equal(4, (await Apply(again, V2.Hybrid(), 3)).Applied!.Version);
+    }
+
+    /// <summary>Review fix 10: crash AFTER the pointer rename but BEFORE the journal append. The pointer is the
+    /// activation point, so v2 is active; boot appends a <c>recovered: true</c> journal line and history shows v2.</summary>
+    [Fact]
+    public async Task Crash_between_pointer_and_journal_is_recovered_at_boot()
+    {
+        var faulty = new CrashingFileSystem { FailOnJournalAppend = true };
+        var repo = Bootstrapped(faulty);
+        faulty.Armed = true;
+        var activated = new List<int>();
+        var r = await Apply(repo, V2.Hybrid(), 1, activated: activated);
+        Assert.Equal(ApplyStatus.Applied, r.Status);                // disk says v2 is active: the process honours it
+        Assert.Equal(new[] { 2 }, activated);
+        Assert.Contains(r.Notes, n => n.Contains("journal", StringComparison.Ordinal));
+        Assert.DoesNotContain("\"version\":2", File.ReadAllText(Path.Combine(_dir, ConfigRepository.JournalFile)), StringComparison.Ordinal);
+
+        var reopened = new ConfigRepository(_dir);
+        var open = reopened.Open();
+        Assert.Empty(open.Errors);
+        Assert.Equal(2, open.Active!.Version);
+        Assert.Contains(open.Warnings, w => w.Contains("recorded as recovered", StringComparison.Ordinal));
+        var line = Assert.Single(reopened.Journal(), j => j.Version == 2);
+        Assert.True(line.Recovered);
+        Assert.Equal(new[] { 2, 1 }, reopened.ListVersions(10).Select(c => c.Version).ToList());
+        Assert.NotNull(reopened.GetVersion(2));
+        // Durable: a third boot does not append a second recovered line.
+        var third = new ConfigRepository(_dir);
+        third.Open();
+        Assert.Single(third.Journal(), j => j.Version == 2);
+    }
+
+    /// <summary>Review fix 10: the snapshot (provider clients included) is compiled BEFORE any durable write — a
+    /// compile failure (client_unbuildable) is Invalid and writes nothing: no version file, no pointer, no journal line.</summary>
+    [Fact]
+    public async Task Compile_failure_writes_nothing_durable()
+    {
+        var repo = Bootstrapped();
+        var pointerBefore = File.ReadAllBytes(Path.Combine(_dir, ConfigRepository.PointerFile));
+        var journalBefore = File.ReadAllBytes(Path.Combine(_dir, ConfigRepository.JournalFile));
+        var activated = new List<int>();
+        var result = await repo.ApplyAsync(V2.Hybrid(), 1, "console", "edit", null, Ok,
+            new Func<CovenantConfig, int>(_ => throw new ConfigCompileException([new ConfigIssue("connections[0]", "client_unbuildable", "boom")])),
+            (c, v) => activated.Add(v));
+        Assert.Equal(ApplyStatus.Invalid, result.Status);
+        Assert.Contains(result.Validation!.Errors, e => e.Code == "client_unbuildable");
+        Assert.Empty(activated);
+        Assert.Equal(new[] { 1 }, repo.ExistingVersions());
+        Assert.False(File.Exists(repo.VersionPath(2) + ".tmp"));
+        Assert.Equal(pointerBefore, File.ReadAllBytes(Path.Combine(_dir, ConfigRepository.PointerFile)));
+        Assert.Equal(journalBefore, File.ReadAllBytes(Path.Combine(_dir, ConfigRepository.JournalFile)));
+        Assert.Equal(1, repo.Active!.Version);
+    }
+
+    [Fact]
+    public void Journal_corruption_before_the_last_line_refuses_to_start_but_a_torn_last_line_is_tolerated()
+    {
+        Bootstrapped();
+        var journal = Path.Combine(_dir, ConfigRepository.JournalFile);
+        File.AppendAllText(journal, "{\"version\":7,\"ut");                 // torn append (crash mid-line)
+        var torn = new ConfigRepository(_dir).Open();
+        Assert.Empty(torn.Errors);
+        Assert.Contains(torn.Warnings, w => w.Contains("torn", StringComparison.Ordinal));
+
+        File.WriteAllText(journal, "garbage\n" + File.ReadAllText(journal));
+        var corrupt = new ConfigRepository(_dir).Open();
+        Assert.Null(corrupt.Active);
+        Assert.Contains(corrupt.Errors, e => e.Contains("corrupt", StringComparison.Ordinal));
+    }
+
+    /// <summary>Review fix 13: config-write history is bounded (≤ 500 chars) and redacted (never a secret value).</summary>
+    [Fact]
+    public async Task Change_summaries_are_redacted_and_bounded()
+    {
+        const string secret = "sk-live-THIS-IS-A-SECRET-0123456789";
+        var repo = new ConfigRepository(_dir, redact: SecretRedaction.ForValues([secret, "vault-value-42"]));
+        Assert.True(repo.Open().IsEmpty);
+        repo.Bootstrap(V2.Hybrid());
+        var summary = $"rotated key {secret} and vault-value-42 and Bearer abcdefghijklmnopqrstuvwx " + string.Join(" ", Enumerable.Repeat("word", 500));
+        var r = await repo.ApplyAsync(V2.Hybrid(), 1, "console", summary, null, Ok, c => c.Version, (_, _) => { });
+        var stored = r.Applied!.ChangeSummary!;
+        Assert.True(stored.Length <= ConfigRepository.MaxSummaryChars, $"{stored.Length} chars");
+        Assert.DoesNotContain(secret, stored, StringComparison.Ordinal);
+        Assert.DoesNotContain("vault-value-42", stored, StringComparison.Ordinal);
+        Assert.DoesNotContain("abcdefghijklmnopqrstuvwx", stored, StringComparison.Ordinal);
+        Assert.Contains(SecretRedaction.Marker, stored, StringComparison.Ordinal);
+        foreach (var file in Directory.GetFiles(_dir, "*", SearchOption.AllDirectories))
+            Assert.DoesNotContain(secret, File.ReadAllText(file), StringComparison.Ordinal);
+        Assert.True(stored.Length == ConfigRepository.MaxSummaryChars && stored.EndsWith('…'));      // truncated, marked
+        Assert.True(repo.Journal().Last().Summary!.Length <= ConfigRepository.MaxSummaryChars);
+        var words = string.Join(" ", Enumerable.Repeat("word", 300));                                // 1 499 chars
+        Assert.Equal(500, ConfigRepository.BoundSummary(words)!.Length);
+        Assert.Equal(words[..499], ConfigRepository.BoundSummary(words[..499]));                     // ≤ 500: unchanged
     }
 
     [Fact]
@@ -108,6 +217,7 @@ public sealed class ConfigRepositoryTests : IDisposable
         Assert.Empty(activated);                                    // no in-memory swap / audit event for an unpersisted version
         Assert.Equal(1, repo.Active!.Version);
         Assert.Equal(new[] { "v000002.json.tmp→v000002.json", "active.json.tmp→active.json" }, faulty.Moves.TakeLast(2).ToList());
+        Assert.DoesNotContain(faulty.Appends, a => a.Contains("\"version\":2", StringComparison.Ordinal));   // no journal line either
     }
 
     [Fact]
@@ -195,7 +305,9 @@ public sealed class ConfigRepositoryTests : IDisposable
     {
         public bool Armed { get; set; }
         public bool FailOnPointerRename { get; init; }
+        public bool FailOnJournalAppend { get; init; }
         public List<string> Moves { get; } = [];
+        public List<string> Appends { get; } = [];
         private readonly PhysicalConfigFileSystem _inner = PhysicalConfigFileSystem.Instance;
 
         public bool FileExists(string path) => _inner.FileExists(path);
@@ -204,6 +316,13 @@ public sealed class ConfigRepositoryTests : IDisposable
         public void CreateDirectory(string path) => _inner.CreateDirectory(path);
         public IEnumerable<string> EnumerateFiles(string directory, string pattern) => _inner.EnumerateFiles(directory, pattern);
 
+        public void AppendDurable(string path, byte[] content)
+        {
+            if (Armed && FailOnJournalAppend) throw new IOException("simulated crash before the journal append");
+            Appends.Add(Encoding.UTF8.GetString(content));
+            _inner.AppendDurable(path, content);
+        }
+
         public void Move(string source, string destination, bool overwrite)
         {
             Moves.Add($"{Path.GetFileName(source)}→{Path.GetFileName(destination)}");
@@ -211,5 +330,39 @@ public sealed class ConfigRepositoryTests : IDisposable
                 throw new IOException("simulated crash before the pointer rename");
             _inner.Move(source, destination, overwrite);
         }
+    }
+
+    // Reviewer reproducer (docs/verification-2026-10-16/v2/torn-tail-regression.cs.txt): before the fix, the torn
+    // tail was ignored on read but the next append was concatenated onto it, corrupting history at the 2nd restart.
+    [Fact]
+    public async Task Torn_journal_tail_is_quarantined_and_repaired_so_later_activations_and_restarts_stay_clean()
+    {
+        _ = Bootstrapped();
+        var journalPath = Path.Combine(_dir, ConfigRepository.JournalFile);
+        File.AppendAllText(journalPath, "{\"version\":7");                    // interrupted append, no newline
+
+        var reopened = new ConfigRepository(_dir);
+        Assert.Empty(reopened.Open().Errors);
+        Assert.Single(Directory.GetFiles(_dir, ConfigRepository.JournalFile + ".torn-*"));   // evidence preserved
+        Assert.EndsWith("\n", File.ReadAllText(journalPath));                 // repaired before any append
+        await Apply(reopened, V2.Hybrid(), 1);
+
+        var second = new ConfigRepository(_dir);
+        Assert.Empty(second.Open().Errors);
+        await Apply(second, V2.Hybrid(), 2);
+
+        var third = new ConfigRepository(_dir);
+        Assert.Empty(third.Open().Errors);
+        Assert.Equal(new[] { 3, 2, 1 }, third.Journal().Select(j => j.Version).Reverse().ToArray());
+        foreach (var line in File.ReadAllLines(journalPath).Where(l => l.Length > 0))
+            Assert.StartsWith("{", line);                                     // one JSON object per line, never concatenated
+    }
+
+    [Fact]
+    public void Complete_but_corrupt_last_journal_line_is_not_treated_as_torn_and_refuses_to_start()
+    {
+        Bootstrapped();
+        File.AppendAllText(Path.Combine(_dir, ConfigRepository.JournalFile), "not json\n");   // newline-terminated ⇒ corruption
+        Assert.NotEmpty(new ConfigRepository(_dir).Open().Errors);
     }
 }

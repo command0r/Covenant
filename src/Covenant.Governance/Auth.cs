@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Covenant.Core;
 
 namespace Covenant.Governance;
@@ -7,7 +9,26 @@ namespace Covenant.Governance;
 /// <param name="ApplicationId">Application this key binds to (Auth:Keys:N:Application; default = Principal, ADR-0012).</param>
 public sealed record ApiKeyRecord(string Key, string Principal, string Team, string? ApplicationId = null)
 {
-    public string Application => ApplicationId ?? Principal;
+    /// <summary>The configuration application id this key binds to (normalized exactly like the legacy import).</summary>
+    public string Application => ApplicationIds.FromKey(ApplicationId ?? Principal);
+}
+
+/// <summary>Key → application id (ADR-0012). A valid configuration id is used verbatim; anything else (e.g. an
+/// e-mail principal) maps deterministically to "&lt;sanitized&gt;-&lt;8 hex of SHA-256&gt;" (≤64 chars), so the legacy
+/// import can create one application for EVERY key and the auth stage finds it — no key is left unbound.</summary>
+public static class ApplicationIds
+{
+    public static string FromKey(string raw)
+    {
+        if (ConfigValidator.IsValidId(raw)) return raw;
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw ?? ""))).ToLowerInvariant()[..8];
+        var sb = new StringBuilder();
+        foreach (var ch in raw ?? "")
+            sb.Append(char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.' ? ch : '-');
+        var clean = sb.ToString().Trim('-');
+        if (clean.Length == 0) return "app-" + hash;
+        return (clean.Length > 55 ? clean[..55] : clean) + "-" + hash;
+    }
 }
 
 public sealed class AuthConfig
@@ -40,7 +61,7 @@ public sealed class AuthStage : IPipelineStage
         // Console entry point (ADR-0012): identity was resolved server-side by the Host from an authorized
         // admin session; no application key exists in the browser. Still enforced here: application enabled,
         // console testing allowed, profile granted — governed, audited refusals.
-        if (ctx.Request.PreAuthenticated is { } pre)
+        if (ctx.PreAuthenticated is { } pre)
         {
             if (ctx.Configuration is not { } cfg)
             {
@@ -69,14 +90,17 @@ public sealed class AuthStage : IPipelineStage
                 if (ctx.Configuration is { } cfg)
                 {
                     // Key → application (ADR-0012). /v1 key authentication itself is unchanged (team from the key);
-                    // the application adds enabled state and profile grants. A key whose application is absent
-                    // from configuration behaves as before: legacy-internal profile.
+                    // the application adds enabled state and profile grants. Fail-closed: a key whose application
+                    // is missing from the active configuration (removed, renamed, never added) is refused — there is
+                    // no implicit legacy fallback once a configuration governs.
                     var app = cfg.FindApplication(record.Application);
-                    if (app is not null)
+                    if (app is null)
                     {
-                        ctx.ApplicationId = app.Id;
-                        if (!app.Enabled) { ctx.Deny($"application '{app.Id}' disabled"); return; }
+                        ctx.Deny($"application not configured: '{Evidence.Bounded(record.Application)}' is not in configuration v{cfg.Version}");
+                        return;
                     }
+                    ctx.ApplicationId = app.Id;
+                    if (!app.Enabled) { ctx.Deny($"application '{app.Id}' disabled"); return; }
                     if (!ResolveProfile(ctx, cfg, app)) return;
                 }
                 await next(ctx, ct);

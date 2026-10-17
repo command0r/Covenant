@@ -70,6 +70,7 @@ public sealed class LegacyImportTests
         var (legacyPolicy, threshold) = LegacyPolicy(cfg);
         var legacy = new PolicyEngine(legacyPolicy, new RoutingOptions { ComplexityTokenThreshold = threshold });
         var snapshot = new RuntimeSnapshot(Import(cfg));
+        bool localConfigured = StartupValidation.Trimmed(cfg["Local:ModelId"]) is { Length: > 0 };
 
         var prompts = new[] { "hi", new string('x', 99), new string('x', 101), new string('x', 1601), new string('x', 1605) };
         var models = new string?[] { null, "gpt-4o-mini", "GPT-4O", "gpt-4o", "claude-haiku-4-5", "qwen3:8b", "cheap-1", "strong-1",
@@ -84,6 +85,19 @@ public sealed class LegacyImportTests
                     var before = legacy.Evaluate(ctx);
                     var after = PolicyEngineV2.Evaluate(snapshot, cls, PolicyEngineV2.LegacyInternalProfile, model, ctx.Request.Messages);
                     var label = $"{shape} {cls} len={prompt.Length} model={model ?? "(none)"}";
+                    if (!localConfigured && cls >= DataClassification.Pii)
+                    {
+                        // Review fix 4 (deliberately STRICTER than pre-v2): without Local:* the PII/PHI route points
+                        // at the explicitly DISABLED placeholder, so it is refused at POLICY. Pre-v2 "allowed" it to
+                        // the placeholder and refused at the provider stage — never served either way.
+                        if (after.Effect != PolicyEffect.Deny) throw new Xunit.Sdk.XunitException($"{label}: expected a policy refusal, got {after.Effect}");
+                        if (before.Effect == PolicyEffect.Allow)
+                            Assert.Contains("connection 'local' is disabled (not configured)", after.Reason, StringComparison.Ordinal);
+                        else
+                            Assert.Equal(before.Reason, after.Reason);
+                        compared++;
+                        continue;
+                    }
                     if (before.Effect != after.Effect) throw new Xunit.Sdk.XunitException($"{label}: effect {before.Effect} → {after.Effect} ({after.Reason})");
                     if (before.Route != after.Route) throw new Xunit.Sdk.XunitException($"{label}: route {before.Route} → {after.Route}");
                     if (before.Effect == PolicyEffect.Deny) Assert.Equal(before.Reason, after.Reason);
@@ -102,9 +116,10 @@ public sealed class LegacyImportTests
         {
             EgressAllowList = StartupEgress.BuildAllowList(cfg),
             SecretAvailable = StartupEgress.SecretAvailability(cfg),
-            LegacyCompat = v1.Mode == ProviderMode.LegacyCloud,
+            LocalEndpoints = StartupEgress.LocalEndpoints(cfg),
         });
         Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Path} {e.Code} {e.Message}")));
+        Assert.DoesNotContain(result.Warnings, w => w.Code == "unknown_connection");   // every target names a real connection
     }
 
     [Fact]
@@ -133,12 +148,30 @@ public sealed class LegacyImportTests
         var cloud = Import(Shape("cloud"));
         Assert.Equal(ProviderMode.LegacyCloud, cloud.Mode);
         Assert.Equal("legacy-import", cloud.Origin);
-        Assert.Equal(new[] { "openai" }, cloud.Connections.Select(c => c.Id).ToArray());
+        Assert.Equal(new[] { "openai", "local" }, cloud.Connections.Select(c => c.Id).ToArray());
         var sensitive = cloud.Policies.Single(p => p.Id == "legacy-sensitive");
         Assert.Equal(new[] { DataClassification.Pii, DataClassification.Phi }, sensitive.Classifications);
         Assert.Equal("local", sensitive.Targets.Single().ConnectionId);
         Assert.Equal(LegacyImport.UnconfiguredLocalModel, sensitive.Targets.Single().ModelId);
         Assert.Equal(new ModelRef("openai", "gpt-4o"), cloud.SavingsBaseline);
+
+        // Review fix 4: the explicitly DISABLED placeholder, and PII/PHI refused at policy because of it.
+        var placeholder = cloud.Connections.Single(c => c.Id == "local");
+        Assert.False(placeholder.Enabled);
+        Assert.Null(placeholder.Endpoint);
+        Assert.Equal(Boundary.Local, placeholder.Boundary);
+        Assert.Equal(ProviderKind.OpenAiCompatible, placeholder.Kind);
+        Assert.Equal("Local model — not configured (import placeholder)", placeholder.DisplayName);
+        var pm = Assert.Single(placeholder.Models);
+        Assert.Equal(LegacyImport.UnconfiguredLocalModel, pm.ModelId);
+        Assert.Equal("zero-marginal-local", pm.Price!.Basis);
+        var refused = PolicyEngineV2.Evaluate(new RuntimeSnapshot(cloud), DataClassification.Pii, PolicyEngineV2.LegacyInternalProfile, null,
+            [new ChatMessage(ChatRole.User, "x")]);
+        Assert.Equal(PolicyEffect.Deny, refused.Effect);
+        Assert.Contains("no eligible destination", refused.Reason, StringComparison.Ordinal);
+        Assert.Contains("connection 'local' is disabled (not configured)", refused.Reason, StringComparison.Ordinal);
+        Assert.Equal(new[] { "openai", "local" }, Import(Shape("cloud+anthropic")).Connections.Where(c => c.Id != "anthropic").Select(c => c.Id).ToArray());
+        Assert.True(Import(Shape("cloud+local")).Connections.Single(c => c.Id == "local").Enabled);
 
         var localOnly = Import(Shape("local-only"));
         Assert.Equal(ProviderMode.LocalOnly, localOnly.Mode);
@@ -156,11 +189,18 @@ public sealed class LegacyImportTests
         var cfg = Config(("OpenAI:ApiKey", "sk"), ("Budget:GlobalCapUsd", "7.5"), ("Budget:TeamCapsUsd:payments", "2"),
             ("Auth:Keys:0:Key", "k0"), ("Auth:Keys:0:Principal", "svc-a"), ("Auth:Keys:0:Team", "payments"),
             ("Auth:Keys:1:Key", "k1"), ("Auth:Keys:1:Principal", "svc-b"), ("Auth:Keys:1:Team", "risk"), ("Auth:Keys:1:Application", "risk-app"),
-            ("Auth:Keys:2:Key", "k2"), ("Auth:Keys:2:Principal", "alice@example.com"), ("Auth:Keys:2:Team", "ops"),   // not a valid id → unbound
+            ("Auth:Keys:2:Key", "k2"), ("Auth:Keys:2:Principal", "alice@example.com"), ("Auth:Keys:2:Team", "ops"),   // not a valid id → normalized
             ("Cache:TtlSeconds", "30"), ("RateLimit:PerTeamPerMinute", "9"), ("Audit:PromptPreviewChars", "40"));
         var v1 = Import(cfg);
 
-        Assert.Equal(new[] { "svc-a", "risk-app" }, v1.Applications.Select(a => a.Id).ToArray());
+        // Review fix 7: one application per key at v1 — including a principal that is not a valid id (normalized
+        // deterministically, exactly as the auth stage normalizes it), so no key is left unbound.
+        var alice = ApplicationIds.FromKey("alice@example.com");
+        Assert.StartsWith("alice-example.com-", alice, StringComparison.Ordinal);
+        Assert.True(ConfigValidator.IsValidId(alice));
+        Assert.Equal(alice, new ApiKeyRecord("k2", "alice@example.com", "ops").Application);
+        Assert.Equal(new[] { "svc-a", "risk-app", alice }, v1.Applications.Select(a => a.Id).ToArray());
+        Assert.Equal("ops", v1.Applications.Single(a => a.Id == alice).Team);
         Assert.All(v1.Applications, a =>
         {
             Assert.False(a.ConsoleTesting);
@@ -194,7 +234,11 @@ public sealed class LegacyImportTests
         var hybrid = DemoSeeds.Build(DemoSeeds.Hybrid, cfg, DateTimeOffset.UtcNow, errors);
         var local = DemoSeeds.Build(DemoSeeds.LocalOnly, cfg, DateTimeOffset.UtcNow, errors);
         Assert.Empty(errors);
-        var env = new ValidationEnvironment { EgressAllowList = StartupEgress.BuildAllowList(cfg), SecretAvailable = StartupEgress.SecretAvailability(cfg) };
+        var env = new ValidationEnvironment
+        {
+            EgressAllowList = StartupEgress.BuildAllowList(cfg), SecretAvailable = StartupEgress.SecretAvailability(cfg),
+            LocalEndpoints = StartupEgress.LocalEndpoints(cfg),
+        };
         Assert.True(ConfigValidator.Validate(hybrid, env).IsValid);
         Assert.True(ConfigValidator.Validate(local, env).IsValid);
 

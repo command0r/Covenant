@@ -1,6 +1,6 @@
 # Migrating to configuration v2 (ADR-0011)
 
-On first start of a v2 build with no configuration repository (`Config:Path`, default `covenant-config/`):
+On first start of a v2 build with no configuration repository (`Config:Path`, default `<Audit:Path>.config/`):
 
 1. **`Config:Seed=demo-local-only` or `demo-hybrid`** (isolated demo profiles only) ⇒ the seed becomes v1.
 2. **Otherwise the legacy startup keys are imported into v1** (`origin: legacy-import`) and reproduce today's
@@ -10,10 +10,18 @@ On first start of a v2 build with no configuration repository (`Config:Path`, de
    - default (cloud) ⇒ mode `LegacyCloud`: an `openai` connection (secretRef `OpenAI:ApiKey`) with the public
      and strong models; `anthropic` if `Anthropic:ApiKey` is set; `local` if `Local:*` is set. Public/Internal →
      openai cheap model with the existing length heuristic to the strong model (threshold `Routing:ComplexityTokenThreshold`);
-     PII/PHI → local (or refused when local is not configured). Nothing is silently re-routed.
+     PII/PHI → local. Without `Local:*` the import creates an explicitly **disabled** placeholder connection `local`
+     ("Local model — not configured (import placeholder)", model `local-model-not-configured`), so PII/PHI are
+     refused at the policy stage ("no eligible destination: connection 'local' is disabled (not configured)") —
+     never served, never sent to cloud. Disabled connections are never eligible in any mode. Nothing is silently
+     re-routed.
    - `Budget:GlobalCapUsd`/`TeamCapsUsd` ⇒ budgets with period `None` (as before). `Pricing:*` ⇒ model prices.
-   - Each `Auth:Keys` entry ⇒ an application (id = `Application` or `Principal`, team = `Team`, profile
-     `legacy-internal`, console testing off).
+   - Each `Auth:Keys` entry ⇒ an application, once, at v1 (id = `Application` or `Principal`; a value that is not
+     a valid id, e.g. an e-mail principal, is normalized to `<sanitized>-<8 hex of SHA-256>` the same way the auth
+     stage normalizes it; team = `Team`, profile `legacy-internal`, console testing off). After v1, a key whose
+     application is missing from the active configuration is refused (403 at `auth`, "application not configured").
+   - Boundary: a `Local` connection must point at a startup-approved local endpoint (`Local:Endpoint`, or
+     `Providers:LocalEndpoints` = comma-separated `host:port`); otherwise `boundary_not_approved`.
 3. The console's Policies page shows the imported effective rules and a "Move to Hybrid defaults" preview; nothing
    changes until an operator applies it.
 4. Spend: if no ledger exists, the current audit segment's spend is imported once (`legacy-import`) into the current

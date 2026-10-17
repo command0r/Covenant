@@ -46,6 +46,7 @@
                             }
                         </li>
                     }
+                    <li>PII/PHI never route to cloud destinations.</li>
                     <li>A caller may ask for a specific model only if it is in the route set for the request’s classification.</li>
                     <li>Each request starts with the restrictive default for enforcement. That default is never reported as a detection — when a stage before Classify refuses, the record shows “Not evaluated”.</li>
                     @if (s.Routes.Count == 0)

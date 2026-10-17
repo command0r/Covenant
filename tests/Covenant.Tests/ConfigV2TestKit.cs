@@ -43,10 +43,10 @@ internal static class V2
 
     public static PolicyConfigV2 Policy(string id, DataClassification[] classes, PolicyTarget[] targets,
         string[]? profiles = null, bool paused = false, bool enabled = true, RoutingStrategy strategy = RoutingStrategy.Fixed,
-        int threshold = 400, bool allowSensitiveCloud = false) => new()
+        int threshold = 400) => new()
     {
         Id = id, Name = id, Enabled = enabled, Paused = paused, Classifications = classes, Targets = targets,
-        Profiles = profiles ?? [], Strategy = strategy, ThresholdTokens = threshold, AllowSensitiveCloud = allowSensitiveCloud,
+        Profiles = profiles ?? [], Strategy = strategy, ThresholdTokens = threshold,
     };
 
     /// <summary>Hybrid demo defaults (spec §3): Public → cloud with local fallback; Internal/PII/PHI → local.</summary>
@@ -97,18 +97,29 @@ internal static class V2
 
     public static RuntimeSnapshot Snap(CovenantConfig c) => new(c);
 
-    public static ValidationEnvironment Env(bool legacy = false, bool secrets = true) => new()
+    /// <summary>Startup environment of the tests: egress allows the local Ollama and OpenAI; only the Ollama
+    /// authority is a startup-approved LOCAL endpoint (boundary binding, ADR-0011).</summary>
+    public static ValidationEnvironment Env(bool secrets = true, params string[] extraEgress)
     {
-        EgressAllowList = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "127.0.0.1:11434", "api.openai.com:443" },
-        SecretAvailable = _ => secrets,
-        LegacyCompat = legacy,
-    };
+        var egress = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "127.0.0.1:11434", "api.openai.com:443" };
+        foreach (var e in extraEgress) egress.Add(e);
+        return new()
+        {
+            EgressAllowList = egress,
+            SecretAvailable = _ => secrets,
+            LocalEndpoints = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "127.0.0.1:11434" },
+        };
+    }
 
     public static InferenceContext Ctx(string prompt, string? model = null, string? profile = null, string? credential = null,
         PreAuthenticatedIdentity? pre = null)
-        => new(new InferenceRequest("caller", [new ChatMessage(ChatRole.User, prompt)], model,
+    {
+        var ctx = new InferenceContext(new InferenceRequest("caller", [new ChatMessage(ChatRole.User, prompt)], model,
             new AttributionTags("self-declared", "wf", "uc"), Credential: credential, RequestId: $"req_{Guid.NewGuid():n}",
-            RequestedProfile: profile, PreAuthenticated: pre));
+            RequestedProfile: profile));
+        if (pre is not null) ctx.BindConsoleIdentity(pre, "shared-admin-token");   // server-side only (ADR-0012)
+        return ctx;
+    }
 }
 
 /// <summary>Counts calls; optional gate blocks every call until released (snapshot isolation tests).</summary>
@@ -149,7 +160,7 @@ public sealed class HybridSeedFactory : WebApplicationFactory<Program>
     internal readonly GatedChatClient Local = new("local reply");
     internal readonly GatedChatClient Cloud = new("cloud reply");
 
-    public string ConfigDir => AuditPath + ".config";
+    public string ConfigDir => CorrelationTestKit.ConfigDirFor(AuditPath);
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -165,7 +176,7 @@ public sealed class HybridSeedFactory : WebApplicationFactory<Program>
         builder.UseSetting("Auth:Keys:0:Principal", "demo-service");
         builder.UseSetting("Auth:Keys:0:Team", "platform");
         builder.UseSetting("Auth:Keys:0:Application", "demo-app");
-        builder.UseSetting("Audit:Path", AuditPath);
+        CorrelationTestKit.IsolatePaths(builder, AuditPath);
         builder.ConfigureTestServices(services =>
             services.AddSingleton<IChatClientRegistry>(new ChatClientRegistry(new Dictionary<string, MEAI.IChatClient>
             {
@@ -177,8 +188,7 @@ public sealed class HybridSeedFactory : WebApplicationFactory<Program>
     protected override void Dispose(bool disposing)
     {
         base.Dispose(disposing);
-        CorrelationTestKit.DeleteWithSiblings(AuditPath);
-        try { if (Directory.Exists(ConfigDir)) Directory.Delete(ConfigDir, recursive: true); } catch (IOException) { }
+        CorrelationTestKit.DeleteWithSiblings(AuditPath);   // audit file, ledger and the configuration repository
     }
 }
 

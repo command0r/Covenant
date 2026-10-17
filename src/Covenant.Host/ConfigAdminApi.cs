@@ -106,18 +106,36 @@ public static class ConfigAdminApi
                 return Error("invalid_request", "config is required", StatusCodes.Status400BadRequest);
             var active = s.Runtime.Current;
             var validation = s.Validate(candidate);
+            var errors = validation.Errors.ToList();
             var warnings = validation.Warnings.ToList();
             if (body.BaseVersion is { } bv && bv != active.Version)
                 warnings.Add(new ConfigIssue("base_version", "stale_base_version",
                     $"candidate was edited from v{bv}; the active version is v{active.Version} — applying with If-Match \"v{bv}\" will be rejected (412)"));
-            var impact = ImpactAnalyzer.Analyze(active, new RuntimeSnapshot(candidate), s.SecretAvailable);
+            if (validation.IsValid)
+            {
+                // Same compile step as apply (provider clients included, no network I/O): a client that cannot be
+                // built for an enabled, referenced connection is reported here too (client_unbuildable).
+                try
+                {
+                    s.Compile(candidate).Release();
+                }
+                catch (ConfigCompileException ex)
+                {
+                    errors.AddRange(ex.Issues);
+                }
+            }
+            // A structurally broken candidate (null required value / undefined enum) cannot be compiled even for
+            // a preview: report the errors with their paths, no impact — never an exception or a 500.
+            ImpactView? impact = validation.StructurallySound
+                ? ImpactView.From(ImpactAnalyzer.Analyze(active, new RuntimeSnapshot(candidate), s.SecretAvailable))
+                : null;
             return Json(new ConfigValidateResponse
             {
-                Valid = validation.IsValid,
+                Valid = errors.Count == 0,
                 ActiveVersion = active.Version,
-                Errors = ConfigIssueView.From(validation.Errors),
+                Errors = ConfigIssueView.From(errors),
                 Warnings = ConfigIssueView.From(warnings),
-                Impact = ImpactView.From(impact),
+                Impact = impact,
             }, ConfigJsonContext.Default.ConfigValidateResponse);
         });
 
@@ -159,7 +177,8 @@ public static class ConfigAdminApi
         {
             if (!s.Authorized(http)) return Unauthorized();
             http.Response.Headers.CacheControl = "no-store";
-            return n <= s.Runtime.Current.Version && s.Repository.GetVersion(n) is { } c
+            // Journal-only (ADR-0011): an orphan (written, never activated) is 404 exactly like an unknown number.
+            return s.Repository.GetVersion(n) is { } c
                 ? Json(c, ConfigJsonContext.Default.CovenantConfig)
                 : Error("not_found", $"no activated configuration version {n}", StatusCodes.Status404NotFound);
         });
@@ -171,7 +190,8 @@ public static class ConfigAdminApi
             var (body, failure) = await ReadAsync(http, ConfigJsonContext.Default.ConfigRollbackRequest, ct);
             if (failure is not null) return failure;
             var active = s.Runtime.Current.Version;
-            if (body!.TargetVersion < 1 || body.TargetVersion > active || s.Repository.GetVersion(body.TargetVersion) is not { } target)
+            // Only activated versions (journal entries) can be rolled back to; orphans and unknown numbers are 404.
+            if (s.Repository.GetVersion(body!.TargetVersion) is not { } target)
                 return Error("not_found", $"no activated configuration version {body.TargetVersion}", StatusCodes.Status404NotFound, active);
             return await ApplyAsync(http, s, target, body.ExpectedActiveVersion, "rollback",
                 $"rollback to v{body.TargetVersion}", body.TargetVersion, ct);

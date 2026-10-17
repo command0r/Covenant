@@ -121,8 +121,8 @@ public sealed record PolicyConfigV2
     /// <summary>LengthHeuristic only: chars/4 estimate above this takes the LAST target.</summary>
     public int ThresholdTokens { get; init; } = 400;
     public RetrySettings Retry { get; init; } = new();
-    /// <summary>Must be explicitly true for a cloud target to serve PII/PHI. Demo seeds never set it.</summary>
-    public bool AllowSensitiveCloud { get; init; }
+    // No sensitive-cloud escape hatch (ADR-0013): a policy covering PII/PHI that lists a cloud target is a
+    // validation error, and the engine never makes a cloud target eligible for PII/PHI.
     public string? Explanation { get; init; }
 }
 

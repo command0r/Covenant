@@ -7,7 +7,7 @@ namespace Covenant.Governance;
 /// policies at the same specificity are refused (validation rejects that configuration; runtime refuses
 /// rather than choosing an arbitrary winner). No match ⇒ refusal. Paused policy ⇒ refusal. Each target is
 /// then checked for eligibility (route paused, connection known + enabled, model permitted on the connection,
-/// mode boundary, sensitive-cloud rule, priced under a hard budget); the eligible ones in order are the
+/// mode boundary, PII/PHI never cloud, priced under a hard budget); the eligible ones in order are the
 /// candidates [primary, approved fallback…]. Availability (is a client registered/healthy) is NOT
 /// eligibility — the provider stage owns that and fails closed.</summary>
 public static class PolicyEngineV2
@@ -25,31 +25,56 @@ public static class PolicyEngineV2
         return specific.Count > 0 ? specific : matching;
     }
 
-    /// <summary>Why this target is not eligible for this request; null = eligible.</summary>
-    public static string? Ineligibility(IRequestConfiguration cfg, PolicyConfigV2 policy, PolicyTarget target, DataClassification classification)
+    /// <summary>Why this target is not eligible for this request; null = eligible. No mode bypasses these rules:
+    /// an unknown or disabled connection is never eligible (legacy-cloud included), and PII/PHI never reach a
+    /// cloud destination (no escape hatch; validation also refuses such a policy).</summary>
+    public static string? Ineligibility(IRequestConfiguration cfg, PolicyTarget target, DataClassification classification)
     {
         if (target.Paused) return "route paused";
         var connection = cfg.FindConnection(target.ConnectionId);
-        if (connection is null)
-        {
-            // Legacy-cloud compatibility (migration-v2.md): the imported PII/PHI rule names the unconfigured
-            // local placeholder exactly as before v2; it stays a candidate so the provider stage refuses it
-            // fail-closed ("no adapter registered …"), preserving the pre-v2 evidence. Never in other modes.
-            return cfg.Config.Mode == ProviderMode.LegacyCloud ? null : $"unknown connection '{Evidence.Bounded(target.ConnectionId)}'";
-        }
-        if (!connection.Enabled) return $"connection '{connection.Id}' disabled";
+        if (connection is null) return $"unknown connection '{Evidence.Bounded(target.ConnectionId)}'";
+        if (!connection.Enabled)
+            return $"connection '{connection.Id}' is disabled" + (connection.Endpoint is null ? " (not configured)" : "");
         var model = cfg.FindModel(connection.Id, target.ModelId);
         if (model is null) return $"model not permitted on connection '{connection.Id}'";
         if (connection.Boundary == Boundary.Cloud)
         {
             if (cfg.Config.Mode == ProviderMode.LocalOnly) return "cloud destination excluded in local-only mode";
-            if (classification >= DataClassification.Pii && !policy.AllowSensitiveCloud)
+            if (classification >= DataClassification.Pii)
                 return $"{classification} is never routed to a cloud destination";
             if (model.Price is null && cfg.Config.Budgets.Any(b => b.Enforcement == BudgetEnforcement.Hard))
                 return "unpriced paid destination under a hard budget";
         }
         return null;
     }
+
+    /// <summary>Resolves a model override against routes (ADR-0013): "connection/model" names exactly that target;
+    /// a bare model id resolves only when exactly one route carries it. Returns the matching distinct routes (0, 1 or
+    /// several — several means ambiguous and MUST be refused, never "first wins").</summary>
+    public static List<RouteTarget> ResolveOverride(IEnumerable<RouteTarget> routes, string requested)
+    {
+        bool IsComposite(RouteTarget r) => string.Equals($"{r.AdapterKey}/{r.ModelId}", requested, StringComparison.OrdinalIgnoreCase);
+        bool IsBare(RouteTarget r) => string.Equals(r.ModelId, requested, StringComparison.OrdinalIgnoreCase);
+
+        var matches = new List<RouteTarget>();
+        foreach (var r in routes)
+            if ((IsComposite(r) || IsBare(r)) && !matches.Contains(r)) matches.Add(r);
+        if (matches.Count > 1)
+        {
+            // The composite form is exact: it wins when it singles out one route and no OTHER route carries the
+            // same string as a bare model id (that pathological collision stays ambiguous — refused).
+            var composite = matches.Where(IsComposite).ToList();
+            if (composite.Count == 1 && matches.Where(IsBare).All(b => b == composite[0]))
+                return composite;
+        }
+        return matches;
+    }
+
+    /// <summary>Evidence text for an ambiguous bare model id.</summary>
+    public static string AmbiguousOverride(string requested, IEnumerable<RouteTarget> matches)
+        => $"model id '{Evidence.Bounded(requested)}' is ambiguous across connections "
+           + string.Join(", ", matches.Select(m => Evidence.Bounded(m.AdapterKey)).Distinct(StringComparer.Ordinal))
+           + " — use connection/model";
 
     public static PolicyOutcome Evaluate(IRequestConfiguration cfg, InferenceContext ctx)
         => Evaluate(cfg, ctx.Classification, ctx.ProfileId, ctx.Request.RequestedModel, ctx.Request.Messages);
@@ -74,21 +99,22 @@ public static class PolicyEngineV2
         foreach (var t in policy.Targets)
         {
             var route = new RouteTarget(t.ConnectionId, t.ModelId);
-            if (Ineligibility(cfg, policy, t, classification) is { } why) excluded.Add(new ExcludedTarget(route, why));
+            if (Ineligibility(cfg, t, classification) is { } why) excluded.Add(new ExcludedTarget(route, why));
             else eligible.Add((t, route));
         }
 
-        // Model override: must name a target of the matching policy AND be eligible; it pins (no fallback).
+        // Model override: must resolve to exactly ONE eligible target of the matching policy; it pins (no fallback).
+        // An ambiguous bare id (eligible on two connections) is refused — never "first wins".
         if (!string.IsNullOrWhiteSpace(requestedModel))
         {
-            bool Named(RouteTarget r) => string.Equals(r.ModelId, requestedModel, StringComparison.OrdinalIgnoreCase)
-                || string.Equals($"{r.AdapterKey}/{r.ModelId}", requestedModel, StringComparison.OrdinalIgnoreCase);
-            var pinned = eligible.FirstOrDefault(e => Named(e.Route)).Route;
-            if (pinned is not null)
-                return Allowed(cfg, policy, classification, pinned, [pinned], excluded, "allowed");
-            var refusedNamed = excluded.FirstOrDefault(x => Named(x.Target));
-            var reason = refusedNamed is not null
-                ? $"model '{Evidence.Bounded(requestedModel)}' not permitted for classification '{classification}' ({refusedNamed.Reason})"
+            var pinned = ResolveOverride(eligible.Select(e => e.Route), requestedModel);
+            if (pinned.Count > 1)
+                return PolicyOutcome.Deny(AmbiguousOverride(requestedModel, pinned)) with { PolicyId = policy.Id, Excluded = excluded };
+            if (pinned.Count == 1)
+                return Allowed(cfg, policy, classification, pinned[0], [pinned[0]], excluded, "allowed");
+            var refusedNamed = ResolveOverride(excluded.Select(x => x.Target), requestedModel);
+            var reason = refusedNamed.Count > 0
+                ? $"model '{Evidence.Bounded(requestedModel)}' not permitted for classification '{classification}' ({excluded.First(x => x.Target == refusedNamed[0]).Reason})"
                 : $"model '{Evidence.Bounded(requestedModel)}' not permitted for classification '{classification}'";
             return PolicyOutcome.Deny(reason) with { PolicyId = policy.Id, Excluded = excluded };
         }

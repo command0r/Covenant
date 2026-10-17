@@ -25,11 +25,27 @@ public sealed class InferenceContext(InferenceRequest request)
     public int? ConfigVersion { get; set; }
 
     /// <summary>"v1" (application key on /v1) or "console" (admin-authenticated console inference).</summary>
-    public string EntryPoint { get; set; } = "v1";
+    public string EntryPoint { get; private set; } = "v1";
 
     /// <summary>Who operated the console (honest: "shared-admin-token" — one shared credential cannot
     /// attribute an individual). Null on /v1.</summary>
-    public string? OperatorRef { get; set; }
+    public string? OperatorRef { get; private set; }
+
+    /// <summary>Console entry point only (ADR-0012): the application identity the Host resolved server-side after
+    /// admin authentication. Never part of the wire-derived <see cref="InferenceRequest"/>; null on /v1, where a key
+    /// is always required.</summary>
+    public PreAuthenticatedIdentity? PreAuthenticated { get; private set; }
+
+    /// <summary>Server-side only: called by the Host's console endpoint after it authenticated the admin session
+    /// and resolved the application. /v1 ingress never calls it. Once per context.</summary>
+    public void BindConsoleIdentity(PreAuthenticatedIdentity identity, string operatorRef)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        if (PreAuthenticated is not null) throw new InvalidOperationException("console identity is already bound");
+        PreAuthenticated = identity;
+        EntryPoint = "console";
+        OperatorRef = operatorRef;
+    }
 
     /// <summary>Resolved application (written by the auth stage when the configuration knows it).</summary>
     public string? ApplicationId { get; set; }

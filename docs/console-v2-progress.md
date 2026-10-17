@@ -358,3 +358,106 @@ CorrelationAndEvidenceTests, HttpMappingTests, AnthropicIngressTests, WireShapeT
 ConsoleAssetsTests, …) unchanged and green. Manual: start with `Config:Seed=demo-hybrid` on a fresh `Audit:Path`,
 `curl -H "X-Covenant-Admin-Token: …" :PORT/admin/config` → `etag "v1"`; PUT with `If-Match: "v1"` → v2; restart →
 v2 still active; corrupt `active.json` → refuses to start with the diagnostic.
+
+## UI test fixes + round-trip
+
+Reviewer build: Host + UI compiled, `tests/Covenant.Tests` did not (stale `ScenarioPresets.NormalPrompt` /
+`SensitivePrompt` and `LaunchLink.ApplicationKey`). In the current tree `ConsoleLogicTests.cs` already used the v2
+API (`TicketPrompt` / `SensitiveTicketPrompt`, `Credentials(AdminToken)`); every remaining call was re-checked
+against `src/Covenant.Ui/Logic` + `Models`, and the v2 behaviour is now pinned explicitly.
+
+### Files
+
+- `tests/Covenant.Tests/ConsoleLogicTests.cs` — presets: every preset populate-only (operator settings untouched,
+  `StillMatches`), A detects nothing (no signal = no escalation, Public baseline kept), B/C carry the synthetic SSN
+  `078-05-1120` → `Pii` / "US SSN pattern", D fresh nonce + no forced profile + nonce never sensitive. LaunchLink:
+  `#token=` accepted, `#appkey=` ignored, `Credentials` exposes only `AdminToken`, query-string tokens rejected
+  (even beside a fragment), empty / >512-char tokens rejected. Eligible overrides use the wire mode spellings
+  (`hybrid`, `local-only`) and still accept the enum names.
+- `tests/Covenant.Tests/ContractRoundTripTests.cs` (new) — Host `ConfigGetResponse` (ConfigJsonContext) → UI
+  `ConfigEnvelopeDto` (UiJsonContext) → UI `ConfigPutRequestDto` → Host `ConfigPutRequest`; the Host re-serialization
+  of the result is byte-identical to the original, plus field-by-field checks (mode ×3, kinds ×4, boundaries,
+  strategies, periods, enforcement, classifications, `input_per_1m`/`output_per_1m`, target order, paused flags,
+  retry) and the exact wire strings. The UI DTOs were already linked (`src/Covenant.Ui/Models/*.cs`, no Blazor
+  types), so the csproj is unchanged. Alias is `UiModels`, not `Ui`: inside `namespace Covenant.Tests` the simple
+  name `Ui` binds to the `Covenant.Ui` namespace before any compilation-unit alias.
+- `src/Covenant.Ui/Models/ConfigContracts.cs` — removed `PolicyDto.AllowSensitiveCloud` (PII/PHI never route to
+  cloud destinations). The UI DTO spellings already matched the Host vocabulary; no other DTO change.
+- `src/Covenant.Ui/Logic/ShellStatus.cs` — Hybrid badge text: "PII/PHI never route to cloud destinations."
+- `src/Covenant.Ui/Pages/Policies.razor` — "In plain words" list states "PII/PHI never route to cloud destinations."
+
+### Verifier (not executed — no SDK here)
+
+```
+dotnet build Covenant.sln -c Release --disable-build-servers
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers --filter "FullyQualifiedName~ContractRoundTripTests|FullyQualifiedName~SnapshotAndPresetTests|FullyQualifiedName~ConnectionLogicTests|FullyQualifiedName~ComposerRulesTests"
+```
+Dependency: the round-trip asserts the kebab wire spellings and passes only while `PolicyConfigV2` serializes
+`allow_sensitive_cloud` identically on both Host passes (it does: false) or after the backend removes it.
+
+---
+
+## Review fixes round 1 (backend — CODEX-REVIEW.txt + corrected ADR-0011..0014)
+
+**Status: NOT EXECUTED — no .NET SDK in the authoring sandbox.** Written for Nullable + TreatWarningsAsErrors +
+IsAotCompatible (source-gen JSON only; generic `Enum.IsDefined<T>`). SDK option names were verified against the
+referenced assemblies' metadata (OpenAI 2.12.0, System.ClientModel 1.14.0, Anthropic 12.8.0 from the local build
+output), not compiled. Supersedes T02/T03 "Decisions / deviations" #2 (unknown_connection as a warning in
+legacy-cloud) and the "unbound key = legacy behaviour" rule.
+
+| # | Defect | Fix | Regression test(s) |
+|---|---|---|---|
+| 1 | Validation not total (mode=999 accepted, settings=null → 500) | `ConfigValidator.Structural`: every required object/list/element/id non-null (`required`) and every enum (`ProviderMode`, `ProviderKind`, `Boundary`, `RoutingStrategy`, `BudgetPeriod`, `BudgetEnforcement`, `DataClassification` in profiles/policies) defined via `Enum.IsDefined<T>` (`invalid_enum`), with field paths; semantic pass and impact run only when structurally sound (`ConfigValidationResult.StructurallySound`). Kebab converters accept numbers on READ so 999 reaches the validator. validate → 200 `{valid:false, impact:null}`, PUT → 422 | `ConfigValidationTotalityTests.Every_out_of_range_enum_is_an_invalid_enum_error_with_its_path` (8 enums), `…Null_required_objects_lists_and_elements_are_required_errors_never_exceptions` (24 paths), `…Null_ids_and_required_strings_…`, `…Undefined_numeric_enum_and_null_settings_deserialize_…`; Host: `ConfigApiTests.Structurally_broken_candidates_are_200_valid_false_on_validate_and_422_on_put` (settings=null, mode=999, kind=999, …) |
+| 2 | Ambiguous bare model override → FirstOrDefault | `PolicyEngineV2.ResolveOverride`: `connection/model` exact; bare id only if exactly one ELIGIBLE target has it, else deny "model id 'X' is ambiguous across connections a, b — use connection/model". Simulator uses the same engine; cache key and prices are connection-scoped; FinOps' bare-id savings map takes the highest price for an id on several connections (never overstates savings) | `PolicyEngineV2Tests.Ambiguous_bare_model_override_is_refused_and_connection_slash_model_resolves_exactly` |
+| 3 | Snapshot aliased caller lists | `ConfigFreezer.Freeze` (RuntimeSnapshot ctor): every list copied into a new array wrapped in `ReadOnlyCollection<T>`, recursively; refuses null instead of defaulting | `ConfigValidationTotalityTests.Snapshot_is_a_deep_copy_unaffected_by_later_mutation_of_the_callers_lists`, `…Snapshot_refuses_a_structurally_unsound_configuration_instead_of_defaulting` |
+| 4 | Unknown connection eligible in LegacyCloud | Bypass removed (engine + validator; `ValidationEnvironment.LegacyCompat` deleted): unknown → never eligible, `unknown_connection` always an error; disabled → never eligible ("connection 'x' is disabled (not configured)" when it has no endpoint). Legacy import without `Local:*` adds the DISABLED placeholder `local` ("Local model — not configured (import placeholder)", OpenAiCompatible, Local, endpoint null, model `local-model-not-configured`, zero-marginal-local price) | `PolicyEngineV2Tests.Disabled_or_unknown_connection_targets_are_ineligible_in_every_mode`, `LegacyImportTests.Modes_connections_and_the_unconfigured_local_placeholder_are_explicit`, `LegacyImportTests.Imported_configuration_routes_exactly_like_the_pre_v2_policy` (see changed assertions) |
+| 5 | AllowSensitiveCloud escape hatch | Removed from `PolicyConfigV2`, validator, engine, test kit (UI DTO removed by the UI agent). PII/PHI policy with a Cloud target → error `sensitive_cloud_target`; engine excludes cloud for PII/PHI in every mode | `PolicyEngineV2Tests.Sensitive_data_never_reaches_cloud_and_a_sensitive_policy_with_a_cloud_target_is_invalid` |
+| 6 | Boundary self-declared | `Boundary.Local` only if the endpoint authority ∈ `Providers:LocalEndpoints` (comma-separated host:port or URLs) ∪ legacy `Local:Endpoint` authority (`StartupEgress.LocalEndpoints`, `ValidationEnvironment.LocalEndpoints`); `OpenAi`/`Anthropic` always Cloud; else `boundary_not_approved`. Labels only — egress is still the allow-list | `PolicyEngineV2Tests.Local_boundary_requires_a_startup_approved_endpoint` (allow-listed cloud host labelled Local → error) |
+| 7 | Missing application after import fell back to legacy | AuthStage with a configuration: key whose application is absent → 403 Governance at `auth`, "application not configured: …". Legacy import (and seeds) create one application for EVERY key via `ApplicationIds.FromKey` (valid id verbatim, else `<sanitized>-<sha256[..8]>`), the same normalization `ApiKeyRecord.Application` uses | `ConfigApiTests.Key_whose_application_was_removed_is_403_at_auth`, `ClassificationProfileTests.Key_without_a_configured_application_is_refused_at_auth`, `LegacyImportTests.Identities_budgets_and_operational_settings_are_imported` |
+| 8 | Pre-authenticated identity settable via /v1 | Removed from `InferenceRequest` (the wire-derived record); now `InferenceContext.PreAuthenticated` with a private setter, bound only by `BindConsoleIdentity(identity, operatorRef)` (also sets EntryPoint/OperatorRef, now private-set). /v1 handlers never call it | `PublicIngressIdentityTests.Pre_authenticated_identity_is_not_part_of_any_wire_derived_request_type`, `PublicIngressIdentityTests.V1_ignores_every_attempt_to_claim_a_console_identity_and_requires_a_key` (both dialects; admin token + spoof headers + body fields → 401, audit EntryPoint v1) |
+| 9 | Paused policy fall-through | Already correct (Match returns the most specific tier, paused ⇒ deny); now pinned | `PolicyEngineV2Tests.Paused_specific_policy_never_falls_through_to_a_less_specific_policy` |
+| 10 | Repository lineage (orphan in history) | `activations.jsonl` journal (`ActivationRecord`: version, base, rolled_back_from, utc, origin, summary, recovered), appended + fsync after the pointer rename (`IConfigFileSystem.AppendDurable`); boot appends `recovered: true` when the active version is missing; torn last line tolerated, corrupt earlier line refuses start. History / `GET versions/{n}` / rollback read the journal only (orphan → 404); next = max(files, journal, active)+1. Compile (provider clients) happens in `prepare` before any write, `ConfigCompileException` ⇒ Invalid, nothing written; Program compiles v1 before `Bootstrap` and refuses to start on compile failure | `ConfigRepositoryTests.Crash_between_version_file_and_pointer_keeps_the_old_version_and_reports_the_orphan` (repaired: ListVersions = [3,1], survives restart, next = 4), `…Crash_between_pointer_and_journal_is_recovered_at_boot`, `…Compile_failure_writes_nothing_durable`, `…Journal_corruption_before_the_last_line_refuses_to_start_but_a_torn_last_line_is_tolerated`; Host: `ConfigApiTests.Orphan_version_is_404_refused_for_rollback_absent_from_history_and_never_reused` |
+| 11 | SDK transports/retries/timeouts default | Per connection: `SocketsHttpHandler { AllowAutoRedirect = false, ConnectTimeout ≤ 30 s }`, `HttpClient.Timeout = Infinite`; OpenAI/compatible/Ollama: `OpenAIClientOptions { Transport = new HttpClientPipelineTransport(http), RetryPolicy = new ClientRetryPolicy(0), NetworkTimeout = timeout_seconds }`; Anthropic: `new AnthropicClient { ApiKey, BaseUrl, HttpClient = http, MaxRetries = 0, Timeout = timeout_seconds }` (all init properties exist in 12.8.0 — no limitation to document). HttpClients are owned and disposed by the `ProviderClientSet`. Enabled connection referenced by an enabled policy without a client ⇒ `client_unbuildable` (validate endpoint, apply → 422, boot refuses) | `ProviderClientConstructionTests` (real SDKs against loopback sockets: 503 → exactly one request; 302/307 → redirect target never contacted; 1 s timeout enforced; `Unbuildable_referenced_connection_is_a_validation_error_not_a_silent_skip`) |
+| 12 | Enum spelling contract | Documented in `ConfigContracts.cs` and `docs/ui-api-contract.md` v2 "Wire spellings": mode/strategy/period/enforcement kebab, kind/boundary/classification C# names, `input_per_1m`/`output_per_1m` | `ConfigValidationTotalityTests.Wire_spellings_are_the_documented_contract` (+ the UI agent's `ContractRoundTripTests`) |
+| 13 | Unbounded/unredacted summaries | `ConfigRepository.Bound`: value redaction (`StartupEgress.Redactor`: OpenAI/Anthropic/Local keys, `Secrets:*`, `Auth:Keys` values, `Admin:Token`) + pattern redaction (`sk-…`, `Bearer …`, 40+ char token runs) → `[redacted]`, control chars stripped, ≤ 500 chars (499 + "…"); same text in version file, journal and `config.activated` audit reason | `ConfigRepositoryTests.Change_summaries_are_redacted_and_bounded`, `ConfigApiTests.Change_summary_is_redacted_and_bounded_everywhere_it_is_recorded` |
+| 14 | Test isolation | `CorrelationTestKit.IsolatePaths(builder, auditPath)` sets `Audit:Path`, `Config:Path = <audit>.config`, `Budget:LedgerPath = <audit>.ledger.jsonl` in EVERY WebApplicationFactory (HybridSeedFactory, Correlation×2, LocalOnly, ServedPath, ConsoleAssets, HttpMapping, AnthropicIngress, WireShape.Ingress, ProviderProbe); `DeleteWithSiblings` now also removes the derived config directory. No test relies on a shared /tmp default | all host suites |
+
+### Existing tests changed to the stricter behaviour (intent kept: refused, no provider call, no cloud call)
+
+- `CorrelationAndEvidenceTests.Missing_local_adapter_403_selected_but_never_attempted` → renamed
+  `Missing_local_model_403_refused_at_policy_never_selected_or_attempted`: `StoppedAtStage` `provider` → `policy`;
+  `SelectedModel` `local-model-not-configured` → null; reason now contains "connection 'local' is disabled (not
+  configured)"; added: provider call count unchanged.
+- `LegacyImportTests.Imported_configuration_routes_exactly_like_the_pre_v2_policy`: for shapes without `Local:*`,
+  PII/PHI now must be a policy Deny (pre-v2 "allowed" the placeholder then refused at provider); where pre-v2 already
+  denied, the reason is still identical. `Modes_connections_…`: cloud import now has connections `[openai, local]`
+  (placeholder). `Imported_configuration_validates_…` uses `LocalEndpoints`, asserts no `unknown_connection`.
+- `ClassificationProfileTests.Key_without_a_configured_application_keeps_legacy_behaviour` → renamed
+  `…_is_refused_at_auth` (403 auth, audited, no classify, no provider).
+- `PolicyEngineV2Tests`: `Sensitive_data_never_reaches_cloud_without_an_explicit_acknowledgement` → no acknowledgement
+  path exists; `Disabled_or_unknown_connection_targets_are_ineligible_outside_legacy_cloud` → `…_in_every_mode`.
+- `LegacyImportTests.Identities_…`: the `alice@example.com` key is now bound to `alice-example.com-<hash>` (was
+  unbound). `PipelineSliceTests` / `TelemetryTests` keep "no adapter registered" — they run the pure pipeline with
+  the legacy engine (no configuration), which is unchanged.
+
+### Notes / residual risks
+
+- Repositories written by the previous build have no `activations.jsonl`: at first boot only the active version is
+  recovered into the journal; older version files then show as orphans (not history). Pre-release only.
+- A previously persisted legacy-cloud v1 without the placeholder (unknown `local` target) no longer validates ⇒ boot
+  refuses; delete the test/demo repository (it is beside the audit log) to re-import.
+- `/v1/models` still lists the placeholder model id for an imported cloud configuration (unchanged listing rule).
+- Highest compile risks: local functions `Defined<T>`/`NonNullList<T>` in `ConfigValidator.Structural`; Anthropic
+  object initializer (`HttpClient`, `MaxRetries`, `Timeout` are init-only); `ClientRetryPolicy(0)`; the
+  `GeneratedRegex` in `SecretRedaction`.
+
+### Verifier commands (not executed)
+
+```
+dotnet build Covenant.sln -c Release --disable-build-servers
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers --filter "FullyQualifiedName~ConfigValidationTotalityTests|FullyQualifiedName~ProviderClientConstructionTests|FullyQualifiedName~ConfigRepositoryTests|FullyQualifiedName~ConfigApiTests|FullyQualifiedName~PublicIngressIdentityTests|FullyQualifiedName~PolicyEngineV2Tests|FullyQualifiedName~LegacyImportTests|FullyQualifiedName~ClassificationProfileTests|FullyQualifiedName~SnapshotIsolationTests|FullyQualifiedName~SimulatorTests|FullyQualifiedName~CorrelationAndEvidenceTests"
+dotnet test tests/Covenant.Tests -c Release --disable-build-servers     # full suite
+```
+Manual: `POST /admin/config/validate` with `"settings": null` → 200 `valid:false` path `settings`; `"mode": 999` →
+`invalid_enum` at `mode`; same bodies via PUT → 422; drop a fake `versions/v000002.json` into the config dir →
+`GET /admin/config/versions/2` 404, next apply becomes v3.

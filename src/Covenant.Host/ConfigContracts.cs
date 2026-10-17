@@ -6,9 +6,18 @@ using Covenant.Governance;
 namespace Covenant.Host;
 
 // Configuration persistence + admin API payloads (ADR-0011, docs/ui-api-contract.md v2 "Configuration").
-// snake_case property names; enums as their C# names via JsonStringEnumConverter<T> (one per enum, AOT-safe).
-// Bodies are (de)serialized explicitly with ConfigJsonContext.Default.* — never through the web-default options —
-// so the wire names are exactly the snake_case names below.
+// snake_case property names. Enum spellings are a STABLE CONTRACT (docs/ui-api-contract.md v2 "Wire spellings"):
+//   mode        ProviderMode       "local-only" | "hybrid" | "legacy-cloud"          (kebab-case)
+//   strategy    RoutingStrategy    "fixed" | "length-heuristic"                        (kebab-case)
+//   period      BudgetPeriod       "none" | "daily" | "monthly"                        (kebab-case)
+//   enforcement BudgetEnforcement  "hard" | "warn-only"                                (kebab-case)
+//   kind        ProviderKind       "Ollama" | "OpenAiCompatible" | "OpenAi" | "Anthropic"   (C# names)
+//   boundary    Boundary           "Local" | "Cloud"                                   (C# names)
+//   classifications / baseline  DataClassification  "Public" | "Internal" | "Pii" | "Phi"  (C# names)
+//   price       input_per_1m / output_per_1m (explicit [JsonPropertyName] on PriceConfig)
+// Always WRITTEN as those names. On READ a JSON number is accepted so that an out-of-range value (e.g. "mode": 999)
+// reaches the validator and is reported as invalid_enum with its field path (200 valid=false / 422) instead of an
+// opaque 400. Bodies are (de)serialized explicitly with ConfigJsonContext.Default.* — never the web defaults.
 
 /// <summary>active.json: which immutable version file is live, and its SHA-256 (crash recovery, ADR-0011).</summary>
 public sealed class ActivePointer
@@ -202,11 +211,12 @@ public sealed class CatalogConnectionModel
     [JsonPropertyName("health")] public required HealthView Health { get; init; }
 }
 
-/// <summary>JsonStringEnumConverter&lt;T&gt; with kebab-case-lower names and no integer values: the ADR vocabulary
-/// ("local-only", "hybrid", "legacy-cloud", "fixed", "length-heuristic", "none|daily|monthly", "hard|warn-only").</summary>
+/// <summary>JsonStringEnumConverter&lt;T&gt; with kebab-case-lower names: the ADR vocabulary ("local-only", "hybrid",
+/// "legacy-cloud", "fixed", "length-heuristic", "none|daily|monthly", "hard|warn-only"). Integers are accepted on
+/// read only so the validator can report an undefined value with its path; defined values are always written as names.</summary>
 public sealed class KebabEnumConverter<TEnum> : JsonStringEnumConverter<TEnum> where TEnum : struct, Enum
 {
-    public KebabEnumConverter() : base(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: false) { }
+    public KebabEnumConverter() : base(JsonNamingPolicy.KebabCaseLower, allowIntegerValues: true) { }
 }
 
 // Wire vocabulary: mode/strategy/period/enforcement in ADR kebab-case; provider kind, boundary and classification
@@ -226,6 +236,7 @@ public sealed class KebabEnumConverter<TEnum> : JsonStringEnumConverter<TEnum> w
     ])]
 [JsonSerializable(typeof(CovenantConfig))]
 [JsonSerializable(typeof(ActivePointer))]
+[JsonSerializable(typeof(ActivationRecord))]
 [JsonSerializable(typeof(ConfigGetResponse))]
 [JsonSerializable(typeof(ConfigValidateRequest))]
 [JsonSerializable(typeof(ConfigValidateResponse))]

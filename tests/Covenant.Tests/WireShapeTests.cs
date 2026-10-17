@@ -205,14 +205,14 @@ public class WireShapeTests
                 b.UseSetting("Auth:Keys:0:Key", "k");
                 b.UseSetting("Auth:Keys:0:Principal", "shape-tester");
                 b.UseSetting("Auth:Keys:0:Team", "t");
-                b.UseSetting("Audit:Path", _auditPath);
+                CorrelationTestKit.IsolatePaths(b, _auditPath);
             });
             _client = _factory.CreateClient();
             _client.DefaultRequestHeaders.Add("x-api-key", "k");
             _client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "k");
         }
 
-        public void Dispose() { _factory.Dispose(); if (File.Exists(_auditPath)) File.Delete(_auditPath); }
+        public void Dispose() { _factory.Dispose(); CorrelationTestKit.DeleteWithSiblings(_auditPath); }
 
         private static StringContent Body(string json) => new(json, Encoding.UTF8, "application/json");
 

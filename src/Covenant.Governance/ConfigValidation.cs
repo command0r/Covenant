@@ -8,10 +8,24 @@ public sealed record ConfigIssue(string Path, string Code, string Message);
 public sealed record ConfigValidationResult(IReadOnlyList<ConfigIssue> Errors, IReadOnlyList<ConfigIssue> Warnings)
 {
     public bool IsValid => Errors.Count == 0;
+
+    /// <summary>False ⇒ the candidate has structural errors (a required object/list/element is null, or an enum value
+    /// is not a defined member). Semantic checks and the impact preview were NOT run: the candidate cannot even be
+    /// compiled into a snapshot.</summary>
+    public bool StructurallySound { get; init; } = true;
+}
+
+/// <summary>A configuration that validated but could not be compiled into a runtime snapshot (e.g. a provider
+/// client for an enabled, referenced connection could not be built). Thrown by the compile step BEFORE anything
+/// durable is written; surfaced as validation errors (422), never a silently skipped target.</summary>
+public sealed class ConfigCompileException(IReadOnlyList<ConfigIssue> issues)
+    : Exception("configuration could not be compiled: " + string.Join("; ", issues.Select(i => $"{i.Path} {i.Code}")))
+{
+    public IReadOnlyList<ConfigIssue> Issues { get; } = issues;
 }
 
 /// <summary>Startup-owned facts the validator checks a candidate against (ADR-0011). None of these are
-/// console-editable: a configuration edit can never widen egress or invent a secret.</summary>
+/// console-editable: a configuration edit can never widen egress, invent a secret, or declare a host in-perimeter.</summary>
 public sealed class ValidationEnvironment
 {
     /// <summary>Egress allow-list as "host:port" (startup Providers:ProbeAllowList ∪ bootstrap endpoints).</summary>
@@ -20,13 +34,14 @@ public sealed class ValidationEnvironment
     /// <summary>Secret reference → is a non-empty value configured server-side. Never returns the value.</summary>
     public required Func<string, bool> SecretAvailable { get; init; }
 
-    /// <summary>Legacy-import compatibility: the imported PII/PHI placeholder target on the unconfigured "local"
-    /// connection is a WARNING (behaviour preserved, provider stage refuses it) instead of an error.</summary>
-    public bool LegacyCompat { get; init; }
+    /// <summary>Endpoint authorities ("host:port") the operator declared in-perimeter at startup
+    /// (Providers:LocalEndpoints ∪ the legacy Local:Endpoint). Only these may carry Boundary.Local.</summary>
+    public IReadOnlySet<string> LocalEndpoints { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>Pure configuration validator (ADR-0011/0013/0014). Codes are part of the API contract
-/// (docs/ui-api-contract.md v2 "Configuration").</summary>
+/// (docs/ui-api-contract.md v2 "Configuration"). Total: never throws on any deserializable candidate — a null
+/// required object/list/element or an undefined enum value is a structural error with a field path.</summary>
 public static class ConfigValidator
 {
     public static readonly IReadOnlySet<string> LegacySecretRefs =
@@ -58,8 +73,116 @@ public static class ConfigValidator
         return $"{u.Host}:{u.Port}";
     }
 
+    /// <summary>Authority a connection would connect to (explicit endpoint, else the cloud SDK default); null if none/invalid.</summary>
+    public static string? AuthorityOf(ConnectionConfig conn)
+        => conn.Endpoint is null ? DefaultAuthority(conn.Kind) : EndpointAuthority(conn.Endpoint);
+
+    /// <summary>Structural pass (ADR-0011 "validation is total"): every required object, list, element and id is
+    /// non-null and every enum value is a defined member. Generic <c>Enum.IsDefined&lt;T&gt;</c> is AOT-safe.</summary>
+    public static List<ConfigIssue> Structural(CovenantConfig c)
+    {
+        var e = new System.Collections.Generic.List<ConfigIssue>();
+        void Req(string path) => e.Add(new ConfigIssue(path, "required", "required value is missing (null)"));
+        void Defined<T>(string path, T value) where T : struct, System.Enum
+        {
+            if (!System.Enum.IsDefined(value))
+                e.Add(new ConfigIssue(path, "invalid_enum",
+                    $"'{Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture)}' is not a defined {typeof(T).Name} value"));
+        }
+        bool NonNullList<T>(string path, IReadOnlyList<T>? list)
+        {
+            if (list is null) { Req(path); return false; }
+            for (int i = 0; i < list.Count; i++)
+                if (list[i] is null) Req($"{path}[{i}]");
+            return true;
+        }
+
+        Defined("mode", c.Mode);
+
+        if (NonNullList("connections", c.Connections))
+            for (int i = 0; i < c.Connections.Count; i++)
+            {
+                if (c.Connections[i] is not { } conn) continue;
+                var p = $"connections[{i}]";
+                if (conn.Id is null) Req($"{p}.id");
+                Defined($"{p}.kind", conn.Kind);
+                Defined($"{p}.boundary", conn.Boundary);
+                if (NonNullList($"{p}.models", conn.Models))
+                    for (int m = 0; m < conn.Models.Count; m++)
+                    {
+                        if (conn.Models[m] is not { } model) continue;
+                        if (model.ModelId is null) Req($"{p}.models[{m}].model_id");
+                        if (model.Price is { } price && price.Basis is null) Req($"{p}.models[{m}].price.basis");
+                    }
+            }
+
+        if (NonNullList("applications", c.Applications))
+            for (int i = 0; i < c.Applications.Count; i++)
+                if (c.Applications[i] is { } app)
+                {
+                    if (app.Id is null) Req($"applications[{i}].id");
+                    if (app.Team is null) Req($"applications[{i}].team");
+                    NonNullList($"applications[{i}].granted_profiles", app.GrantedProfiles);
+                }
+
+        if (NonNullList("profiles", c.Profiles))
+            for (int i = 0; i < c.Profiles.Count; i++)
+                if (c.Profiles[i] is { } pr)
+                {
+                    if (pr.Id is null) Req($"profiles[{i}].id");
+                    Defined($"profiles[{i}].baseline", pr.Baseline);
+                    if (pr.Name is null) Req($"profiles[{i}].name");
+                }
+
+        if (NonNullList("policies", c.Policies))
+            for (int i = 0; i < c.Policies.Count; i++)
+            {
+                if (c.Policies[i] is not { } pol) continue;
+                var p = $"policies[{i}]";
+                if (pol.Id is null) Req($"{p}.id");
+                if (pol.Name is null) Req($"{p}.name");
+                Defined($"{p}.strategy", pol.Strategy);
+                if (NonNullList($"{p}.classifications", pol.Classifications))
+                    for (int k = 0; k < pol.Classifications.Count; k++) Defined($"{p}.classifications[{k}]", pol.Classifications[k]);
+                NonNullList($"{p}.profiles", pol.Profiles);
+                if (NonNullList($"{p}.targets", pol.Targets))
+                    for (int t = 0; t < pol.Targets.Count; t++)
+                    {
+                        if (pol.Targets[t] is not { } target) continue;
+                        if (target.ConnectionId is null) Req($"{p}.targets[{t}].connection_id");
+                        if (target.ModelId is null) Req($"{p}.targets[{t}].model_id");
+                    }
+                if (pol.Retry is null) Req($"{p}.retry");
+                else NonNullList($"{p}.retry.on", pol.Retry.On);
+            }
+
+        if (NonNullList("budgets", c.Budgets))
+            for (int i = 0; i < c.Budgets.Count; i++)
+            {
+                if (c.Budgets[i] is not { } b) continue;
+                if (b.Id is null) Req($"budgets[{i}].id");
+                if (b.Scope is null) Req($"budgets[{i}].scope");
+                Defined($"budgets[{i}].period", b.Period);
+                Defined($"budgets[{i}].enforcement", b.Enforcement);
+                NonNullList($"budgets[{i}].warn_at", b.WarnAt);
+            }
+
+        if (c.Settings is null) Req("settings");
+        if (c.SavingsBaseline is { } sb)
+        {
+            if (sb.ConnectionId is null) Req("savings_baseline.connection_id");
+            if (sb.ModelId is null) Req("savings_baseline.model_id");
+        }
+        return e;
+    }
+
     public static ConfigValidationResult Validate(CovenantConfig c, ValidationEnvironment env)
     {
+        ArgumentNullException.ThrowIfNull(c);
+        var structural = Structural(c);
+        if (structural.Count > 0)
+            return new ConfigValidationResult(structural, []) { StructurallySound = false };
+
         var errors = new List<ConfigIssue>();
         var warnings = new List<ConfigIssue>();
         void Err(string path, string code, string msg) => errors.Add(new ConfigIssue(path, code, msg));
@@ -75,14 +198,16 @@ public static class ConfigValidator
             if (!connections.TryAdd(conn.Id, conn)) { Err($"{p}.id", "duplicate_id", $"connection id '{conn.Id}' is used more than once"); continue; }
             if (string.IsNullOrWhiteSpace(conn.DisplayName)) Err($"{p}.display_name", "required", "display name is required");
 
-            if (conn.Kind is ProviderKind.OpenAi or ProviderKind.Anthropic && conn.Boundary != Boundary.Cloud)
-                Err($"{p}.boundary", "invalid_boundary", $"{conn.Kind} is a cloud provider; boundary must be cloud");
+            bool cloudKind = conn.Kind is ProviderKind.OpenAi or ProviderKind.Anthropic;
+            if (cloudKind && conn.Boundary != Boundary.Cloud)
+                Err($"{p}.boundary", "boundary_not_approved", $"{conn.Kind} is a cloud provider; its boundary is always cloud");
 
             string? authority;
             if (conn.Endpoint is null)
             {
                 authority = DefaultAuthority(conn.Kind);
-                if (authority is null)
+                // A disabled connection with no endpoint is an explicit "not configured" placeholder (legacy import).
+                if (authority is null && conn.Enabled)
                     Err($"{p}.endpoint", "endpoint_required", $"{conn.Kind} connections need an explicit http(s) endpoint");
             }
             else
@@ -98,6 +223,12 @@ public static class ConfigValidator
                 else Warn($"{p}.endpoint", "endpoint_not_allow_listed", msg);
             }
 
+            // Boundary is not self-declared (ADR-0011): Local only for startup-approved in-perimeter endpoints.
+            if (!cloudKind && conn.Boundary == Boundary.Local && (conn.Enabled || authority is not null)
+                && (authority is null || !env.LocalEndpoints.Contains(authority)))
+                Err($"{p}.boundary", "boundary_not_approved",
+                    $"{authority ?? "this endpoint"} is not a startup-approved local endpoint (Providers:LocalEndpoints / Local:Endpoint); a connection cannot declare itself in-perimeter");
+
             if (conn.SecretRef is { } secretRef)
             {
                 if (!IsAllowedSecretRef(secretRef))
@@ -105,7 +236,7 @@ public static class ConfigValidator
                 else if (conn.Enabled && !env.SecretAvailable(secretRef))
                     Err($"{p}.secret_ref", "secret_unavailable", $"secret '{secretRef}' is not configured on the server (set it in the environment/vault and restart)");
             }
-            else if (conn.Enabled && conn.Kind is ProviderKind.OpenAi or ProviderKind.Anthropic)
+            else if (conn.Enabled && cloudKind)
                 Err($"{p}.secret_ref", "secret_unavailable", $"{conn.Kind} requires a server-side secret reference");
 
             if (conn.Enabled && conn.Boundary == Boundary.Cloud && c.Mode == ProviderMode.LocalOnly)
@@ -150,10 +281,10 @@ public static class ConfigValidator
             if (string.IsNullOrWhiteSpace(app.Team)) Err($"{p}.team", "required", "team is required");
             for (int g = 0; g < app.GrantedProfiles.Count; g++)
                 if (!profiles.Contains(app.GrantedProfiles[g]))
-                    Err($"{p}.granted_profiles[{g}]", "profile_not_found", $"profile '{app.GrantedProfiles[g]}' does not exist");
+                    Err($"{p}.granted_profiles[{g}]", "profile_not_found", $"profile '{Evidence.Bounded(app.GrantedProfiles[g])}' does not exist");
             if (app.DefaultProfile is { } def)
             {
-                if (!profiles.Contains(def)) Err($"{p}.default_profile", "profile_not_found", $"profile '{def}' does not exist");
+                if (!profiles.Contains(def)) Err($"{p}.default_profile", "profile_not_found", $"profile '{Evidence.Bounded(def)}' does not exist");
                 else if (!app.GrantedProfiles.Contains(def, StringComparer.Ordinal))
                     Err($"{p}.default_profile", "default_profile_not_granted", $"default profile '{def}' is not granted to '{app.Id}'");
             }
@@ -198,7 +329,7 @@ public static class ConfigValidator
             if (pol.Classifications.Count == 0) Err($"{p}.classifications", "required", "a policy applies to at least one classification");
             for (int g = 0; g < pol.Profiles.Count; g++)
                 if (!profiles.Contains(pol.Profiles[g]))
-                    Err($"{p}.profiles[{g}]", "profile_not_found", $"profile '{pol.Profiles[g]}' does not exist");
+                    Err($"{p}.profiles[{g}]", "profile_not_found", $"profile '{Evidence.Bounded(pol.Profiles[g])}' does not exist");
             if (pol.Targets.Count == 0 && pol.Enabled)
                 Warn($"{p}.targets", "no_route_for_classification", "policy has no targets: its matching traffic is refused");
             if (pol.Strategy == RoutingStrategy.LengthHeuristic && pol.ThresholdTokens < 0)
@@ -212,21 +343,19 @@ public static class ConfigValidator
             {
                 var target = pol.Targets[t];
                 var tp = $"{p}.targets[{t}]";
+                // Always an error, in every mode: an unknown connection is never eligible (no legacy bypass).
                 if (!connections.TryGetValue(target.ConnectionId, out var conn))
                 {
-                    var msg = $"connection '{target.ConnectionId}' does not exist";
-                    if (env.LegacyCompat) Warn(tp, "unknown_connection", msg + " — imported legacy rule; requests matching it are refused at the provider stage");
-                    else Err(tp, "unknown_connection", msg);
+                    Err(tp, "unknown_connection", $"connection '{Evidence.Bounded(target.ConnectionId)}' does not exist");
                     continue;
                 }
                 var model = conn.Models.FirstOrDefault(m => string.Equals(m.ModelId, target.ModelId, StringComparison.Ordinal));
-                if (model is null) { Err(tp, "unknown_model", $"model '{target.ModelId}' is not permitted on connection '{conn.Id}'"); continue; }
+                if (model is null) { Err(tp, "unknown_model", $"model '{Evidence.Bounded(target.ModelId)}' is not permitted on connection '{conn.Id}'"); continue; }
                 if (conn.Boundary == Boundary.Cloud)
                 {
-                    if (sensitive && !pol.AllowSensitiveCloud)
-                        Warn(tp, "sensitive_cloud_without_ack", $"cloud target never serves PII/PHI under this policy (allow_sensitive_cloud is off); it is ineligible for those classifications");
-                    else if (sensitive && pol.AllowSensitiveCloud)
-                        Warn(tp, "sensitive_cloud_without_ack", "WARNING: this policy explicitly allows PII/PHI to reach a cloud destination");
+                    // No escape hatch (ADR-0013): a PII/PHI policy cannot list a cloud destination.
+                    if (sensitive)
+                        Err(tp, "sensitive_cloud_target", $"{conn.Id}/{model.ModelId} is a cloud destination; a policy covering PII/PHI may list only local targets");
                     if (model.Price is null && anyHard && pol.Enabled)
                         Err(tp, "unpriced_paid_target_under_hard_budget", $"{conn.Id}/{model.ModelId} has no price; a paid destination cannot run under a hard budget unpriced");
                 }
@@ -249,7 +378,7 @@ public static class ConfigValidator
             }
 
         // Coverage: every classification should have some applicable policy for the default (no-profile) path.
-        foreach (var cls in Enum.GetValues<DataClassification>())
+        foreach (var cls in System.Enum.GetValues<DataClassification>())
         {
             if (cls == DataClassification.Public) continue;   // Public is reachable only via an explicit Public profile
             if (!c.Policies.Any(pol => pol.Enabled && pol.Classifications.Contains(cls)))

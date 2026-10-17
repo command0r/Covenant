@@ -68,13 +68,13 @@ FailIfConfigErrors();
 //     Default location: "<Audit:Path>.config/" — beside the audit log, and unique per audit log. ---
 string configDir = StartupValidation.Trimmed(builder.Configuration["Config:Path"]) is { Length: > 0 } cp ? cp : auditPath + ".config";
 var egressAllowList = StartupEgress.BuildAllowList(builder.Configuration);
+var localEndpoints = StartupEgress.LocalEndpoints(builder.Configuration);   // ADR-0011 boundary binding (startup-only)
 var secretAvailable = StartupEgress.SecretAvailability(builder.Configuration);
 ConfigValidationResult ValidateConfig(CovenantConfig c) => ConfigValidator.Validate(c, new ValidationEnvironment
 {
     EgressAllowList = egressAllowList,
     SecretAvailable = secretAvailable,
-    // Imported legacy-cloud configurations keep the pre-v2 PII/PHI placeholder (refused at the provider stage).
-    LegacyCompat = c.Mode == ProviderMode.LegacyCloud,
+    LocalEndpoints = localEndpoints,
 });
 void AddValidationErrors(CovenantConfig c, ConfigValidationResult v)
 {
@@ -82,13 +82,44 @@ void AddValidationErrors(CovenantConfig c, ConfigValidationResult v)
     foreach (var w in v.Warnings) Console.Error.WriteLine($"covenant: config warning v{c.Version} {w.Path} — {w.Code}: {w.Message}");
 }
 
-var configRepo = new ConfigRepository(configDir);
+// --- Provider layer (ADR-0001) + runtime snapshots (ADR-0011): each validated version compiles into an immutable
+//     RuntimeSnapshot owning its provider clients ("connectionId:modelId"); a request acquires one at entry. A client
+//     that cannot be built for an enabled, referenced connection makes the version INVALID (client_unbuildable) —
+//     compiled BEFORE anything durable is written, never silently skipped. ---
+var clientFactory = new SdkProviderClientFactory(builder.Configuration, egressAllowList);
+RuntimeSnapshot CompileSnapshot(CovenantConfig c)
+{
+    var clients = clientFactory.Build(c);
+    var unbuildable = ProviderClientSet.UnbuildableIssues(c, clients);
+    if (unbuildable.Count > 0)
+    {
+        clients.Dispose();
+        throw new ConfigCompileException(unbuildable);
+    }
+    foreach (var skip in clients.Skipped) Console.Error.WriteLine($"covenant: config v{c.Version} — no provider client for {skip}");
+    return new RuntimeSnapshot(c, clients);
+}
+RuntimeSnapshot? CompileAtBoot(CovenantConfig c)
+{
+    try
+    {
+        return CompileSnapshot(c);
+    }
+    catch (ConfigCompileException ex)
+    {
+        foreach (var e in ex.Issues) configErrors.Add($"Config v{c.Version} ({c.Origin}) {e.Path} — {e.Code}: {e.Message}");
+        return null;
+    }
+}
+
+var configRepo = new ConfigRepository(configDir, redact: StartupEgress.Redactor(builder.Configuration));
 var opened = configRepo.Open();
 configErrors.AddRange(opened.Errors);
 FailIfConfigErrors();
 foreach (var w in opened.Warnings) Console.Error.WriteLine($"covenant: config warning — {w}");
 
 CovenantConfig activeConfig;
+RuntimeSnapshot? initialSnapshot;
 bool bootstrapped = false;
 if (opened.IsEmpty)
 {
@@ -106,17 +137,22 @@ if (opened.IsEmpty)
         v1 = LegacyImport.Build(builder.Configuration, DateTimeOffset.UtcNow, configErrors);
     }
     FailIfConfigErrors();
-    AddValidationErrors(v1!, ValidateConfig(v1!));
+    var stampedV1 = configRepo.StampV1(v1!);
+    AddValidationErrors(stampedV1, ValidateConfig(stampedV1));
     FailIfConfigErrors();
-    activeConfig = configRepo.Bootstrap(v1!);
+    initialSnapshot = CompileAtBoot(stampedV1);   // compile (clients included) BEFORE the first durable write
+    FailIfConfigErrors();
+    activeConfig = configRepo.Bootstrap(stampedV1);
     bootstrapped = true;
 }
 else
 {
     activeConfig = opened.Active!;
     // Fail-closed: an active configuration that no longer validates (e.g. a referenced secret was removed from
-    // the environment) refuses to start rather than serving on half-valid rules.
+    // the environment) or no longer compiles refuses to start rather than serving on half-valid rules.
     AddValidationErrors(activeConfig, ValidateConfig(activeConfig));
+    FailIfConfigErrors();
+    initialSnapshot = CompileAtBoot(activeConfig);
     FailIfConfigErrors();
     foreach (var legacyKey in new[] { "Providers:Mode", "OpenAI:ModelId", "OpenAI:StrongModelId", "Routing:ComplexityTokenThreshold", "Cache:TtlSeconds", "RateLimit:GlobalPerMinute", "RateLimit:PerTeamPerMinute", "Budget:GlobalCapUsd" })
         if (!string.IsNullOrWhiteSpace(builder.Configuration[legacyKey]))
@@ -145,16 +181,7 @@ if (builder.Configuration["Otel:Endpoint"] is { Length: > 0 } otelEndpoint)
 builder.Services.ConfigureHttpJsonOptions(o =>
     o.SerializerOptions.TypeInfoResolverChain.Insert(0, CovenantJsonContext.Default));
 
-// --- Provider layer (ADR-0001) + runtime snapshots (ADR-0011): each validated version compiles into an immutable
-//     RuntimeSnapshot owning its provider clients ("connectionId:modelId"); a request acquires one at entry. ---
-var clientFactory = new SdkProviderClientFactory(builder.Configuration, egressAllowList);
-RuntimeSnapshot CompileSnapshot(CovenantConfig c)
-{
-    var clients = clientFactory.Build(c);
-    foreach (var skip in clients.Skipped) Console.Error.WriteLine($"covenant: config v{c.Version} — no provider client for {skip}");
-    return new RuntimeSnapshot(c, clients);
-}
-var runtime = new SnapshotHolder(CompileSnapshot(activeConfig));
+var runtime = new SnapshotHolder(initialSnapshot!);
 
 // Chain-head anchoring (ADR-0007): both settings together or neither; the anchor path should live
 // on an independent storage domain — that placement is the entire security value.
@@ -540,13 +567,22 @@ app.MapGet("/admin/evidence", (HttpContext http) =>
 // never a second source of truth.
 var startedUtc = DateTimeOffset.UtcNow;
 
-// Model-id keyed price view (per 1K) of a configuration, for FinOps' pre-v2 savings math (first entry wins).
+// Model-id keyed price view (per 1K) of a configuration, for FinOps' pre-v2 savings estimate, which only knows the
+// served model id (audit records carry no connection id yet). A bare id priced on several connections is AMBIGUOUS:
+// it never resolves "first wins" — it takes the HIGHEST configured price, so a routing/local saving is never
+// overstated (the estimate stays conservative). Authoritative charges are always connection-scoped (ConfigPrices).
 static Dictionary<string, (decimal, decimal)> PricesByModel(CovenantConfig c)
 {
-    var map = new Dictionary<string, (decimal, decimal)>(StringComparer.Ordinal);
+    var map = new Dictionary<string, (decimal In, decimal Out)>(StringComparer.Ordinal);
     foreach (var conn in c.Connections)
         foreach (var m in conn.Models)
-            if (m.Price is { } p) map.TryAdd(m.ModelId, (p.InputPer1M / 1000m, p.OutputPer1M / 1000m));
+            if (m.Price is { } p)
+            {
+                var price = (p.InputPer1M / 1000m, p.OutputPer1M / 1000m);
+                map[m.ModelId] = map.TryGetValue(m.ModelId, out var seen)
+                    ? (Math.Max(seen.In, price.Item1), Math.Max(seen.Out, price.Item2))
+                    : price;
+            }
     return map;
 }
 

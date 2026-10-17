@@ -118,7 +118,7 @@ public sealed class PolicyDto
     [JsonPropertyName("strategy")] public string? Strategy { get; set; }
     [JsonPropertyName("threshold_tokens")] public int? ThresholdTokens { get; set; }
     [JsonPropertyName("retry")] public RetrySettingsDto? Retry { get; set; }
-    [JsonPropertyName("allow_sensitive_cloud")] public bool AllowSensitiveCloud { get; set; }
+    // No "allow sensitive cloud" switch: PII/PHI never route to cloud destinations (the Host enforces it).
     [JsonPropertyName("explanation")] public string? Explanation { get; set; }
 }
 

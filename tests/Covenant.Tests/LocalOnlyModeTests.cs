@@ -39,7 +39,7 @@ public sealed class LocalOnlyModeTests : IClassFixture<LocalOnlyModeTests.Factor
             builder.UseSetting("Auth:Keys:0:Key", "k");
             builder.UseSetting("Auth:Keys:0:Principal", "p");
             builder.UseSetting("Auth:Keys:0:Team", "t");
-            builder.UseSetting("Audit:Path", AuditPath);
+            CorrelationTestKit.IsolatePaths(builder, AuditPath);
             // Stub the local endpoint in-process; register cloud keys too, as tripwires that must stay at 0 calls.
             builder.ConfigureTestServices(services =>
                 services.AddSingleton<IChatClientRegistry>(new ChatClientRegistry(

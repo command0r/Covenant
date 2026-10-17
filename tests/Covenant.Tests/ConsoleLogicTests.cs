@@ -589,8 +589,10 @@ public sealed class SnapshotAndPresetTests
     }
 
     // The presets must exercise the real classifier the way their labels claim.
-    private static DataClassification Classify(string text) => new RegexDataClassifier().Classify(
-        new InferenceRequest("tester", [new ChatMessage(ChatRole.User, text)], null, new AttributionTags("t", "w", "u"))).Classification;
+    private static ClassificationResult Detect(string text) => new RegexDataClassifier().Classify(
+        new InferenceRequest("tester", [new ChatMessage(ChatRole.User, text)], null, new AttributionTags("t", "w", "u")));
+
+    private static DataClassification Classify(string text) => Detect(text).Classification;
 
     [Fact]
     public void Scenarios_B_C_and_the_connection_test_trigger_the_PII_classifier()
@@ -598,15 +600,68 @@ public sealed class SnapshotAndPresetTests
         Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.Find('B')!.Prompt));
         Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.Find('C')!.Prompt));
         Assert.Equal(DataClassification.Pii, Classify(ConnectionLogic.GovernedTestPrompt()));
+        // The synthetic marker is the published sample SSN, and B/C are the same request (C differs only in the
+        // operator's route state), so both escalate their Public baseline the same way.
+        Assert.Contains("078-05-1120", ScenarioPresets.SensitiveTicketPrompt, StringComparison.Ordinal);
+        Assert.Equal(ScenarioPresets.Find('B')!.Prompt, ScenarioPresets.Find('C')!.Prompt);
+        Assert.Equal("US SSN pattern", Detect(ScenarioPresets.SensitiveTicketPrompt).Signal);
+        Assert.Equal("Public", ScenarioPresets.Find('B')!.PreferredBaseline);
+        Assert.Equal("Public", ScenarioPresets.Find('C')!.PreferredBaseline);
     }
 
     [Fact]
-    public void Scenarios_A_and_D_carry_nothing_sensitive()
+    public void Scenario_A_detects_nothing_so_its_Public_baseline_is_not_escalated()
     {
+        // The detector's no-match result is Internal with NO signal = "no escalation"; the final classification is
+        // max(baseline, detected-if-signalled), so A stays at its Public profile baseline.
+        var a = ScenarioPresets.Find('A')!;
+        Assert.Equal("Public", a.PreferredBaseline);
+        var r = Detect(a.Prompt);
+        Assert.Null(r.Signal);
+        Assert.True(r.Classification < DataClassification.Pii);
+        Assert.Equal(ScenarioPresets.TicketPrompt, a.Prompt);
+        Assert.False(a.FreshNonce);
+    }
+
+    [Fact]
+    public void Scenario_D_carries_nothing_sensitive_and_keeps_the_operator_profile()
+    {
+        var d = ScenarioPresets.Find('D')!;
+        Assert.True(d.FreshNonce);
+        Assert.Null(d.PreferredBaseline); // pause demo: no baseline is forced
+
         var form = new PlaygroundForm();
-        ScenarioPresets.ApplyTo(ScenarioPresets.Find('D')!, form);
-        Assert.True(Classify(ScenarioPresets.TicketPrompt) < DataClassification.Pii);
-        Assert.True(Classify(RequestSnapshot.Freeze(1, form, T0).Prompt) < DataClassification.Pii);
+        ScenarioPresets.ApplyTo(d, form, Apps(), Profiles());
+        Assert.Equal("internal", form.ProfileId); // the app default stays — D never picks a profile
+        Assert.True(form.FreshNonce);
+        var frozen = RequestSnapshot.Freeze(1, form, T0).Prompt;
+        Assert.Null(Detect(ScenarioPresets.TicketPrompt).Signal);
+        Assert.Null(Detect(frozen).Signal);  // the nonce never looks like PII/PHI
+        Assert.True(Classify(frozen) < DataClassification.Pii);
+    }
+
+    [Fact]
+    public void Every_preset_only_populates_and_never_touches_the_operator_settings()
+    {
+        Assert.Equal(new[] { 'A', 'B', 'C', 'D' }, ScenarioPresets.All.Select(p => p.Letter));
+        foreach (var p in ScenarioPresets.All)
+        {
+            var form = new PlaygroundForm { Streaming = false, MaxTokens = 33, Workflow = "wf", UseCase = "uc" };
+            ScenarioPresets.ApplyTo(p, form, Apps(), Profiles());
+            Assert.Equal(p.Letter, form.Scenario);
+            Assert.Equal(p.Prompt, form.Prompt);
+            Assert.Equal(RouteMode.Policy, form.Mode);
+            Assert.Equal(p.FreshNonce, form.FreshNonce);
+            Assert.False(form.Streaming);
+            Assert.Equal(33, form.MaxTokens);
+            Assert.Equal("wf", form.Workflow);
+            Assert.Equal("uc", form.UseCase);
+            Assert.Equal(ScenarioPresets.ExpectedLow, p.ExpectedAnswer);
+            Assert.True(p.StillMatches(form));
+        }
+        Assert.Same(ScenarioPresets.Find('b'), ScenarioPresets.Find("B"));
+        Assert.Null(ScenarioPresets.Find('Z'));
+        Assert.Null(ScenarioPresets.Find("AB"));
     }
 }
 
@@ -676,7 +731,7 @@ public sealed class ComposerRulesTests
     {
         var config = new CovenantConfigDto
         {
-            Mode = "Hybrid",
+            Mode = "hybrid", // v2 wire spelling (KebabEnumConverter<ProviderMode>)
             Connections =
             [
                 new() { Id = "ollama", DisplayName = "Ollama", Boundary = "Local", Enabled = true, Models = [new() { ModelId = "qwen3:8b", DisplayName = "Qwen" }] },
@@ -700,7 +755,9 @@ public sealed class ComposerRulesTests
 
         Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "internal", null).Select(o => o.Value));
 
-        config.Mode = "LocalOnly";
+        config.Mode = "local-only";
+        Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "public-tickets", null).Select(o => o.Value));
+        config.Mode = "LocalOnly"; // enum-name spelling from an older Host is still understood
         Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "public-tickets", null).Select(o => o.Value));
     }
 }
@@ -1166,5 +1223,34 @@ public sealed class ConnectionLogicTests
         Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect"));
         Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect#"));
         Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect#other=1"));
+    }
+
+    [Fact]
+    public void Launch_link_token_rides_only_in_the_fragment()
+    {
+        Assert.Equal("t-1", LaunchLink.Parse("http://localhost:5201/ui/connect#token=t-1")!.AdminToken);
+        Assert.Equal("t-2", LaunchLink.Parse("http://localhost:5201/ui/connect#appkey=k&token=t-2")!.AdminToken);
+        Assert.Equal("t-3", LaunchLink.Parse("http://localhost:5201/ui/connect#token=%20t-3%20")!.AdminToken);
+
+        // Query-string tokens are sent to the server (and its logs): never accepted, even beside a fragment.
+        Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect?token=abc"));
+        Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect?token=abc#appkey=k"));
+        Assert.Equal("frag", LaunchLink.Parse("http://localhost:5201/ui/connect?token=query#token=frag")!.AdminToken);
+        Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect#token="));
+        Assert.Null(LaunchLink.Parse("http://localhost:5201/ui/connect#token=" + new string('x', 513)));
+        Assert.Null(LaunchLink.Parse(null));
+    }
+
+    [Fact]
+    public void Launch_link_credentials_expose_no_application_key()
+    {
+        // Console v2 (ADR-0012): the console never holds an application key — the parsed credentials carry the
+        // admin token and nothing else, whatever the launcher put in the fragment.
+        var props = typeof(LaunchLink.Credentials).GetProperties().Select(p => p.Name).ToList();
+        Assert.Equal(new[] { "AdminToken" }, props);
+
+        var c = LaunchLink.Parse("http://localhost:5201/ui/connect#appkey=secret-app-key&token=adm");
+        Assert.NotNull(c);
+        Assert.DoesNotContain("secret-app-key", c!.ToString(), StringComparison.Ordinal);
     }
 }

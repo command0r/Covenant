@@ -79,10 +79,46 @@ v2 supersedes the read-only parts above. Everything above stays valid unless res
 
 `Impact` = `{ "classifications": [{ "classification","profile","before":"<route summary>|refused","after":… }],
 "applications_affected":[…], "unavailable_destinations":[…], "pricing_gaps":[…], "newly_refused":[…] }`.
-Validation codes include: `duplicate_id`, `unknown_connection`, `unknown_model`, `endpoint_not_allow_listed`,
-`secret_unavailable`, `cloud_in_local_only`, `sensitive_cloud_target` (error), `ambiguous_policy_overlap`,
-`no_route_for_classification` (warning), `unpriced_paid_target_under_hard_budget`, `invalid_budget_scope`,
-`profile_not_found`, `default_profile_not_granted`.
+Validation codes include: `duplicate_id`, `unknown_connection` (always an error, every mode), `unknown_model`,
+`endpoint_not_allow_listed`, `secret_unavailable`, `cloud_in_local_only`, `sensitive_cloud_target` (error — there is no
+`allow_sensitive_cloud` field), `boundary_not_approved` (a `Local` connection whose endpoint authority is not on the
+startup `Providers:LocalEndpoints` / `Local:Endpoint` list, or an `OpenAi`/`Anthropic` connection not `Cloud`),
+`client_unbuildable` (an enabled connection referenced by an enabled policy for which no provider client could be
+built), `ambiguous_policy_overlap`, `no_route_for_classification` (warning), `unpriced_paid_target_under_hard_budget`,
+`invalid_budget_scope`, `profile_not_found`, `default_profile_not_granted`.
+
+**Validation is total.** Structural errors — `required` (a required object, list, list element or id is `null`) and
+`invalid_enum` (a numeric enum value that is not a defined member, e.g. `"mode": 999`) — carry the field path
+(`settings`, `connections[0].kind`, `policies[0].targets[2]`, …). `POST /admin/config/validate` answers **200**
+`{ "valid": false, "errors": [...], "impact": null }` for them (no impact preview of a candidate that cannot be
+compiled); `PUT /admin/config` answers **422**. Never a 500. Malformed JSON / a missing required property is 400.
+
+**History is the activation journal** (`<Config:Path>/activations.jsonl`, ADR-0011). `GET /admin/config/versions`
+lists activated versions only; `GET /admin/config/versions/{n}` and `POST /admin/config/rollback` with a version that
+was written but never activated (an orphan of an interrupted apply) answer **404**, exactly like an unknown number;
+orphan numbers are never reused. `change_summary` is redacted (no secret values) and bounded to ≤ 500 characters in
+history, journal and the `config.activated` audit event.
+
+**Model override** (`model` on `/v1`, the simulator and console inference): `connection/model` names exactly one
+target; a bare model id is accepted only when exactly one ELIGIBLE target of the matching policy carries it —
+otherwise refused: `model id 'X' is ambiguous across connections a, b — use connection/model`.
+
+### Wire spellings (stable contract, `ConfigJsonContext`)
+Properties are snake_case. Enum values are always written as:
+
+| Field | Type | Values |
+|---|---|---|
+| `mode` | ProviderMode | `"local-only"`, `"hybrid"`, `"legacy-cloud"` |
+| `strategy` | RoutingStrategy | `"fixed"`, `"length-heuristic"` |
+| `period` | BudgetPeriod | `"none"`, `"daily"`, `"monthly"` |
+| `enforcement` | BudgetEnforcement | `"hard"`, `"warn-only"` |
+| `kind` | ProviderKind | `"Ollama"`, `"OpenAiCompatible"`, `"OpenAi"`, `"Anthropic"` (C# names) |
+| `boundary` | Boundary | `"Local"`, `"Cloud"` (C# names) |
+| `classifications[]`, `baseline` | DataClassification | `"Public"`, `"Internal"`, `"Pii"`, `"Phi"` (C# names) |
+
+Prices: `"price": { "input_per_1m", "output_per_1m", "basis", "effective_date" }` (never `input_per1_m`). On read a
+JSON number is tolerated for an enum only so that an undefined value reaches the validator (`invalid_enum`); clients
+must send the names above. `/admin/status.mode` uses the same `mode` spellings.
 
 ## Console inference (ADR-0012)
 `POST /admin/playground/requests` body `{ "application_id", "profile_id"?, "messages":[{role,content}], "model"?,

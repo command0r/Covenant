@@ -25,7 +25,7 @@ public static class ShellStatus
             "localonly" or "local" => new("Local-only", "local",
                 "Only in-perimeter (local) connections can execute; cloud configuration cannot run."),
             "hybrid" => new("Hybrid", "hybrid",
-                "Local and approved cloud routes; sensitive classifications stay local unless a policy explicitly allows otherwise."),
+                "Local and approved cloud routes; PII/PHI never route to cloud destinations."),
             "legacycloud" or "cloud" => new("Legacy cloud", "legacy",
                 "Imported pre-v2 routing (cloud default). Review the effective rules before relying on it."),
             _ => new(ModeNotReported, "unknown", "The Host did not report a provider mode."),

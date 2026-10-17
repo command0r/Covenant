@@ -27,6 +27,37 @@ public static class StartupEgress
         return set;
     }
 
+    /// <summary>Startup-approved in-perimeter endpoint authorities (ADR-0011 boundary binding): every "host:port" in
+    /// <c>Providers:LocalEndpoints</c> (comma-separated host:port or absolute URLs) plus the legacy <c>Local:Endpoint</c>
+    /// authority. Only these may carry Boundary.Local. Startup-only, never console-editable. (They must still be on
+    /// the egress allow-list to be reachable — this list labels, it does not widen egress.)</summary>
+    public static HashSet<string> LocalEndpoints(IConfiguration config)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in (config["Providers:LocalEndpoints"] ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var authority = raw.Contains("://", StringComparison.Ordinal) ? ConfigValidator.EndpointAuthority(raw) : NormalizeHostPort(raw);
+            if (authority is not null) set.Add(authority);
+        }
+        if (StartupValidation.Trimmed(config["Local:Endpoint"]) is { } local && ConfigValidator.EndpointAuthority(local) is { } la)
+            set.Add(la);
+        return set;
+    }
+
+    private static string? NormalizeHostPort(string hostPort)
+        => Uri.TryCreate("http://" + hostPort, UriKind.Absolute, out var u) && u.AbsolutePath == "/" && !hostPort.EndsWith(':')
+           && hostPort.Contains(':', StringComparison.Ordinal) ? $"{u.Host}:{u.Port}" : null;
+
+    /// <summary>Secret values the configuration-write history must never contain (redaction source): every allowed
+    /// secret reference's value, Auth:Keys values and Admin:Token. Values stay in this closure; never logged.</summary>
+    public static Func<string, string> Redactor(IConfiguration config)
+    {
+        var values = new List<string?> { config["OpenAI:ApiKey"], config["Anthropic:ApiKey"], config["Local:ApiKey"], config["Admin:Token"] };
+        foreach (var child in config.GetSection("Secrets").GetChildren()) values.Add(child.Value);
+        foreach (var child in config.GetSection("Auth:Keys").GetChildren()) values.Add(child["Key"]);
+        return SecretRedaction.ForValues(values);
+    }
+
     /// <summary>Secret reference → configured (non-empty) on the server. Only the permitted reference forms resolve.</summary>
     public static Func<string, bool> SecretAvailability(IConfiguration config)
         => secretRef => ConfigValidator.IsAllowedSecretRef(secretRef) && !string.IsNullOrWhiteSpace(config[secretRef]);
@@ -45,6 +76,17 @@ public static class StartupEgress
 public static class LegacyImport
 {
     public const string UnconfiguredLocalModel = "local-model-not-configured";
+    public const string UnconfiguredLocalDisplayName = "Local model — not configured (import placeholder)";
+
+    /// <summary>The explicitly DISABLED placeholder a legacy import creates when no Local:* is configured: the
+    /// pre-v2 PII/PHI route keeps pointing at it, so the migration preview and every refusal say why sensitive data
+    /// is refused ("connection 'local' is disabled (not configured)"). Disabled connections are never eligible.</summary>
+    public static ConnectionConfig LocalPlaceholder() => new()
+    {
+        Id = "local", DisplayName = UnconfiguredLocalDisplayName, Kind = ProviderKind.OpenAiCompatible, Boundary = Boundary.Local,
+        Endpoint = null, Enabled = false, SecretRef = null,
+        Models = [new ModelConfig { ModelId = UnconfiguredLocalModel, Price = new PriceConfig { InputPer1M = 0m, OutputPer1M = 0m, Basis = "zero-marginal-local" } }],
+    };
 
     public static CovenantConfig Build(IConfiguration config, DateTimeOffset now, List<string> errors)
     {
@@ -104,9 +146,11 @@ public static class LegacyImport
                 SecretRef = string.IsNullOrWhiteSpace(config["Local:ApiKey"]) ? null : "Local:ApiKey",
                 Models = [Model(localModelId)],
             });
+        else
+            connections.Add(LocalPlaceholder());
 
         // Pre-v2 routes: Public/Internal ordered cheapest → (Anthropic mid-list) → strongest with the length
-        // heuristic; PII/PHI → local (the unconfigured placeholder fails closed at the provider stage, as before).
+        // heuristic; PII/PHI → local (without Local:* the target is the DISABLED placeholder: refused at policy).
         // Local-only: every classification → the one approved local model. Single attempt (no pre-v2 fallback).
         var single = new RetrySettings { MaxAttempts = 1 };
         var localTarget = new PolicyTarget { ConnectionId = "local", ModelId = localModelId };
@@ -152,20 +196,16 @@ public static class LegacyImport
                     Description = "Default for pre-v2 application keys: baseline Internal." },
         };
 
+        // One application per key, ONCE, at v1 (ADR-0012). The id is the key's Application ?? Principal, normalized by
+        // ApplicationIds.FromKey exactly as the auth stage normalizes it — so every key is bound (e.g. an e-mail
+        // principal maps to "alice-example.com-<hash>"). After v1, a key whose application is missing is refused.
         var applications = new List<ApplicationConfig>();
-        foreach (var child in config.GetSection("Auth:Keys").GetChildren())
-        {
-            var appId = child["Application"] is { Length: > 0 } a ? a : child["Principal"];
-            var team = child["Team"];
-            // Keys whose application id is not a valid configuration id stay unbound (legacy behaviour: team from
-            // the key, legacy-internal profile) — never a refusal to start over a cosmetic identifier.
-            if (!ConfigValidator.IsValidId(appId) || string.IsNullOrEmpty(team) || applications.Any(x => x.Id == appId)) continue;
+        foreach (var (appId, team) in KeyApplications(config))
             applications.Add(new ApplicationConfig
             {
-                Id = appId!, Team = team, Enabled = true, ConsoleTesting = false,
+                Id = appId, Team = team, Enabled = true, ConsoleTesting = false,
                 GrantedProfiles = [PolicyEngineV2.LegacyInternalProfile], DefaultProfile = PolicyEngineV2.LegacyInternalProfile,
             });
-        }
 
         var budgets = new List<BudgetConfigV2>();
         if (TryCap(config, errors) is { } globalCap)
@@ -212,6 +252,22 @@ public static class LegacyImport
             // Pre-v2 savings baseline: every allowed request priced on the strong model (none in local-only).
             SavingsBaseline = localOnly ? null : new ModelRef("openai", strongModelId),
         };
+    }
+
+    /// <summary>Distinct (application id, team) per Auth:Keys entry, in key order (first key wins the team).</summary>
+    internal static List<(string AppId, string Team)> KeyApplications(IConfiguration config)
+    {
+        var list = new List<(string, string)>();
+        foreach (var child in config.GetSection("Auth:Keys").GetChildren())
+        {
+            var raw = child["Application"] is { Length: > 0 } a ? a : child["Principal"];
+            var team = child["Team"];
+            if (string.IsNullOrEmpty(raw) || string.IsNullOrEmpty(team)) continue;   // Program refuses such keys at startup
+            var appId = ApplicationIds.FromKey(raw);
+            if (list.Any(x => x.Item1 == appId)) continue;
+            list.Add((appId, team));
+        }
+        return list;
     }
 
     internal static decimal? TryCap(IConfiguration config, List<string> errors)
@@ -286,14 +342,12 @@ public static class DemoSeeds
                 GrantedProfiles = ["public-demo", "internal-default"], DefaultProfile = "internal-default",
             },
         };
-        foreach (var child in config.GetSection("Auth:Keys").GetChildren())
+        foreach (var (appId, team) in LegacyImport.KeyApplications(config))
         {
-            var appId = child["Application"] is { Length: > 0 } a ? a : child["Principal"];
-            var team = child["Team"];
-            if (!ConfigValidator.IsValidId(appId) || string.IsNullOrEmpty(team) || applications.Any(x => x.Id == appId)) continue;
+            if (applications.Any(x => x.Id == appId)) continue;
             applications.Add(new ApplicationConfig
             {
-                Id = appId!, Team = team, Enabled = true, ConsoleTesting = false,
+                Id = appId, Team = team, Enabled = true, ConsoleTesting = false,
                 GrantedProfiles = ["internal-default"], DefaultProfile = "internal-default",
             });
         }
@@ -352,7 +406,8 @@ public static class ConfigAuditEvents
 
     public static AuditEntry Activated(CovenantConfig config, string operatorRef, DateTimeOffset now, bool recovered = false)
     {
-        var summary = config.ChangeSummary is { Length: > 0 } s ? ": " + Governance.Evidence.Bounded(s) : "";
+        // The summary was redacted + bounded (≤ 500) when the version was stamped; bound again defensively.
+        var summary = ConfigRepository.BoundSummary(config.ChangeSummary) is { Length: > 0 } s ? ": " + s : "";
         var reason = $"config.activated v{config.Version}"
             + (config.BaseVersion is { } b ? $" (base v{b})" : "")
             + (config.RolledBackFrom is { } r ? $" rollback of v{r}" : "")

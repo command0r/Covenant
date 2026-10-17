@@ -1,6 +1,53 @@
+using System.Collections.ObjectModel;
 using Covenant.Core;
 
 namespace Covenant.Governance;
+
+/// <summary>Deep copy of a validated configuration into snapshot-owned, read-only collections (ADR-0011): every
+/// list (connections, models, applications, granted profiles, profiles, policies, classifications, policy profiles,
+/// targets, retry triggers, budgets, warning thresholds) is copied into a new array wrapped in a
+/// <see cref="ReadOnlyCollection{T}"/>, so neither later mutation of the caller's lists nor a cast back to a mutable
+/// type can change an active snapshot. Records themselves are init-only. Only structurally valid configurations
+/// (see <see cref="ConfigValidator"/>) are compiled; a null list or element is refused, never defaulted.</summary>
+public static class ConfigFreezer
+{
+    public static CovenantConfig Freeze(CovenantConfig c)
+    {
+        ArgumentNullException.ThrowIfNull(c);
+        var settings = c.Settings ?? throw NotSound("settings");
+        return c with
+        {
+            Connections = Copy(c.Connections, "connections", conn => conn with { Models = Copy(conn.Models, "models", m => m) }),
+            Applications = Copy(c.Applications, "applications", a => a with { GrantedProfiles = Copy(a.GrantedProfiles, "granted_profiles", g => g) }),
+            Profiles = Copy(c.Profiles, "profiles", p => p),
+            Policies = Copy(c.Policies, "policies", p => p with
+            {
+                Classifications = Copy(p.Classifications, "classifications", x => x),
+                Profiles = Copy(p.Profiles, "profiles", x => x),
+                Targets = Copy(p.Targets, "targets", t => t),
+                Retry = (p.Retry ?? throw NotSound("retry")) with { On = Copy(p.Retry.On, "retry.on", x => x) },
+            }),
+            Budgets = Copy(c.Budgets, "budgets", b => b with { WarnAt = Copy(b.WarnAt, "warn_at", x => x) }),
+            Settings = settings with { },
+        };
+    }
+
+    private static ReadOnlyCollection<T> Copy<T>(IReadOnlyList<T>? source, string what, Func<T, T> map)
+    {
+        if (source is null) throw NotSound(what);
+        var copy = new T[source.Count];
+        for (int i = 0; i < copy.Length; i++)
+        {
+            var item = source[i];
+            if (item is null) throw NotSound(what);
+            copy[i] = map(item);
+        }
+        return Array.AsReadOnly(copy);
+    }
+
+    private static ArgumentException NotSound(string what)
+        => new($"configuration is not structurally valid ({what} is null); validate before compiling");
+}
 
 /// <summary>Compiled, immutable view of one validated <see cref="CovenantConfig"/> version (ADR-0011): lookup
 /// tables for applications, profiles, connections and the connection-scoped price book, plus the snapshot-owned
@@ -20,18 +67,21 @@ public sealed class RuntimeSnapshot : IRequestConfiguration
 
     public RuntimeSnapshot(CovenantConfig config, object? resources = null)
     {
-        Config = config;
+        // Snapshot-owned deep copy: the caller's lists may alias anything (a deserialized body, a test's List<>).
+        Config = ConfigFreezer.Freeze(config);
         _resources = resources;
         _applications = new Dictionary<string, ApplicationConfig>(StringComparer.Ordinal);
-        foreach (var a in config.Applications) _applications.TryAdd(a.Id, a);
+        // Null ids cannot occur after structural validation; skipped defensively (an impact preview of an invalid
+        // candidate must never throw).
+        foreach (var a in Config.Applications) if (a.Id is not null) _applications.TryAdd(a.Id, a);
         _profiles = new Dictionary<string, WorkloadProfileConfig>(StringComparer.Ordinal);
-        foreach (var p in config.Profiles) _profiles.TryAdd(p.Id, p);
+        foreach (var p in Config.Profiles) if (p.Id is not null) _profiles.TryAdd(p.Id, p);
         _connections = new Dictionary<string, ConnectionConfig>(StringComparer.Ordinal);
         _models = new Dictionary<(string, string), ModelConfig>();
-        foreach (var c in config.Connections)
+        foreach (var c in Config.Connections)
         {
-            if (!_connections.TryAdd(c.Id, c)) continue;
-            foreach (var m in c.Models) _models.TryAdd((c.Id, m.ModelId), m);
+            if (c.Id is null || !_connections.TryAdd(c.Id, c)) continue;
+            foreach (var m in c.Models) if (m.ModelId is not null) _models.TryAdd((c.Id, m.ModelId), m);
         }
     }
 

@@ -47,7 +47,7 @@ public sealed class ClassificationProfileTests
                     new ApiKeyRecord("demo-key", "demo-service", "platform", "demo-app"),
                     new ApiKeyRecord("batch-key", "batch-app", "data"),          // Application defaults to Principal
                     new ApiKeyRecord("off-key", "off-service", "data", "off-app"),
-                    new ApiKeyRecord("unbound-key", "nobody", "misc"),           // no such application ⇒ legacy behaviour
+                    new ApiKeyRecord("unbound-key", "nobody", "misc"),           // no such application ⇒ refused (fail-closed)
                 ],
             }),
             new ShapeStage(),
@@ -174,15 +174,20 @@ public sealed class ClassificationProfileTests
         Assert.Equal("off-app", _sink.Entries.Single().ApplicationId);
     }
 
+    /// <summary>Review fix 7 (ADR-0012): once a configuration governs, a key whose application is not in it is
+    /// refused at auth — no implicit legacy fallback. (Was: "keeps legacy behaviour".)</summary>
     [Fact]
-    public async Task Key_without_a_configured_application_keeps_legacy_behaviour()
+    public async Task Key_without_a_configured_application_is_refused_at_auth()
     {
         var ctx = await Run(PublicText, key: "unbound-key");
-        Assert.False(ctx.IsDenied, ctx.DenialReason);
+        Assert.True(ctx.IsDenied);
+        Assert.Equal(DenialKind.Governance, ctx.DenialKind);
+        Assert.Equal("auth", ctx.StoppedAtStage);
+        Assert.Contains("application not configured", ctx.DenialReason, StringComparison.Ordinal);
         Assert.Null(ctx.ApplicationId);
-        Assert.Equal(PolicyEngineV2.LegacyInternalProfile, ctx.ProfileId);
-        Assert.Equal(DataClassification.Internal, ctx.Classification);
-        Assert.Equal("misc", ctx.Identity.Tags.Team);
+        Assert.False(ctx.ClassificationEvaluated);
+        Assert.Equal(0, _local.Calls + _cloud.Calls);
+        Assert.Single(_sink.Entries);                              // audited
     }
 
     [Fact]
