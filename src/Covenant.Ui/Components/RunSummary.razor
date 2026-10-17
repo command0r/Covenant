@@ -1,0 +1,75 @@
+@inject WorkspaceConfig Ws
+
+@* The compact outcome line under the response: outcome, final classification (baseline → escalation, review round 3),
+   actual destination (with Local/Cloud tag), duration, tokens, cost basis and evidence state. The full facts live in the
+   details drawer — not repeated here. "Evidence recorded" = the audit record exists; integrity is verified on Audit & evidence. *@
+<div class="run-summary @(Large ? "large" : "")">
+    <div class="run-outcome">
+        @if (Run.InFlight)
+        {
+            <span class="outcome unknown">@(Run.Text.Length > 0 ? "Streaming…" : "Running…")</span>
+        }
+        else if (Run.Outcome is { } o)
+        {
+            <span class="outcome @o.PillKind">@o.Title</span>
+            <span class="mono subtle secondary">@o.StatusLine</span>
+        }
+        @if (OnDetails.HasDelegate)
+        {
+            <button type="button" class="btn sm" id="@DetailsButtonId" @onclick="() => OnDetails.InvokeAsync()" disabled="@Run.InFlight">
+                <Icon Name="details" Size="16" /><span>Details &amp; evidence</span>
+            </button>
+        }
+    </div>
+    @if (!Run.InFlight && Run.Outcome is { } ox)
+    {
+        <span class="run-explain">@ox.Explanation</span>
+    }
+    @if (Run.Result?.TransportError is { Length: > 0 } te)
+    {
+        <span class="note bad">@te</span>
+    }
+    <dl class="run-facts">
+        <div class="wide">
+            <dt>Classification</dt>
+            <dd>@RunText.Classification(Run)</dd>
+        </div>
+        <div>
+            <dt>Destination</dt>
+            <dd>
+                @if (Run.Evidence.Record is { } rec)
+                {
+                    var d = ModelFacts.Destination(rec, Ws.Connections);
+                    <span class="mono wrap-any">@d.Text</span>
+                    @if (!rec.CacheHit && d.Text != ModelFacts.NoProviderCall && d.Text != ModelFacts.NotRecorded)
+                    {
+                        <BoundaryTag Boundary="@d.Boundary" />
+                    }
+                }
+                else
+                {
+                    <span>@RunText.AwaitingText(Run)</span>
+                }
+            </dd>
+        </div>
+        <div><dt>Duration</dt><dd>@RunText.Duration(Run)</dd></div>
+        @if (!Large)
+        {
+            <div><dt>Tokens</dt><dd>@RunText.Tokens(Run)</dd></div>
+        }
+        <div><dt>Cost</dt><dd>@RunText.Cost(Run)</dd></div>
+        <div>
+            <dt>Evidence</dt>
+            @{ var ev = RunText.Evidence(Run); }
+            <dd><span class="dot @ev.Tone" aria-hidden="true"></span> @ev.Text</dd>
+        </div>
+    </dl>
+</div>
+
+@code {
+    [Parameter] public PlaygroundRun Run { get; set; } = default!;
+    [Parameter] public EventCallback OnDetails { get; set; }
+    [Parameter] public string DetailsButtonId { get; set; } = "run-details";
+    /// <summary>Presentation sizing; fewer facts.</summary>
+    [Parameter] public bool Large { get; set; }
+}

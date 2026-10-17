@@ -1,0 +1,173 @@
+@inject WorkspaceConfig Ws
+@inject PlaygroundState Pg
+@inject Interop Interop
+@inject NavigationManager Nav
+
+@* Everything known about one run, in one place (the details drawer): what was sent, the outcome, trusted profile
+   vs final classification, routing and every provider attempt, usage/cost basis, and the audit evidence.
+   Server/provider text is rendered as plain text (Blazor escapes it) — never as markup. *@
+<section class="drawer-section" aria-label="Outcome">
+    <h3>Outcome</h3>
+    @if (Run.Outcome is { } o)
+    {
+        <div class="result-head">
+            <StatusPill Kind="@o.PillKind" Text="@o.Title" />
+            <span class="mono subtle secondary">@o.StatusLine</span>
+        </div>
+        <span class="secondary">@o.Explanation</span>
+        @if (Run.Result?.ErrorReason is { Length: > 0 } why)
+        {
+            <span class="secondary muted">Server reason: <span class="mono wrap-any">@why</span></span>
+        }
+    }
+    else
+    {
+        <span class="secondary muted">In progress.</span>
+    }
+</section>
+
+<section class="drawer-section" aria-label="Request">
+    <h3>Request</h3>
+    <dl class="facts">
+        <dt>Run as</dt><dd class="mono">@(Run.Snapshot.ApplicationId ?? "Not set")</dd>
+        <dt>Workload profile</dt><dd>@(Run.Snapshot.ProfileId is { } pid ? ComposerRules.ProfileLabel(Ws.Profiles, pid) : "Application default (server-side)")</dd>
+        <dt>Model</dt><dd class="mono wrap-any">@(Run.Snapshot.RoutingLabel + (Run.Snapshot.Mode == RouteMode.Explicit ? " (test input)" : ""))</dd>
+        <dt>Mode</dt><dd>@(Run.Snapshot.Streaming ? "Streamed" : "Buffered")</dd>
+        <dt>Requested max output tokens</dt><dd class="mono">@(Run.Evidence.Record is { } rr ? RecordFacts.RequestedMaxOutputTokens(rr) : Run.Snapshot.MaxTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "None requested — the application/model bound applies")</dd>
+        <dt>Effective (enforced) max output tokens</dt><dd class="mono">@(Run.Evidence.Record is { } er2 ? RecordFacts.EffectiveMaxOutputTokens(er2) : "Known once the audit record is found")</dd>
+        <dt>Labels</dt><dd class="mono">@(Run.Snapshot.Workflow ?? "—") · @(Run.Snapshot.UseCase ?? "—")</dd>
+        <dt>Submitted</dt><dd>@Fmt.Utc(Run.Snapshot.SubmittedUtc)</dd>
+        <dt>Client request id</dt><dd class="mono wrap-any">@Run.Snapshot.ClientRequestId</dd>
+    </dl>
+</section>
+
+@if (Run.Evidence.Record is { } rec)
+{
+    <section class="drawer-section" aria-label="Classification">
+        <h3>Classification</h3>
+        <dl class="facts">
+            <dt>Trusted baseline</dt><dd>@Fmt.OrNotRecorded(rec.BaselineClassification) @(rec.ProfileId is { Length: > 0 } rp ? "· profile " + rp : "")</dd>
+            <dt>Final classification</dt><dd>@ModelFacts.ClassificationFact(rec)</dd>
+        </dl>
+        <span class="note">The profile sets a trusted baseline; the detector can only escalate it (ADR-0012). The detector is a narrow demonstration pattern set, not DLP.</span>
+    </section>
+
+    <section class="drawer-section" aria-label="Routing and attempts">
+        <h3>Routing and attempts</h3>
+        @{ var dest = ModelFacts.Destination(rec, Ws.Connections); }
+        <dl class="facts">
+            <dt>Selected route</dt><dd class="mono wrap-any">@ModelFacts.Selected(rec)</dd>
+            <dt>Actual destination</dt>
+            <dd><span class="mono wrap-any">@dest.Text</span> @if (!rec.CacheHit && dest.Text != ModelFacts.NoProviderCall) { <BoundaryTag Boundary="@dest.Boundary" /> }</dd>
+            <dt>Served</dt><dd class="mono wrap-any">@ModelFacts.Served(rec)</dd>
+            <dt>Served connection</dt><dd class="mono wrap-any">@RecordFacts.ServedConnection(rec)</dd>
+            <dt>Truncated</dt><dd>@RecordFacts.TruncatedText(rec)</dd>
+            <dt>Config version</dt><dd class="mono">@(rec.ConfigVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? ModelFacts.NotRecorded)</dd>
+        </dl>
+        @if (RecordFacts.IncompleteStreamText(rec) is { } incomplete)
+        {
+            <div class="alert bad" role="status"><div class="alert-text"><strong>Stream incomplete — not served</strong><span class="alert-body">@incomplete</span></div></div>
+        }
+        @{ var lines = AttemptFacts.Lines(rec, Ws.Connections); }
+        @if (lines.Count > 0)
+        {
+            <ol class="attempt-list">
+                @foreach (var a in lines)
+                {
+                    <li>
+                        <span class="mono">#@a.Number</span>
+                        <span class="mono wrap-any">@a.Target</span>
+                        <BoundaryTag Boundary="@a.Boundary" />
+                        <span>@(a.Outcome + (a.ErrorClass is { } ec ? " · " + ec : ""))</span>
+                        <span class="subtle">@AttemptFacts.Detail(a)</span>
+                    </li>
+                }
+            </ol>
+            @if (AttemptFacts.FallbackSentence(rec) is { } fb)
+            {
+                <span class="note">@fb</span>
+            }
+        }
+        else
+        {
+            <span class="note">@(ModelFacts.IsV2(rec) && rec.Attempts is null ? "Attempts not recorded on this record." : "No provider attempt was made.")</span>
+        }
+    </section>
+
+    <section class="drawer-section" aria-label="Usage and cost">
+        <h3>Usage and cost</h3>
+        <dl class="facts">
+            <dt>Tokens</dt><dd>@CostText.Tokens(rec)</dd>
+            <dt>Cost</dt><dd>@CostText.Cost(rec)</dd>
+            <dt>Basis</dt><dd>@CostText.BasisDescription(rec.CostBasis)</dd>
+            @if (rec.ReservedUsd is { } res)
+            {
+                <dt>Reserved / settled</dt><dd class="mono">@Fmt.Usd(res) / @(rec.SettledUsd is { } st ? Fmt.Usd(st) : "Not recorded")</dd>
+            }
+            <dt>Duration</dt><dd>@Fmt.Ms(rec.DurationMs) (recorded by Covenant)</dd>
+        </dl>
+    </section>
+}
+
+<section class="drawer-section" aria-label="Audit evidence">
+    <h3>Audit evidence</h3>
+    @switch (Run.Evidence.State)
+    {
+        case EvidenceState.Found when Run.Evidence.Record is { } er:
+            <dl class="facts">
+                <dt>Status</dt><dd><span class="dot ok" aria-hidden="true"></span> Evidence recorded <span class="subtle">(chain integrity is verified under Audit &amp; evidence)</span></dd>
+                <dt>Record id</dt>
+                <dd>
+                    <span class="copy-row">
+                        <span class="mono wrap-any">@er.Id</span>
+                        <button type="button" class="btn ghost sm icon-btn" aria-label="Copy request id" @onclick="() => CopyAsync(er.Id)"><Icon Name="copy" Size="16" /></button>
+                        @if (_copyNote is not null) { <span class="subtle" role="status">@_copyNote</span> }
+                    </span>
+                </dd>
+                <dt>Recorded</dt><dd>@Fmt.Utc(er.TimestampUtc)</dd>
+                <dt>Entry point</dt><dd class="mono">@Fmt.OrNotRecorded(er.EntryPoint) · operator @Fmt.OrNotRecorded(er.OperatorRef)</dd>
+                <dt>Application / team</dt><dd class="mono">@Fmt.OrNotRecorded(er.ApplicationId) · @Fmt.OrNotRecorded(er.Tags.Team)</dd>
+                <dt>Reason</dt><dd class="wrap-any">@er.Reason</dd>
+                <dt>Prompt fingerprint</dt><dd class="mono wrap-any">sha256 @Fmt.OrNotRecorded(er.PromptSha256) · @er.PromptChars chars</dd>
+            </dl>
+            <div class="btn-row">
+                <button type="button" class="btn" @onclick="() => OpenInRequests(er.Id)">Open in Requests</button>
+            </div>
+            break;
+        case EvidenceState.Pending:
+            <span class="secondary muted" role="status">Evidence pending — the audit sink writes asynchronously; looking up <span class="mono">@Run.RequestId</span> (attempt @(Run.Evidence.Attempts + 1)).</span>
+            break;
+        case EvidenceState.Unavailable:
+            <ErrorBanner Title="Evidence unavailable" Message="@(Run.Evidence.Message ?? EvidenceTracker.UnavailableMessage)" OnRetry="@(() => Pg.RetryEvidenceAsync(Run))" />
+            <span class="note">The bounded lookup found no record yet. This does not mean the audit write failed.</span>
+            break;
+        case EvidenceState.Error:
+            <ErrorBanner Title="Evidence lookup failed" Message="@Run.Evidence.Message" OnRetry="@(() => Pg.RetryEvidenceAsync(Run))" />
+            break;
+        default:
+            <span class="secondary muted">@RunText.Evidence(Run).Text</span>
+            break;
+    }
+</section>
+
+@code {
+    [Parameter] public PlaygroundRun Run { get; set; } = default!;
+    /// <summary>Called before navigating away (the drawer closes).</summary>
+    [Parameter] public EventCallback OnNavigate { get; set; }
+
+    private string? _copyNote;
+
+    private async Task CopyAsync(string text)
+    {
+        bool ok;
+        try { ok = await Interop.CopyTextAsync(text); }
+        catch (JSException) { ok = false; }
+        _copyNote = ok ? "Copied" : "Copy failed — select and copy manually";
+    }
+
+    private async Task OpenInRequests(string id)
+    {
+        await OnNavigate.InvokeAsync();
+        Nav.NavigateTo("requests/" + Uri.EscapeDataString(id));
+    }
+}

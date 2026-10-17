@@ -26,7 +26,7 @@ public sealed class AnthropicIngressTests : IClassFixture<WebApplicationFactory<
             b.UseSetting("Auth:Keys:0:Key", "test-api-key");
             b.UseSetting("Auth:Keys:0:Principal", "itest");
             b.UseSetting("Auth:Keys:0:Team", "itest-team");
-            b.UseSetting("Audit:Path", _auditPath);
+            CorrelationTestKit.IsolatePaths(b, _auditPath);
         });
         _client = _factory.CreateClient();
         _client.DefaultRequestHeaders.Add("x-api-key", "test-api-key");   // Anthropic-style auth header
@@ -35,7 +35,7 @@ public sealed class AnthropicIngressTests : IClassFixture<WebApplicationFactory<
     public void Dispose()
     {
         _factory.Dispose();
-        if (File.Exists(_auditPath)) File.Delete(_auditPath);
+        CorrelationTestKit.DeleteWithSiblings(_auditPath);
     }
 
     private static StringContent Messages(string content, string? model = null, bool stream = false) =>

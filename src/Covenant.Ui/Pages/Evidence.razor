@@ -1,115 +1,198 @@
 @page "/evidence"
+@page "/audit"
 @inject AppState State
 @inject AdminApi Api
 @inject Interop Interop
+@inject PlaygroundState Pg
 @implements IDisposable
 
-<PageTitle>Evidence · Covenant</PageTitle>
+<PageTitle>Audit &amp; evidence · Covenant</PageTitle>
+
+@*
+  T08. Leads with request decisions and evidence completeness (pending / unavailable / verified), then integrity of
+  the audit chain — shown independently of answer quality. Who (application, team, entry point, operator ref), which
+  rule/version, selected/attempted/served, cost and why. Hashes/anchors are behind a disclosure. Exports: the
+  segment verification report (GET /admin/evidence) and, per request, GET /admin/requests/{id}/export.
+*@
 
 <div class="page">
     <RequiresConnection>
         <div class="page-head">
             <div class="titles">
-                <h1>Evidence</h1>
-                <span class="lede">Hash-chained audit log for this environment. Every allow and every refusal is an entry.</span>
+                <h1>Audit &amp; evidence</h1>
+                <span class="lede">Every governed decision — allowed or refused — is a hash-chained audit record. Integrity is about the record, not about answer quality.</span>
             </div>
             <Button OnClick="LoadAsync" Busy="@_loading" BusyText="Verifying…" Disabled="@_loading">@(_report is null ? "Verify now" : "Verify again")</Button>
             <Button Variant="primary" OnClick="ExportAsync" Busy="@_exporting" BusyText="Preparing…" Disabled="@(_report is null || _exporting)">Export verification report</Button>
         </div>
 
-        @if (_error is not null)
-        {
-            <ErrorBanner Title="Verification could not run" Message="@_error" OnRetry="LoadAsync" Busy="@_loading" />
-        }
-        @if (_exportError is not null)
-        {
-            <ErrorBanner Title="Export failed" Message="@_exportError" />
-        }
+        <ErrorBanner Title="Verification could not run" Message="@_error" OnRetry="LoadAsync" Busy="@_loading" />
+        <ErrorBanner Title="Export failed" Message="@_exportError" />
 
-        @if (_report is null && _error is null)
-        {
-            <section class="panel"><Skeleton Lines="4" Label="Running chain verification" /></section>
-        }
-        else if (_report is { } r)
-        {
-            <section class="panel" aria-labelledby="st-h" aria-live="polite" style="@(r.ChainValid ? "" : "border-color:var(--red);background:var(--red-bg)")">
-                <div style="display:flex;flex-direction:column;gap:4px">
-                    <h2 id="st-h" style="@(r.ChainValid ? "color:var(--green)" : "color:var(--red)")">
-                        @(r.ChainValid ? "Internal consistency verified" : "Chain verification FAILED")
-                    </h2>
-                    @if (r.ChainValid)
-                    {
-                        <span class="secondary muted">Internal consistency verified: every stored record hashes to the next; this does not prove completeness or independent anchoring.</span>
-                    }
-                    else
-                    {
-                        <span class="secondary"><strong style="color:var(--red)">@Fmt.OrNotRecorded(r.ChainFailure)</strong>@(r.FirstInvalidLine is { } line ? $" — first invalid line {line}." : "") Entries after the break are not trusted; the count below is the verified prefix.</span>
-                    }
+        <section class="panel integrity @(_report is { ChainValid: false } ? "bad" : "")" aria-labelledby="int-h" aria-live="polite">
+            <div class="panel-head">
+                <h2 id="int-h">Audit integrity</h2>
+                <span class="panel-sub">Current segment · @(_verifiedAt is { } v ? "verified " + Fmt.Utc(v) : "not verified yet")</span>
+            </div>
+            @if (_report is null && _error is null)
+            {
+                <Skeleton Lines="2" Label="Running chain verification" />
+            }
+            else if (_report is { } r)
+            {
+                <div class="result-head">
+                    <span class="outcome @(r.ChainValid ? "served" : "failed")">@(r.ChainValid ? "Audit integrity verified" : "Chain verification FAILED")</span>
+                    <span class="secondary subtle">@Fmt.Int(r.Entries) records · @Fmt.Int(r.Allowed) allowed · @Fmt.Int(r.Denied) refused</span>
                 </div>
-                <FactList Inline="true" Facts="@StatusFacts(r)" />
-                @if (!r.ChainValid)
+                @if (r.ChainValid)
+                {
+                    <span class="secondary muted">Every stored record hashes to the next (internal consistency). @EvidenceCompleteness.QualityDisclaimer</span>
+                }
+                else
                 {
                     <div class="alert bad" role="alert">
                         <div class="alert-text">
-                            <strong>What to do</strong>
-                            <span class="alert-body">Do not archive or reset this segment. Export the verification report and keep the raw log, keep the appliance running, and investigate who could write to the log file.</span>
+                            <strong>@Fmt.OrNotRecorded(r.ChainFailure)@(r.FirstInvalidLine is { } line ? " — first invalid line " + line.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")</strong>
+                            <span class="alert-body">Records after the break are not trusted. Do not archive this segment; export the report, keep the raw log and investigate who could write to it.</span>
                         </div>
                     </div>
                 }
-            </section>
+            }
+        </section>
 
-            <section class="panel two-col" aria-labelledby="mean-h">
-                <div>
-                    <h2 id="mean-h">A passing verification shows</h2>
-                    <ul class="plain-list secondary muted">
-                        <li>The current entries and their hash links are internally consistent: every stored record hashes to the next.</li>
-                        <li>When anchors exist: the history they cover matches those separately protected comparison points.</li>
-                    </ul>
-                </div>
-                <div>
-                    <h2>It does not show</h2>
-                    <ul class="plain-list secondary muted">
-                        <li>That history was never rewritten: anyone able to rewrite the log can recompute an unanchored chain.</li>
-                        <li>That every event was captured, or anything about traffic that bypassed Covenant.</li>
-                        <li>Regulatory compliance of any kind.</li>
-                    </ul>
-                </div>
-            </section>
+        <section class="panel" aria-labelledby="sess-h">
+            <div class="panel-head">
+                <h2 id="sess-h">Evidence for this session's requests</h2>
+                <span class="panel-sub">Requests run from this console tab · newest first</span>
+            </div>
+            @if (Pg.Runs.Count == 0)
+            {
+                <EmptyState Title="No requests from this session yet" Body="Run a request in the Playground; its evidence state appears here (pending while the audit write lands, then verified or unavailable).">
+                    <a class="btn" href="playground">Open Playground</a>
+                </EmptyState>
+            }
+            else
+            {
+                <ul class="row-list">
+                    @foreach (var run in Pg.Runs.Reverse())
+                    {
+                        var rr = run;
+                        var ev = SessionEvidence(rr);
+                        <li>
+                            <span class="mono">#@rr.Snapshot.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture)</span>
+                            <span class="secondary">@rr.Snapshot.ScenarioLabel</span>
+                            <span class="indicator"><span class="dot @ev.Tone" aria-hidden="true"></span>@ev.Label</span>
+                            @if (rr.RequestId is { Length: > 0 } rid)
+                            {
+                                <a class="mono secondary" href="@("requests/" + Uri.EscapeDataString(rid))">@rid</a>
+                            }
+                            @if (rr.Evidence.State is EvidenceState.Unavailable or EvidenceState.Error)
+                            {
+                                <button type="button" class="btn sm" @onclick="() => Pg.RetryEvidenceAsync(rr)">Retry lookup</button>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
 
-            <section class="panel" aria-labelledby="an-h">
-                <div class="panel-head">
-                    <h2 id="an-h">Anchor</h2>
-                    <span class="pill @AnchorPillKind(r)">@AnchorStatusText(r)</span>
-                </div>
-                <p class="secondary muted">An anchor written to separately protected storage gives verification a trusted comparison point for the history it covers. It is only as strong as the protection of that storage. “Configured” means the Host will write anchors; “Verified” means this verification compared the log against anchors that exist.</p>
-                <FactList Facts="@AnchorFacts(r)" />
-            </section>
+        <section class="panel flush" aria-labelledby="dec-h">
+            <div class="panel-head">
+                <h2 id="dec-h">Recent decisions</h2>
+                <span class="panel-sub">Newest @Fmt.Int(RecentLimit) records of the current segment · <a href="requests">all loaded records, filters and archives in Requests</a></span>
+            </div>
+            <ErrorBanner Title="Recent decisions unavailable" Message="@_recentError" OnRetry="LoadRecentAsync" />
+            @if (_recent is null && _recentError is null)
+            {
+                <div class="pad"><Skeleton Lines="4" Label="Loading recent decisions" /></div>
+            }
+            else if (_recent is { Count: 0 })
+            {
+                <div class="pad"><EmptyState Title="No decisions recorded in the current segment yet" /></div>
+            }
+            else if (_recent is { } items)
+            {
+                <ul class="decision-list">
+                    @foreach (var rec in items)
+                    {
+                        var d = rec;
+                        var o = OutcomeModel.FromRecord(d);
+                        var mf = ModelFacts.From(d);
+                        <li>
+                            <div class="decision-head">
+                                <StatusPill Kind="@o.PillKind" Text="@OutcomeModel.Label(o.Outcome)" />
+                                <span class="mono secondary">@Fmt.Utc(d.TimestampUtc)</span>
+                                <span class="indicator secondary"><span class="dot @(_report?.ChainValid == true ? "ok" : _report?.ChainValid == false ? "bad" : "hollow")" aria-hidden="true"></span>@RecordedLabel(_report?.ChainValid)</span>
+                                <a class="btn ghost sm" href="@("requests/" + Uri.EscapeDataString(d.Id))">Details &amp; export</a>
+                            </div>
+                            <dl class="facts compact">
+                                <dt>Who</dt><dd class="mono wrap-any">@WhoText(d)</dd>
+                                <dt>Rule / version</dt><dd class="wrap-any">@(d.ConfigVersion is { } cv ? "config v" + cv.ToString(System.Globalization.CultureInfo.InvariantCulture) + " · " : "version not recorded · ")@d.Reason</dd>
+                                <dt>Selected → attempted → served</dt><dd class="mono wrap-any">@mf.Selected → @mf.Attempted → @mf.Served</dd>
+                                <dt>Cost and why</dt><dd>@CostText.Cost(d) <span class="subtle">· @CostText.BasisDescription(d.CostBasis)</span></dd>
+                            </dl>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
 
-            <section class="panel flush" aria-labelledby="sg-h">
-                <div class="panel-head">
-                    <h2 id="sg-h">Segments</h2>
-                    <span class="panel-sub">Archived segments are kept on the appliance and remain verifiable outside the console</span>
+        @if (_report is { } rep)
+        {
+            <details class="panel tech">
+                <summary>Chain, anchors and segments (technical details)</summary>
+                <div class="two-col secondary">
+                    <div>
+                        <strong>A passing verification shows</strong>
+                        <ul class="plain-list muted">
+                            <li>The stored records and their hash links are internally consistent.</li>
+                            <li>When anchors exist: the history they cover matches those separately protected comparison points.</li>
+                        </ul>
+                    </div>
+                    <div>
+                        <strong>It does not show</strong>
+                        <ul class="plain-list muted">
+                            <li>That history was never rewritten: anyone able to rewrite the log can recompute an unanchored chain.</li>
+                            <li>That every event was captured, anything about traffic that bypassed Covenant, or answer quality.</li>
+                            <li>Regulatory compliance of any kind.</li>
+                        </ul>
+                    </div>
                 </div>
-                <div class="table-wrap">
-                    <table>
-                        <thead><tr><th scope="col">Segment</th><th scope="col">Period</th><th scope="col" class="num">Entries</th><th scope="col">Status</th></tr></thead>
-                        <tbody>
-                            <tr>
-                                <td>Current</td>
-                                <td class="mono secondary">@(r.FirstEntryUtc is null ? "No entries yet" : Fmt.Utc(r.FirstEntryUtc) + " → " + Fmt.Utc(r.LastEntryUtc))</td>
-                                <td class="num mono">@Fmt.Int(r.Entries)</td>
-                                <td>@(r.ChainValid ? "Verified" : "FAILED")</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </div>
-                <p class="secondary subtle" style="padding:12px 18px">Archived segments are not browsable from the console in this release; verify them from the appliance with the exported report as reference.</p>
-            </section>
+                <FactList Facts="@AnchorFacts(rep)" />
+                <h3>Segments</h3>
+                @if (_segments is { Count: > 0 } segs)
+                {
+                    <div class="table-wrap">
+                        <table class="secondary">
+                            <thead><tr><th scope="col">Segment</th><th scope="col">Period</th><th scope="col" class="num">Records</th><th scope="col">Chain</th></tr></thead>
+                            <tbody>
+                                @foreach (var sg in segs)
+                                {
+                                    var current = SegmentScope.IsCurrent(sg);
+                                    <tr>
+                                        <td>@(current ? "Current" : "Archived · " + (string.IsNullOrWhiteSpace(sg.Label) ? sg.Id : sg.Label))</td>
+                                        <td class="mono">@(sg.FirstUtc is null ? "No records" : Fmt.Utc(sg.FirstUtc) + " → " + Fmt.Utc(sg.LastUtc))</td>
+                                        <td class="num mono">@Fmt.Int(sg.Entries)</td>
+                                        <td>@ChainLabel(sg.ChainValid)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    <span class="note">Browse an archived segment's records under Requests (segment selector).</span>
+                }
+                else
+                {
+                    <span class="note">@(_segmentsError ?? "Only the current segment is reported.") Current: @(rep.FirstEntryUtc is null ? "no records yet" : Fmt.Utc(rep.FirstEntryUtc) + " → " + Fmt.Utc(rep.LastEntryUtc)).</span>
+                }
+            </details>
         }
     </RequiresConnection>
 </div>
 
 @code {
+    private const int RecentLimit = 25;
+
     private EvidenceReport? _report;
     private bool _loading;
     private bool _exporting;
@@ -118,23 +201,42 @@
     private DateTimeOffset? _verifiedAt;
     private bool _started;
 
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    private List<AuditEntryView>? _recent;
+    private string? _recentError;
+    private List<AuditSegmentDto>? _segments;
+    private string? _segmentsError;
+
+    protected override void OnInitialized()
+    {
+        State.Changed += OnChanged;
+        Pg.Changed += OnPgChanged;
+    }
 
     protected override async Task OnParametersSetAsync()
     {
-        if (State.Connected && !_started) await LoadAsync();
+        if (State.Connected && !_started) await StartAsync();
+    }
+
+    private async Task StartAsync()
+    {
+        _started = true;
+        await Task.WhenAll(LoadAsync(), LoadRecentAsync(), LoadSegmentsAsync());
     }
 
     private async Task LoadAsync()
     {
         if (_loading) return;
-        _started = true;
-        _loading = true; _error = null;
+        _loading = true;
+        _error = null;
         StateHasChanged();
         try
         {
             _report = await Api.GetEvidenceAsync();
             _verifiedAt = DateTimeOffset.UtcNow;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
         }
         catch (Exception ex)
         {
@@ -148,13 +250,53 @@
         }
     }
 
+    private async Task LoadRecentAsync()
+    {
+        _recentError = null;
+        try
+        {
+            var page = await Api.GetRequestsAsync(RecentLimit);
+            _recent = page.Items;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (Exception ex)
+        {
+            _recentError = ex.Message;
+        }
+        StateHasChanged();
+    }
+
+    private async Task LoadSegmentsAsync()
+    {
+        try
+        {
+            _segments = await Api.GetSegmentsAsync();
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _segmentsError = "The archive listing is not available on this Host yet.";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (Exception ex)
+        {
+            _segmentsError = "Segments could not be listed: " + ex.Message + ".";
+        }
+    }
+
     private async Task ExportAsync()
     {
-        _exporting = true; _exportError = null;
+        _exporting = true;
+        _exportError = null;
         try
         {
             var json = await Api.GetEvidenceJsonAsync();
-            var name = $"covenant-evidence-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}Z.json";
+            var name = "covenant-evidence-" + DateTimeOffset.UtcNow.UtcDateTime.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture) + "Z.json";
             await Interop.DownloadTextAsync(name, "application/json", json);
         }
         catch (Exception ex)
@@ -167,53 +309,71 @@
         }
     }
 
-    private IReadOnlyList<FactList.Fact> StatusFacts(EvidenceReport r) =>
-    [
-        new("Last verification", _verifiedAt is { } v ? Fmt.Utc(v) : "—", true),
-        new("Scope", "Current segment"),
-        new("Entries checked", Fmt.Int(r.Entries), true),
-        new("Allowed / refused", $"{Fmt.Int(r.Allowed)} / {Fmt.Int(r.Denied)}", true),
-        new("First entry", Fmt.Utc(r.FirstEntryUtc), true),
-        new("Last entry", Fmt.Utc(r.LastEntryUtc), true),
-        new("Source", "GET /admin/evidence", true),
-    ];
+    /// <summary>Completeness for a run of this session: pending while the bounded lookup runs, verified only when the
+    /// record exists and this segment's chain verified.</summary>
+    private (string Label, string Tone) SessionEvidence(PlaygroundRun run)
+    {
+        if (run.Evidence.State == EvidenceState.Error)
+            return ("Evidence lookup failed — " + (run.Evidence.Message ?? "retry"), "bad");
+        if (run.RequestId is null && !run.InFlight)
+            return ("No request id — rejected before governance, so no evidence record exists", "hollow");
+        bool found = run.Evidence.State == EvidenceState.Found;
+        bool pending = run.InFlight || run.Evidence.State is EvidenceState.Pending or EvidenceState.Idle;
+        var state = EvidenceCompleteness.State(found, found ? _report?.ChainValid : null, pending);
+        return EvidenceCompleteness.Text(state);
+    }
+
+    private static string RecordedLabel(bool? chainValid) => chainValid switch
+    {
+        true => "Recorded · chain verified",
+        false => "Recorded · chain FAILS",
+        null => "Recorded · not verified yet",
+    };
+
+    private static string ChainLabel(bool? chainValid) => chainValid switch
+    {
+        true => "Verified",
+        false => "FAILED",
+        null => "Not reported",
+    };
+
+    private static string WhoText(AuditEntryView r)
+    {
+        var parts = new List<string>
+        {
+            "application " + Fmt.OrNotRecorded(r.ApplicationId),
+            "team " + Fmt.OrNotRecorded(r.Tags.Team),
+            "entry " + Fmt.OrNotRecorded(r.EntryPoint),
+        };
+        if (r.EntryPoint == "console") parts.Add("operator " + Fmt.OrNotRecorded(r.OperatorRef) + " (shared)");
+        if (!string.IsNullOrWhiteSpace(r.ProfileId)) parts.Add("profile " + r.ProfileId);
+        return string.Join(" · ", parts);
+    }
 
     private bool? AnchorConfigured(EvidenceReport r) => r.AnchorConfigured ?? State.LastStatus?.Anchor?.Configured;
     private long? AnchorCount(EvidenceReport r) => r.AnchorCount ?? State.LastStatus?.Anchor?.AnchorsWritten;
     private DateTimeOffset? LastAnchor(EvidenceReport r) => r.LastAnchorUtc ?? State.LastStatus?.Anchor?.LastAnchorUtc;
 
-    private string AnchorStatusText(EvidenceReport r)
-    {
-        var configured = AnchorConfigured(r);
-        if (configured is null) return "Not reported by this Host";
-        if (configured == false) return "Not configured";
-        var count = AnchorCount(r);
-        if (count is null) return "Configured · coverage not reported";
-        if (count == 0) return "Configured · no anchor written yet";
-        return r.ChainValid ? $"Configured · {Fmt.Int(count.Value)} anchors compared" : $"Configured · {Fmt.Int(count.Value)} anchors";
-    }
-
-    private string AnchorPillKind(EvidenceReport r)
-    {
-        var configured = AnchorConfigured(r);
-        if (configured != true) return "unknown";
-        var count = AnchorCount(r);
-        return count is > 0 && r.ChainValid ? "served" : "refused";
-    }
-
     private IReadOnlyList<FactList.Fact> AnchorFacts(EvidenceReport r) =>
     [
-        new("Audit:AnchorPath", AnchorConfigured(r) switch { true => "Configured (path not exposed)", false => "Not set", null => "Not reported" }),
-        new("Audit:AnchorEvery", State.LastStatus?.Anchor?.Every is { } every ? $"every {Fmt.Int(every)} entries" : "Not reported", true),
+        new("Anchor", AnchorConfigured(r) switch { true => "Configured (path not exposed)", false => "Not configured", null => "Not reported" }),
+        new("Anchor interval", State.LastStatus?.Anchor?.Every is { } every ? "every " + Fmt.Int(every) + " entries" : "Not reported", true),
         new("Anchors written", AnchorCount(r) is { } n ? Fmt.Int(n) : "Not reported", true),
         new("Last anchor written", LastAnchor(r) is { } t ? Fmt.Utc(t) : "Not reported", true),
+        new("First / last record", Fmt.Utc(r.FirstEntryUtc) + " → " + Fmt.Utc(r.LastEntryUtc), true),
     ];
 
     private void OnChanged()
     {
-        if (State.Connected && !_started) _ = InvokeAsync(LoadAsync);
+        if (State.Connected && !_started) _ = InvokeAsync(StartAsync);
         _ = InvokeAsync(StateHasChanged);
     }
 
-    public void Dispose() => State.Changed -= OnChanged;
+    private void OnPgChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        State.Changed -= OnChanged;
+        Pg.Changed -= OnPgChanged;
+    }
 }

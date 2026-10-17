@@ -27,7 +27,7 @@ public sealed class HttpMappingTests : IClassFixture<WebApplicationFactory<Progr
             b.UseSetting("Auth:Keys:0:Principal", "itest");
             b.UseSetting("Auth:Keys:0:Team", "itest-team");
             b.UseSetting("RateLimit:PerTeamPerMinute", "1");
-            b.UseSetting("Audit:Path", _auditPath);
+            CorrelationTestKit.IsolatePaths(b, _auditPath);
         });
         _client = _factory.CreateClient();
         _client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "test-api-key");
@@ -36,7 +36,7 @@ public sealed class HttpMappingTests : IClassFixture<WebApplicationFactory<Progr
     public void Dispose()
     {
         _factory.Dispose();
-        if (File.Exists(_auditPath)) File.Delete(_auditPath);
+        CorrelationTestKit.DeleteWithSiblings(_auditPath);
     }
 
     private static StringContent Chat(string content, bool stream = false) =>

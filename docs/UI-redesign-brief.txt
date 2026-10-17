@@ -1,3 +1,5 @@
+NOTE (2026-10-16): Superseded where they conflict by docs/CONSOLE-V2-IMPLEMENTATION-SPEC.md (editable configuration, console inference without pasted keys, real traces). Kept as history.
+
 Covenant UI redesign brief for Claude
 
 Purpose

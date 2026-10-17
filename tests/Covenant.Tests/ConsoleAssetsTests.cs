@@ -91,14 +91,13 @@ public sealed class ConsoleAssetsTests : IClassFixture<ConsoleAssetsTests.Factor
             builder.UseSetting("Auth:Keys:0:Key", "k");
             builder.UseSetting("Auth:Keys:0:Principal", "p");
             builder.UseSetting("Auth:Keys:0:Team", "t");
-            builder.UseSetting("Audit:Path", AuditPath);
+            CorrelationTestKit.IsolatePaths(builder, AuditPath);
         }
 
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            foreach (var f in Directory.GetFiles(Path.GetTempPath(), Path.GetFileName(AuditPath) + "*"))
-                File.Delete(f);
+            CorrelationTestKit.DeleteWithSiblings(AuditPath);
         }
     }
 

@@ -1,0 +1,171 @@
+@inject AdminApi Api
+
+@* Policy simulator (POST /admin/policies/simulate): the REAL classifier and policy engine on the Host, as a dry run —
+   no provider is called, no audit record, spend or reservation is written. Optionally against the unsaved draft
+   (the Host validates it and never applies it). Always labelled "Dry run". *@
+
+<section class="panel" aria-labelledby="@(P + "-h")">
+    <div class="panel-head">
+        <h2 id="@(P + "-h")">Policy simulator</h2>
+        <span class="tag unknown">Dry run — no provider called, nothing recorded</span>
+    </div>
+    <div class="form-grid">
+        <div class="field">
+            <label for="@(P + "-app")">Application</label>
+            <select id="@(P + "-app")" class="input" value="@(_app ?? "")" @onchange="OnApp" disabled="@(Applications is null)">
+                <option value="">@(Applications is null ? "Applications unavailable" : "Choose…")</option>
+                @foreach (var a in Applications ?? [])
+                {
+                    <option value="@a.Id">@(a.Id + " · team " + a.Team + (a.Enabled ? "" : " (disabled)"))</option>
+                }
+            </select>
+        </div>
+        <div class="field">
+            <label for="@(P + "-prof")">Workload profile</label>
+            <select id="@(P + "-prof")" class="input" value="@(_profile ?? "")" @onchange="OnProfile" disabled="@(SelectedApp is null)">
+                <option value="">Application default</option>
+                @foreach (var p in SelectedApp?.GrantedProfiles ?? [])
+                {
+                    <option value="@p">@ComposerRules.ProfileLabel(Profiles, p)</option>
+                }
+            </select>
+        </div>
+        <div class="field">
+            <label for="@(P + "-model")">Model override (optional)</label>
+            <input id="@(P + "-model")" class="input mono" type="text" spellcheck="false" placeholder="connection/model" @bind="_model" @bind:event="oninput" />
+        </div>
+        <div class="field">
+            <span class="field-label" id="@(P + "-cfg-l")">Simulate against</span>
+            <div class="seg" role="radiogroup" aria-labelledby="@(P + "-cfg-l")">
+                <button type="button" role="radio" aria-checked="@(!_useDraft ? "true" : "false")" @onclick="() => _useDraft = false">@AppliedLabel</button>
+                <button type="button" role="radio" aria-checked="@(_useDraft ? "true" : "false")" @onclick="() => _useDraft = true" disabled="@(Draft is null)">Unsaved draft</button>
+            </div>
+        </div>
+    </div>
+    <div class="field">
+        <label for="@(P + "-prompt")">Prompt (synthetic content only)</label>
+        <textarea id="@(P + "-prompt")" class="input textarea short" rows="3" @bind="_prompt" @bind:event="oninput"></textarea>
+        <span class="help">The detector may escalate the profile's trusted baseline; it can never lower it. Nothing is sent to a model.</span>
+    </div>
+    <div class="btn-row">
+        <button type="button" class="btn primary" @onclick="RunAsync" disabled="@(_running || _app is null)" aria-busy="@(_running ? "true" : null)">@(_running ? "Simulating…" : "Simulate (dry run)")</button>
+    </div>
+    <ErrorBanner Title="Simulation could not run" Message="@_error" />
+    @if (_result is { } r)
+    {
+        <div class="sim-result" aria-live="polite">
+            <div class="result-head">
+                <span class="outcome @(r.Decision == "route" ? "served" : "refused")">@(r.Decision == "route" ? "Would route" : "Would be refused")</span>
+                <span class="tag unknown">@("Dry run · " + (r.ConfigVersion is { } cv ? "config v" + cv.ToString(System.Globalization.CultureInfo.InvariantCulture) : "config version not reported") + (_ranOnDraft ? " (unsaved draft)" : ""))</span>
+            </div>
+            <dl class="facts">
+                <dt>Trusted baseline</dt><dd>@PolicyText.ClassificationLabel(r.Baseline) @(r.Profile is { Length: > 0 } pr ? "· profile " + pr : "")</dd>
+                <dt>Final classification</dt><dd>@PolicyText.ClassificationLabel(r.Classification) @(r.DetectedSignal is { Length: > 0 } sig ? "· detector: " + sig : "· detector matched nothing (no escalation)")</dd>
+                <dt>Policy</dt><dd class="mono">@(r.PolicyId ?? "No policy matched")</dd>
+                <dt>Primary</dt><dd class="mono wrap-any">@(r.Primary ?? "None")</dd>
+                <dt>Fallbacks</dt><dd class="mono wrap-any">@(r.Fallbacks.Count == 0 ? "None" : string.Join(" → ", r.Fallbacks))</dd>
+                <dt>Reason</dt><dd class="wrap-any">@Fmt.OrNotRecorded(r.Reason)</dd>
+                @if (r.Explanation is { Length: > 0 } ex)
+                {
+                    <dt>Explanation</dt><dd class="wrap-any">@ex</dd>
+                }
+            </dl>
+            @if (r.Eligible.Count > 0)
+            {
+                <ol class="attempt-list">
+                    @foreach (var t in r.Eligible)
+                    {
+                        <li>
+                            <span class="mono wrap-any">@(t.Target ?? "target not reported")</span>
+                            <BoundaryTag Boundary="@ComposerRules.BoundaryLabel(t.Boundary)" />
+                            <span class="@(t.ExcludedReason is null ? "state-text s-passed" : "state-text s-skipped")">@(t.ExcludedReason is null ? "eligible" : "excluded: " + t.ExcludedReason)</span>
+                        </li>
+                    }
+                </ol>
+            }
+        </div>
+    }
+</section>
+
+@code {
+    [Parameter] public IReadOnlyList<ApplicationSummaryDto>? Applications { get; set; }
+    [Parameter] public IReadOnlyList<WorkloadProfileDto>? Profiles { get; set; }
+    /// <summary>The unsaved draft, or null when there is none.</summary>
+    [Parameter] public CovenantConfigDto? Draft { get; set; }
+    [Parameter] public int? AppliedVersion { get; set; }
+
+    private readonly string P = "sim-" + Guid.NewGuid().ToString("n")[..6];
+    private string? _app;
+    private string? _profile;
+    private string? _model;
+    private string _prompt = "Extract the ticket priority from: \"Printer on floor 3 is out of toner. Priority: low.\" Reply as JSON {\"priority\": …}.";
+    private bool _useDraft;
+    private bool _running;
+    private bool _ranOnDraft;
+    private string? _error;
+    private SimulateResponseDto? _result;
+
+    private ApplicationSummaryDto? SelectedApp => Applications?.FirstOrDefault(a => a.Id == _app);
+    private string AppliedLabel => AppliedVersion is { } v ? "Applied v" + v.ToString(System.Globalization.CultureInfo.InvariantCulture) : "Applied version";
+
+    protected override void OnParametersSet()
+    {
+        if (Draft is null) _useDraft = false;
+        if (_app is null && Applications is { Count: > 0 } apps) _app = (apps.FirstOrDefault(a => a.Enabled) ?? apps[0]).Id;
+    }
+
+    private void OnApp(ChangeEventArgs e)
+    {
+        _app = string.IsNullOrWhiteSpace(e.Value?.ToString()) ? null : e.Value!.ToString();
+        _profile = null;
+        _result = null;
+    }
+
+    private void OnProfile(ChangeEventArgs e) => _profile = string.IsNullOrWhiteSpace(e.Value?.ToString()) ? null : e.Value!.ToString();
+
+    private async Task RunAsync()
+    {
+        if (_app is null || _running) return;
+        _running = true;
+        _error = null;
+        _result = null;
+        bool onDraft = _useDraft && Draft is not null;
+        try
+        {
+            _result = await Api.SimulateAsync(new SimulateRequestDto
+            {
+                ApplicationId = _app,
+                ProfileId = _profile,
+                Prompt = _prompt,
+                Model = string.IsNullOrWhiteSpace(_model) ? null : _model.Trim(),
+                Config = onDraft ? ConfigCopy.Deep(Draft!) : null,
+            });
+            _ranOnDraft = onDraft;
+            if (_result is { DryRun: false })
+            {
+                _error = "The Host did not confirm a dry run — the result is not shown.";
+                _result = null;
+            }
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _error = "The simulator is not available on this Host (POST /admin/policies/simulate missing).";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.UnprocessableEntity)
+        {
+            _error = "The unsaved draft does not validate, so it cannot be simulated. Preview its impact to see the errors.";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _running = false;
+        }
+    }
+}

@@ -5,15 +5,21 @@
 @inject AdminApi Api
 @inject AppState State
 @inject RequestsViewState View
+@inject WorkspaceConfig Ws
+@inject Interop Interop
 @inject NavigationManager Nav
 @implements IDisposable
 
 <PageTitle>Requests · Covenant</PageTitle>
 
 @*
-  TASK 05. A recent snapshot of the CURRENT audit segment (GET /admin/requests?limit=500), filtered client-side,
-  labelled as such. Rows show the facts recorded at processing time only — today's pause, policy or health never
-  recolours them. Deep links (/requests/{id}) always fetch the exact record by correlation id.
+  T08 + review round 2 (U9). Audit records of ONE segment (current, or an archived one chosen from GET
+  /admin/audit/segments), loaded in bounded newest-first pages (GET /admin/requests?limit=&cursor=&segment=) with "Load
+  older" following next_cursor (stable: appends never shift a page). The scope label comes from the page's segment
+  descriptor (segment.is_current/id/label) — never from the first row. 410 cursor_expired (the segment was archived)
+  stops paging and asks for a reload. Filters apply only to what is loaded — the page says so. Deep links (/requests/{id}) fetch the exact record (current segment). The drawer
+  shows attempts, trace summary, config version and identity, and exports the per-request evidence report
+  (GET /admin/requests/{id}/export — no prompt/response content).
 *@
 
 <div class="page" style="max-width:none">
@@ -21,14 +27,35 @@
         <div class="page-head">
             <div class="titles">
                 <h1>Requests</h1>
-                <span class="lede">@CoverageLabel</span>
+                <span class="lede">@ScopeLabel — governed decisions as recorded at processing time.</span>
             </div>
-            <Button Busy="@_loading" BusyText="Loading…" OnClick="LoadAsync">Refresh</Button>
+            <div class="field segment-field">
+                <label for="rq-seg">Audit segment</label>
+                <select id="rq-seg" class="input" value="@(View.SegmentId ?? "")" @onchange="OnSegment" disabled="@(View.Segments is null || _loading)">
+                    <option value="">Current segment</option>
+                    @foreach (var seg in ArchivedSegments)
+                    {
+                        <option value="@seg.Id">@SegmentScope.Option(seg)</option>
+                    }
+                </select>
+                <span class="help">@(View.SegmentsError ?? (View.Segments is null ? "Loading segments…" : ArchivedSegments.Count == 0 ? "No archived segments." : "Archived segments are read-only."))</span>
+            </div>
+            <Button Busy="@_loading" BusyText="Loading…" OnClick="ReloadAsync">Refresh</Button>
         </div>
 
-        <ErrorBanner Title="Could not load recent requests" Message="@_loadError" OnRetry="LoadAsync" Busy="@_loading" />
+        <ErrorBanner Title="Could not load requests" Message="@_loadError" OnRetry="ReloadAsync" Busy="@_loading" />
+        @if (View.Paging.Expired)
+        {
+            <div class="alert warn" role="alert">
+                <div class="alert-text">
+                    <strong>@RequestPaging.CursorExpiredMessage</strong>
+                    <span class="alert-body">Older pages of the list you loaded can no longer be followed (410 cursor_expired). The records shown stay as loaded; reload to page the segment again from its newest record.</span>
+                </div>
+                <Button OnClick="ReloadAsync" Busy="@_loading" BusyText="Reloading…">Reload the list</Button>
+            </div>
+        }
 
-        <div class="filters" role="search" aria-label="Filter recent requests">
+        <div class="filters" role="search" aria-label="Filter loaded requests">
             <div class="field search">
                 <label for="rq-id">Request id contains</label>
                 <input id="rq-id" class="input mono" type="search" spellcheck="false" placeholder="e.g. req_3f2a…"
@@ -65,6 +92,16 @@
                 </select>
             </div>
             <div class="field">
+                <label for="rq-app">Application</label>
+                <select id="rq-app" class="input mono" value="@(View.Criteria.Application ?? "")" @onchange="OnApplication">
+                    <option value="">Any application</option>
+                    @foreach (var a in ApplicationOptions)
+                    {
+                        <option value="@a">@a</option>
+                    }
+                </select>
+            </div>
+            <div class="field">
                 <label for="rq-time">Time</label>
                 <select id="rq-time" class="input" value="@View.Criteria.Window.ToString()" @onchange="OnWindow">
                     @foreach (var w in Enum.GetValues<TimeWindow>())
@@ -75,28 +112,36 @@
             </div>
             <Button Size="form" Disabled="@(!View.Criteria.IsActive)" OnClick="ClearFilters">Clear filters</Button>
         </div>
-        <span class="note">Filters apply to the recent snapshot loaded here (newest @RequestsViewState.SnapshotLimit records of the current audit segment), not to the full audit log or archived segments.</span>
+        <span class="note" role="status">@CoverageText</span>
 
         <section class="panel flush" aria-labelledby="rq-h">
             <div class="panel-head">
-                <h2 id="rq-h">Recent requests</h2>
+                <h2 id="rq-h">@(View.Segment is { } hs ? (hs.IsCurrent ? "Requests — current segment" : "Requests — archived segment") : "Requests")</h2>
                 <span class="panel-sub">@CountLabel</span>
             </div>
-            @if (View.Snapshot is null)
+            @if (!View.Loaded)
             {
                 if (_loading)
                 {
-                    <div style="padding:18px"><Skeleton Lines="5" Label="Loading recent requests" /></div>
+                    <div class="pad"><Skeleton Lines="5" Label="Loading requests" /></div>
                 }
             }
-            else if (View.Snapshot.Items.Count == 0)
+            else if (View.Items.Count == 0)
             {
-                <div style="padding:18px"><EmptyState Title="No requests in the current audit segment yet" Body="Run a request in the Playground; its audit record appears here." /></div>
+                <div class="pad">
+                    <EmptyState Title="@(View.SegmentId is null ? "No requests in the current audit segment yet" : "No requests in this archived segment")"
+                                Body="@(View.SegmentId is null ? "Run a request in the Playground; its audit record appears here." : "The segment holds no request records (control-plane events are not listed).")">
+                        @if (View.SegmentId is null)
+                        {
+                            <a class="btn" href="playground">Open Playground</a>
+                        }
+                    </EmptyState>
+                </div>
             }
             else if (Filtered.Count == 0)
             {
-                <div style="padding:18px">
-                    <EmptyState Title="No requests match these filters" Body="The loaded snapshot has records, but none match.">
+                <div class="pad">
+                    <EmptyState Title="No loaded requests match these filters" Body="Only the loaded records are filtered. Load older records or clear the filters.">
                         <Button OnClick="ClearFilters">Clear filters</Button>
                     </EmptyState>
                 </div>
@@ -106,22 +151,22 @@
                 <div class="table-scroll">
                     <table class="req-table">
                         <colgroup>
-                            <col style="width:150px" />
-                            <col style="width:170px" />
-                            <col style="width:190px" />
+                            <col style="width:140px" />
+                            <col style="width:200px" />
+                            <col style="width:180px" />
                             <col style="width:270px" />
                             <col style="width:90px" />
-                            <col style="width:170px" />
-                            <col style="width:200px" />
+                            <col style="width:130px" />
+                            <col style="width:180px" />
                         </colgroup>
                         <thead>
                             <tr>
                                 <th scope="col">Time (UTC)</th>
-                                <th scope="col">Identity / team</th>
+                                <th scope="col">Application / team</th>
                                 <th scope="col">Outcome</th>
-                                <th scope="col">Selected → served model</th>
+                                <th scope="col">Selected → served</th>
                                 <th scope="col" class="num">Duration</th>
-                                <th scope="col">Est. cost</th>
+                                <th scope="col">Cost</th>
                                 <th scope="col">Request id</th>
                             </tr>
                         </thead>
@@ -131,14 +176,13 @@
                                 var r = item;
                                 var o = OutcomeModel.FromRecord(r);
                                 var model = ModelFacts.SelectedToServed(r);
-                                var cost = CostText.CostShort(r);
-                                <tr class="@(r.Id == View.SelectedId ? "selected" : "")" @onclick="() => Open(r)">
+                                <tr class="clickable @(r.Id == View.SelectedId ? "selected" : "")" @onclick="() => Open(r)">
                                     <td class="mono"><span class="cell" title="@Fmt.Utc(r.TimestampUtc)">@(r.TimestampUtc.UtcDateTime.ToString("MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))</span></td>
-                                    <td><span class="cell" title="@(r.Principal + " / " + r.Tags.Team)">@r.Principal <span class="subtle">/ @r.Tags.Team</span></span></td>
+                                    <td><span class="cell" title="@(Who(r))">@(r.ApplicationId ?? r.Principal) <span class="subtle">/ @r.Tags.Team</span>@(r.EntryPoint == "console" ? " · console" : "")</span></td>
                                     <td><span class="cell" title="@o.Title"><StatusPill Kind="@o.PillKind" Text="@OutcomeModel.Label(o.Outcome)" /></span></td>
-                                    <td class="mono"><span class="cell" title="@model">@model</span></td>
+                                    <td class="mono"><span class="cell" title="@model">@model@(r.Attempts is { Count: > 1 } at ? " (" + at.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + " attempts)" : "")</span></td>
                                     <td class="num mono">@Fmt.Ms(r.DurationMs)</td>
-                                    <td class="mono"><span class="cell" title="@CostText.Cost(r)">@cost</span></td>
+                                    <td class="mono"><span class="cell" title="@CostText.Cost(r)">@CostText.CostShort(r)</span></td>
                                     <td>
                                         <button type="button" id="@RowId(r.Id)" class="btn ghost sm mono cell" style="max-width:100%" title="@r.Id"
                                                 aria-label="@("Open details for request " + r.Id)" @onclick="() => Open(r)" @onclick:stopPropagation="true">
@@ -151,6 +195,27 @@
                     </table>
                 </div>
             }
+            @if (View.Loaded)
+            {
+                <div class="pad btn-row">
+                    @if (View.Items.Count >= RequestsViewState.MaxLoaded)
+                    {
+                        <span class="note warn">Loaded the browser limit of @Fmt.Int(RequestsViewState.MaxLoaded) records. Open a specific request by id, or choose a segment.</span>
+                    }
+                    else if (View.Paging.CanLoadOlder)
+                    {
+                        <Button OnClick="LoadOlderAsync" Busy="@_loadingMore" BusyText="Loading older…">Load older</Button>
+                    }
+                    else if (View.Paging.Expired)
+                    {
+                        <span class="note warn">@RequestPaging.CursorExpiredMessage</span>
+                    }
+                    else
+                    {
+                        <span class="note">No older records in this segment (the Host sent no next cursor).</span>
+                    }
+                </div>
+            }
         </section>
 
         <Drawer Open="@DrawerOpen" OpenChanged="OnDrawerOpenChanged" Title="@DrawerTitle" OpenerId="@(View.SelectedId is { } sid ? RowId(sid) : null)">
@@ -161,7 +226,7 @@
             else if (_notFound)
             {
                 <EmptyState Title="Not in the current audit segment"
-                            Body="@("No record with id " + Id + " was found (may be archived or not yet written). Archived segments are not searchable here; a request that was just sent may still be on its way.")">
+                            Body="@("No record with id " + Id + " was found in the current segment. It may not be written yet (the audit sink is asynchronous) or it may be archived — choose the archived segment above and open it from the list.")">
                     <Button OnClick="RetryDetailAsync">Retry lookup</Button>
                 </EmptyState>
             }
@@ -177,76 +242,158 @@
                 }
                 var o = OutcomeModel.FromRecord(rec);
                 var mf = ModelFacts.From(rec);
+                var trace = TraceModel.FromAuditSummary(rec.Trace, rec.Attempts, rec.ConfigVersion);
+                var incomplete = RecordFacts.IncompleteStreamText(rec);
 
                 <section class="drawer-section" aria-label="Result">
-                    <h3>1 · Result</h3>
+                    <h3>Result</h3>
                     <div class="result-head">
-                        <span class="outcome @o.PillKind" style="font-size:22px">@o.Title</span>
+                        <span class="outcome @o.PillKind">@o.Title</span>
                     </div>
                     <span class="secondary">@o.Explanation</span>
-                    <span class="note">Recorded when the request was processed. Today’s pause, policy or model health does not change this result.</span>
+                    <span class="note">Recorded when the request was processed. Today's pause, policy or model health does not change it.</span>
+                    @if (incomplete is not null)
+                    {
+                        <div class="alert bad" role="status"><div class="alert-text"><strong>Stream incomplete — not served</strong><span class="alert-body">@incomplete</span></div></div>
+                    }
+                    @if (RecordFacts.Truncated(rec))
+                    {
+                        <div class="alert warn" role="status"><div class="alert-text"><strong>Truncated at the output bound</strong><span class="alert-body">@RecordFacts.TruncatedText(rec) (enforced bound @RecordFacts.EffectiveMaxOutputTokens(rec) tokens).</span></div></div>
+                    }
+                    <div class="btn-row tight">
+                        <button type="button" class="btn sm" @onclick="() => ExportAsync(rec.Id)" disabled="@_exporting" aria-busy="@(_exporting ? "true" : null)">
+                            @(_exporting ? "Preparing…" : "Export evidence (JSON)")
+                        </button>
+                        <span class="secondary subtle">Version, attempts, costs and integrity — no prompt or response content.</span>
+                    </div>
+                    <ErrorBanner Title="Export failed" Message="@_exportError" />
+                    @if (_exportNote is not null)
+                    {
+                        <span class="note" role="status">@_exportNote</span>
+                    }
                 </section>
 
-                <section class="drawer-section" aria-label="Request, identity and routing">
-                    <h3>2 · Request, identity and routing</h3>
+                <section class="drawer-section" aria-label="Who and which rule">
+                    <h3>Who and which rule</h3>
                     <dl class="facts">
-                        <dt>Request id</dt><dd class="mono">@rec.Id</dd>
+                        <dt>Request id</dt><dd class="mono wrap-any">@rec.Id</dd>
                         <dt>Time</dt><dd>@Fmt.Utc(rec.TimestampUtc)</dd>
-                        <dt>Identity</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Principal)</dd>
+                        <dt>Entry point</dt><dd class="mono">@EntryText(rec.EntryPoint)</dd>
+                        <dt>Application</dt><dd class="mono">@Fmt.OrNotRecorded(rec.ApplicationId)</dd>
                         <dt>Team</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Tags.Team)</dd>
+                        <dt>Operator</dt><dd class="mono">@(rec.EntryPoint == "console" ? Fmt.OrNotRecorded(rec.OperatorRef) + " (shared console operator)" : rec.OperatorRef ?? "— (application key)")</dd>
+                        <dt>Workload profile</dt><dd class="mono">@Fmt.OrNotRecorded(rec.ProfileId)</dd>
+                        <dt>Config version</dt><dd class="mono">@(rec.ConfigVersion is { } cv ? "v" + cv.ToString(System.Globalization.CultureInfo.InvariantCulture) : ModelFacts.NotRecorded)</dd>
                         <dt>Workflow / use case</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Tags.Workflow) · @Fmt.OrNotRecorded(rec.Tags.UseCase)</dd>
-                        <dt>Selected model</dt><dd class="mono">@mf.Selected</dd>
-                        <dt>Provider attempted</dt><dd class="mono">@mf.Attempted</dd>
-                        <dt>Served model</dt><dd class="mono">@mf.Served</dd>
-                        <dt>Streamed</dt><dd>@(rec.Stream is { } st ? (st ? "Yes" : "No") : "Not recorded")</dd>
                         <dt>Stopped at</dt><dd>@StoppedText(rec)</dd>
-                        <dt>Recorded reason</dt><dd>@Fmt.OrNotRecorded(rec.Reason)</dd>
+                        <dt>Recorded reason</dt><dd class="wrap-any">@Fmt.OrNotRecorded(rec.Reason)</dd>
                     </dl>
                 </section>
 
                 <section class="drawer-section" aria-label="Classification">
-                    <h3>3 · Classification</h3>
-                    <span>@mf.Classification</span>
+                    <h3>Classification</h3>
+                    <dl class="facts">
+                        <dt>Trusted baseline</dt><dd>@Fmt.OrNotRecorded(rec.BaselineClassification)</dd>
+                        <dt>Final</dt><dd>@mf.Classification</dd>
+                    </dl>
                     @if (rec.ClassificationEvaluated == false)
                     {
                         <span class="note">The pipeline starts from the restrictive default (@rec.Classification) for enforcement. It is not a detection: the classifier never ran for this request.</span>
                     }
-                    else if (rec.ClassificationEvaluated is null)
+                </section>
+
+                <section class="drawer-section" aria-label="Routing and attempts">
+                    <h3>Selected, attempted, served</h3>
+                    @{ var dest = ModelFacts.Destination(rec, Ws.Connections); }
+                    <dl class="facts">
+                        <dt>Selected route</dt><dd class="mono wrap-any">@mf.Selected</dd>
+                        <dt>Attempted</dt><dd class="mono wrap-any">@mf.Attempted</dd>
+                        <dt>Served</dt><dd class="mono wrap-any">@mf.Served</dd>
+                        <dt>Served connection</dt><dd class="mono wrap-any">@RecordFacts.ServedConnection(rec)</dd>
+                        <dt>Destination</dt><dd><span class="mono wrap-any">@dest.Text</span> @if (!rec.CacheHit && dest.Text != ModelFacts.NoProviderCall && dest.Text != ModelFacts.NotRecorded) { <BoundaryTag Boundary="@dest.Boundary" /> }</dd>
+                        <dt>Streamed</dt><dd>@(rec.Stream is { } st ? (st ? "Yes" : "No") : "Not recorded")</dd>
+                        <dt>Requested max output tokens</dt><dd class="mono">@RecordFacts.RequestedMaxOutputTokens(rec)</dd>
+                        <dt>Effective (enforced) max output tokens</dt><dd class="mono">@RecordFacts.EffectiveMaxOutputTokens(rec)</dd>
+                        <dt>Truncated</dt><dd>@RecordFacts.TruncatedText(rec)</dd>
+                        @if (rec.PartialOutputChars is not null)
+                        {
+                            <dt>Partial output</dt><dd>@RecordFacts.PartialOutput(rec)</dd>
+                        }
+                    </dl>
+                    @{ var lines = AttemptFacts.Lines(rec, Ws.Connections); }
+                    @if (lines.Count > 0)
                     {
-                        <span class="note">Legacy record: whether classification ran was not recorded. Stored class: @Fmt.OrNotRecorded(rec.Classification)@(rec.Signal is { Length: > 0 } sg ? " · signal " + sg : "").</span>
+                        <ol class="attempt-list">
+                            @foreach (var a in lines)
+                            {
+                                <li>
+                                    <span class="mono">#@a.Number</span>
+                                    <span class="mono wrap-any">@a.Target</span>
+                                    <BoundaryTag Boundary="@a.Boundary" />
+                                    <span>@(a.Outcome + (a.ErrorClass is { } ec ? " · " + ec : ""))</span>
+                                    <span class="subtle">@AttemptFacts.Detail(a)</span>
+                                </li>
+                            }
+                        </ol>
+                        @if (AttemptFacts.FallbackSentence(rec) is { } fb)
+                        {
+                            <span class="note">@fb</span>
+                        }
+                        @if (rec.Attempts?.Any(at => at.Overrun == true) == true)
+                        {
+                            <span class="note warn">A reported charge exceeded its reservation — settled in full (hard caps are an estimated bound).</span>
+                        }
+                    }
+                    else
+                    {
+                        <span class="note">@(rec.Attempts is null ? (ModelFacts.IsV2(rec) ? "Attempts not recorded on this record." : "Not recorded (legacy record).") : "No provider attempt was made.")</span>
                     }
                 </section>
 
-                <section class="drawer-section" aria-label="Usage, estimated cost and timing">
-                    <h3>4 · Usage, estimated cost and timing</h3>
+                <section class="drawer-section" aria-label="Trace summary">
+                    <h3>Trace summary</h3>
+                    @if (trace is not null)
+                    {
+                        <TraceBar Trace="@trace" FeedState="TraceFeedState.Complete" Compact="true" />
+                    }
+                    else
+                    {
+                        <span class="note">No trace summary on this record (older record, or the stage list was not persisted).</span>
+                    }
+                </section>
+
+                <section class="drawer-section" aria-label="Usage and cost">
+                    <h3>Usage and cost</h3>
                     <dl class="facts">
                         <dt>Tokens</dt><dd class="mono">@CostText.Tokens(rec)</dd>
-                        <dt>Estimated cost</dt><dd>@CostText.Cost(rec)</dd>
-                        <dt>Cost basis</dt><dd>@CostText.BasisDescription(rec.CostBasis)</dd>
+                        <dt>Cost</dt><dd>@CostText.Cost(rec)</dd>
+                        <dt>Why</dt><dd>@CostText.BasisDescription(rec.CostBasis)</dd>
+                        @if (rec.ReservedUsd is { } res)
+                        {
+                            <dt>Reserved / settled</dt><dd class="mono">@Money.Usd(res) / @Money.Usd(rec.SettledUsd)</dd>
+                        }
                         <dt>Cache</dt><dd>@(rec.CacheHit ? "Hit — response reused, no provider call" : "Not served from cache")</dd>
                         <dt>Duration</dt><dd class="mono">@Fmt.Ms(rec.DurationMs) (recorded by Covenant)</dd>
                     </dl>
                 </section>
 
                 <section class="drawer-section" aria-label="Audit evidence">
-                    <h3>5 · Audit evidence</h3>
+                    <h3>Audit evidence</h3>
                     <dl class="facts">
-                        <dt>Prompt SHA-256</dt><dd class="mono">@Fmt.OrNotRecorded(rec.PromptSha256)</dd>
+                        <dt>Segment</dt><dd>@(View.Segment is { } ds && IsInLoaded(rec) ? SegmentScope.Label(ds) : "Current segment (exact lookup by id)")@(SegmentChain is { } cv2 && IsInLoaded(rec) ? (cv2 ? " · chain verified" : " · chain verification FAILS") : "")</dd>
+                        <dt>Prompt SHA-256</dt><dd class="mono wrap-any">@Fmt.OrNotRecorded(rec.PromptSha256)</dd>
                         <dt>Prompt length</dt><dd class="mono">@rec.PromptChars chars</dd>
-                        <dt>Matched signal</dt><dd>@(rec.Signal is { Length: > 0 } sig ? sig : rec.ClassificationEvaluated == true ? "None" : "Not evaluated or not recorded")</dd>
                         <dt>Schema version</dt><dd class="mono">@(rec.SchemaVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "1 (legacy)")</dd>
                     </dl>
                     @if (rec.PromptPreview is { } preview)
                     {
-                        <span class="secondary" style="font-weight:500">Prompt preview</span>
+                        <span class="secondary">Prompt preview (retained by the preview setting when recorded)</span>
                         <pre class="code-block">@preview</pre>
-                        <span class="note">Preview retained because Audit:PromptPreviewChars &gt; 0 when this record was written.</span>
                     }
                     else
                     {
-                        <span class="note">No prompt content is retained in this record — only its fingerprint and length.</span>
+                        <span class="note">No prompt content is retained in this record — only its fingerprint and length. Response text is never audit evidence.</span>
                     }
-                    <span class="note">Response text is never audit evidence; the Playground shows it only to the operator who sent the request.</span>
                     <details class="raw">
                         <summary>Raw audit record (JSON)</summary>
                         <pre class="code-block">@RawJson(rec)</pre>
@@ -267,14 +414,25 @@
     });
 
     private bool _loading;
+    private bool _loadingMore;
     private string? _loadError;
     private bool _detailLoading;
     private string? _detailError;
     private bool _notFound;
     private string? _paramId;
+    private bool _exporting;
+    private string? _exportError;
+    private string? _exportNote;
 
-    private IReadOnlyList<AuditEntryView> Items => View.Snapshot?.Items ?? [];
+    private IReadOnlyList<AuditEntryView> Items => View.Items;
     private IReadOnlyList<AuditEntryView> Filtered => RequestFilter.Apply(Items, View.Criteria, DateTimeOffset.UtcNow);
+
+    private IReadOnlyList<AuditSegmentDto> ArchivedSegments
+        => View.Segments is { } all ? all.Where(s => !SegmentScope.IsCurrent(s)).ToList() : [];
+
+    private bool IsInLoaded(AuditEntryView rec) => View.Items.Any(i => string.Equals(i.Id, rec.Id, StringComparison.Ordinal));
+
+    private bool? SegmentChain => View.Segment?.ChainValid;
 
     private IReadOnlyList<DisplayOutcome> OutcomeOptions
     {
@@ -288,38 +446,42 @@
 
     private IReadOnlyList<string> ModelOptions => WithSelected(RequestFilter.Models(Items), View.Criteria.Model);
     private IReadOnlyList<string> TeamOptions => WithSelected(RequestFilter.Teams(Items), View.Criteria.Team);
+    private IReadOnlyList<string> ApplicationOptions => WithSelected(RequestFilter.Applications(Items), View.Criteria.Application);
 
     private bool DrawerOpen => Id is not null;
-
     private string DrawerTitle => Id is null ? "Request" : "Request " + Truncate(Id);
 
-    private string CoverageLabel
-    {
-        get
-        {
-            if (View.Snapshot is not { } snap) return "Recent requests — current audit segment; not a full audit history search";
-            var since = snap.Segment.FirstUtc is { } f ? Fmt.Utc(f) : "(no records yet)";
-            return $"Recent requests — current audit segment since {since} ({Fmt.Int(snap.Segment.Entries)} records); not a full audit history search";
-        }
-    }
+    /// <summary>From the Host's segment descriptor of the loaded pages (segment.is_current/label/id); before the first
+    /// page arrives, only what was asked for.</summary>
+    private string ScopeLabel
+        => View.Segment is { } seg
+            ? SegmentScope.Label(seg)
+            : View.SegmentId is null ? "Current segment" : "Archived segment " + View.SegmentId + " (loading)";
+
+    private string CoverageText
+        => View.Loaded
+            ? SegmentScope.Coverage(ScopeLabel, View.Items.Count, View.Segment?.Entries, View.Paging.CanLoadOlder, View.Criteria.IsActive)
+            : "Filters apply only to the records loaded from the selected segment — never to the whole audit history.";
 
     private string CountLabel
     {
         get
         {
-            if (View.Snapshot is not { } snap) return "";
-            var loaded = snap.Items.Count;
-            var shown = Filtered.Count;
+            if (!View.Loaded) return "";
             var loadedAt = View.LoadedUtc is { } t ? " · loaded " + Fmt.UtcShort(t) + " UTC" : "";
-            var cap = snap.Segment.Entries > loaded ? $" (newest {Fmt.Int(loaded)} of {Fmt.Int(snap.Segment.Entries)})" : "";
-            return $"Showing {Fmt.Int(shown)} of {Fmt.Int(loaded)} loaded{cap}{loadedAt}";
+            return "Showing " + Fmt.Int(Filtered.Count) + " of " + Fmt.Int(View.Items.Count) + " loaded" + loadedAt;
         }
     }
 
     protected override async Task OnInitializedAsync()
     {
         State.Changed += OnStateChanged;
-        if (State.Connected && View.Snapshot is null) await LoadAsync();
+        if (State.Connected)
+        {
+            _ = Ws.EnsureLoadedAsync();
+            await LoadSegmentsAsync();
+            if (!View.Loaded) await LoadFirstPageAsync();
+        }
     }
 
     protected override async Task OnParametersSetAsync()
@@ -328,6 +490,7 @@
         _paramId = Id;
         _notFound = false;
         _detailError = null;
+        _exportError = null;
         if (Id is null)
         {
             View.SelectedId = null;
@@ -344,7 +507,8 @@
         {
             if (State.Connected)
             {
-                if (View.Snapshot is null && !_loading && _loadError is null) await LoadAsync();
+                if (View.Segments is null && View.SegmentsError is null) await LoadSegmentsAsync();
+                if (!View.Loaded && !_loading && _loadError is null) await LoadFirstPageAsync();
                 if (Id is not null && View.SelectedRecord is null && !_detailLoading && !_notFound && _detailError is null)
                     await EnsureDetailAsync();
             }
@@ -352,20 +516,94 @@
         });
     }
 
-    private async Task LoadAsync()
+    private async Task LoadSegmentsAsync()
     {
-        if (!State.Connected || _loading) return;
-        _loading = true;
-        _loadError = null;
-        StateHasChanged();
         try
         {
-            View.Snapshot = await Api.GetRequestsAsync(RequestsViewState.SnapshotLimit);
+            View.Segments = await Api.GetSegmentsAsync();
+            View.SegmentsError = null;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            View.Segments = [];
+            View.SegmentsError = "Current segment only — the archive listing is not available on this Host yet.";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (Exception ex)
+        {
+            View.Segments = [];
+            View.SegmentsError = "Segments could not be listed: " + ex.Message;
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        await LoadSegmentsAsync();
+        await LoadFirstPageAsync();
+    }
+
+    private async Task OnSegment(ChangeEventArgs e)
+    {
+        var id = e.Value?.ToString();
+        View.ResetPages(string.IsNullOrWhiteSpace(id) ? null : id);
+        View.Criteria = RequestFilterCriteria.None;
+        await LoadFirstPageAsync();
+    }
+
+    private async Task LoadFirstPageAsync()
+    {
+        if (!State.Connected || _loading) return;
+        var segment = View.SegmentId;
+        View.ResetPages(segment);
+        await LoadPageAsync(cursor: null, first: true);
+    }
+
+    private async Task LoadOlderAsync()
+    {
+        if (!View.Paging.CanLoadOlder || View.NextCursor is not { } cursor || _loadingMore) return;
+        await LoadPageAsync(cursor, first: false);
+    }
+
+    private async Task LoadPageAsync(string? cursor, bool first)
+    {
+        if (first) _loading = true; else _loadingMore = true;
+        _loadError = null;
+        StateHasChanged();
+        var requested = View.SegmentId;
+        try
+        {
+            // Never send segment= to a Host that did not list segments: an older Host would ignore it and answer
+            // with the CURRENT segment, which would then be mislabelled as archived.
+            if (requested is not null && View.SegmentsError is not null)
+            {
+                _loadError = "Archived segments cannot be browsed on this Host.";
+                return;
+            }
+            // A cursor encodes its segment: the next page is requested with the cursor alone (segment= would only be
+            // re-checked against it by the Host).
+            var page = await Api.GetRequestsPageAsync(RequestsViewState.PageSize, cursor, cursor is null ? requested : null);
+            if (!string.Equals(View.SegmentId, requested, StringComparison.Ordinal)) return; // selection changed meanwhile
+            if (View.Paging.ApplyPage(page, older: cursor is not null) != PageResult.Accepted)
+            {
+                _loadError = View.Paging.Problem;
+                return;
+            }
+            View.AddPage(page.Items);
             View.LoadedUtc = DateTimeOffset.UtcNow;
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
         {
             // ConsoleSession disconnects and routes to /connect.
+        }
+        catch (ApiException ex)
+        {
+            if (!string.Equals(View.SegmentId, requested, StringComparison.Ordinal)) return;
+            // 410 cursor_expired: the segment was archived/replaced since the cursor was issued → banner + reload.
+            if (View.Paging.ApplyError((int?)ex.Status, ex.ErrorCode, ex.Message) != PageResult.CursorExpired)
+                _loadError = View.Paging.Problem;
         }
         catch (Exception ex)
         {
@@ -374,14 +612,22 @@
         finally
         {
             _loading = false;
+            _loadingMore = false;
         }
     }
 
-    /// <summary>Deep link / selection: always the exact record for this id, even if the filters exclude it.</summary>
+    /// <summary>Deep link / selection: the exact record for this id. A row of the loaded page is used as-is (it may
+    /// belong to an archived segment, which the by-id lookup does not search); otherwise GET /admin/requests/{id}.</summary>
     private async Task EnsureDetailAsync()
     {
         if (Id is not { } id || !State.Connected) return;
         if (View.SelectedRecord is { } have && string.Equals(have.Id, id, StringComparison.Ordinal)) return;
+        var loaded = View.Items.FirstOrDefault(i => string.Equals(i.Id, id, StringComparison.Ordinal));
+        if (loaded is not null)
+        {
+            View.SelectedRecord = loaded;
+            return;
+        }
         _detailLoading = true;
         _notFound = false;
         _detailError = null;
@@ -421,6 +667,49 @@
         await EnsureDetailAsync();
     }
 
+    private async Task ExportAsync(string id)
+    {
+        if (_exporting) return;
+        _exporting = true;
+        _exportError = null;
+        try
+        {
+            _exportNote = null;
+            var json = await Api.GetRequestExportJsonAsync(id, View.Segment is { IsCurrent: false, Id: { } sid } ? sid : null);
+            await Interop.DownloadTextAsync("covenant-request-" + id + ".json", "application/json", json);
+            _exportNote = ExportSummary(json);
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _exportError = "Export not available (404): the record was not found in the searched segment, or this Host has no export endpoint yet.";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // handled by ConsoleSession
+        }
+        catch (Exception ex)
+        {
+            _exportError = ex.Message;
+        }
+        finally
+        {
+            _exporting = false;
+        }
+    }
+
+    /// <summary>One line about the downloaded export (the file itself is the server's bytes, unmodified).</summary>
+    private static string? ExportSummary(string json)
+    {
+        RequestExportDto? e;
+        try { e = JsonSerializer.Deserialize(json, UiJsonContext.Default.RequestExportDto); }
+        catch (JsonException) { return "Downloaded. The export could not be summarised (unexpected shape)."; }
+        if (e is null) return null;
+        var integrity = e.Integrity.Status == "verified" ? "integrity verified" : "integrity UNVERIFIED (" + (e.Integrity.ChainFailure ?? "chain broken") + ")";
+        return "Downloaded " + e.RequestId + " · " + SegmentScope.Label(e.Segment) + " · " + integrity
+               + (e.Integrity.Line is { } line ? " · line " + line.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")
+               + (e.ContentIncluded ? " · CONTAINS content" : " · no prompt/response content");
+    }
+
     private void Open(AuditEntryView r)
     {
         View.SelectedId = r.Id;
@@ -436,15 +725,25 @@
 
     private string? HiddenNote(AuditEntryView rec)
     {
-        if (View.Snapshot is null) return null;
-        bool inSnapshot = Items.Any(i => string.Equals(i.Id, rec.Id, StringComparison.Ordinal));
-        if (!inSnapshot)
-            return "This request is not in the loaded recent list (it is newer than the snapshot, or older than the newest "
-                   + RequestsViewState.SnapshotLimit + " records). Shown from an exact lookup by id.";
+        if (!View.Loaded) return null;
+        bool inLoaded = Items.Any(i => string.Equals(i.Id, rec.Id, StringComparison.Ordinal));
+        if (!inLoaded)
+            return "This request is not among the loaded records of the selected segment (newer than the last load, or older than what is loaded). Shown from an exact lookup by id in the current segment.";
         if (!RequestFilter.Matches(rec, View.Criteria, DateTimeOffset.UtcNow))
             return "This request is hidden by the current filters. It is shown because it was opened by id.";
         return null;
     }
+
+    private static string Who(AuditEntryView r)
+        => "application " + (r.ApplicationId ?? "not recorded") + " · team " + r.Tags.Team + " · principal " + r.Principal + " · entry " + (r.EntryPoint ?? "not recorded");
+
+    private static string EntryText(string? entry) => entry switch
+    {
+        "console" => "console (POST /admin/playground/requests)",
+        "v1" => "v1 (application key)",
+        null or "" => "Not recorded",
+        _ => entry,
+    };
 
     private static string StoppedText(AuditEntryView r)
     {
@@ -467,26 +766,19 @@
 
     // ---- Filter handlers: the criteria record is immutable; each change replaces it. ----
 
-    private void OnIdSearch(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with { IdSearch = e.Value?.ToString() };
+    private void OnIdSearch(ChangeEventArgs e) => View.Criteria = View.Criteria with { IdSearch = e.Value?.ToString() };
 
     private void OnOutcome(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with
-        {
-            Outcome = Enum.TryParse<DisplayOutcome>(e.Value?.ToString(), out var o) ? o : null,
-        };
+        => View.Criteria = View.Criteria with { Outcome = Enum.TryParse<DisplayOutcome>(e.Value?.ToString(), out var o) ? o : null };
 
-    private void OnModel(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with { Model = Blank(e.Value?.ToString()) };
+    private void OnModel(ChangeEventArgs e) => View.Criteria = View.Criteria with { Model = Blank(e.Value?.ToString()) };
 
-    private void OnTeam(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with { Team = Blank(e.Value?.ToString()) };
+    private void OnTeam(ChangeEventArgs e) => View.Criteria = View.Criteria with { Team = Blank(e.Value?.ToString()) };
+
+    private void OnApplication(ChangeEventArgs e) => View.Criteria = View.Criteria with { Application = Blank(e.Value?.ToString()) };
 
     private void OnWindow(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with
-        {
-            Window = Enum.TryParse<TimeWindow>(e.Value?.ToString(), out var w) ? w : TimeWindow.All,
-        };
+        => View.Criteria = View.Criteria with { Window = Enum.TryParse<TimeWindow>(e.Value?.ToString(), out var w) ? w : TimeWindow.All };
 
     private void ClearFilters() => View.Criteria = RequestFilterCriteria.None;
 

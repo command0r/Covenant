@@ -68,10 +68,25 @@ internal static class CorrelationTestKit
         return reader.ReadToEnd();
     }
 
+    /// <summary>Every per-instance durable path derives from ONE unique audit path (no shared /tmp default): the audit
+    /// log, the configuration repository (Config:Path) and the budget ledger (Budget:LedgerPath).</summary>
+    public static void IsolatePaths(IWebHostBuilder builder, string auditPath)
+    {
+        builder.UseSetting("Audit:Path", auditPath);
+        builder.UseSetting("Config:Path", ConfigDirFor(auditPath));
+        builder.UseSetting("Budget:LedgerPath", auditPath + ".ledger.jsonl");
+    }
+
+    public static string ConfigDirFor(string auditPath) => auditPath + ".config";
+
+    /// <summary>Deletes the audit file and every sibling derived from it (archives, anchors, ledger, config repository).</summary>
     public static void DeleteWithSiblings(string path)
     {
-        foreach (var f in Directory.GetFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + "*"))
+        var dir = Path.GetDirectoryName(path)!;
+        foreach (var f in Directory.GetFiles(dir, Path.GetFileName(path) + "*"))
             File.Delete(f);
+        foreach (var d in Directory.GetDirectories(dir, Path.GetFileName(path) + "*"))
+            try { Directory.Delete(d, recursive: true); } catch (IOException) { }
     }
 }
 
@@ -102,6 +117,7 @@ internal sealed class ScriptedChatClient : MEAI.IChatClient
         if (fail) throw new HttpRequestException("connection reset mid-stream");
         yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "rest");
         yield return new MEAI.ChatResponseUpdate { Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 7, OutputTokenCount = 3 })] };
+        yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop };   // terminal completion (real providers send one)
     }
 
     public object? GetService(Type serviceType, object? serviceKey = null) => null;
@@ -126,7 +142,7 @@ public sealed class CorrelationAndEvidenceTests : IClassFixture<CorrelationAndEv
             builder.UseSetting("Auth:Keys:0:Key", "k");
             builder.UseSetting("Auth:Keys:0:Principal", "p");
             builder.UseSetting("Auth:Keys:0:Team", "t");
-            builder.UseSetting("Audit:Path", AuditPath);
+            CorrelationTestKit.IsolatePaths(builder, AuditPath);
             // No Local:* → PII routes to the unconfigured local placeholder and fails closed.
             builder.ConfigureTestServices(services =>
                 services.AddSingleton<IChatClientRegistry>(new ChatClientRegistry(
@@ -271,9 +287,13 @@ public sealed class CorrelationAndEvidenceTests : IClassFixture<CorrelationAndEv
         }
     }
 
+    /// <summary>Review fix 4 (stricter than pre-v2, same intent): with no Local:* the legacy import's PII/PHI route
+    /// names the explicitly DISABLED placeholder connection, so the request is refused at POLICY — no model is
+    /// selected, none attempted, no provider and no cloud call. (Pre-v2: selected the placeholder, refused at provider.)</summary>
     [Fact]
-    public async Task Missing_local_adapter_403_selected_but_never_attempted()
+    public async Task Missing_local_model_403_refused_at_policy_never_selected_or_attempted()
     {
+        int callsBefore = _factory.Provider.Calls;
         var resp = await _client.PostAsync("/v1/chat/completions", CorrelationTestKit.Chat("my ssn is 123-45-6789"));
         Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
         var id = CorrelationTestKit.HeaderId(resp);
@@ -283,11 +303,14 @@ public sealed class CorrelationAndEvidenceTests : IClassFixture<CorrelationAndEv
         var e = await CorrelationTestKit.LookupAsync(_client, id);
         Assert.Equal(DataClassification.Pii, e.Classification);
         Assert.Equal("Governance", e.DenialKind);
-        Assert.Equal("provider", e.StoppedAtStage);
-        Assert.Equal("local-model-not-configured", e.SelectedModel);
+        Assert.Equal("policy", e.StoppedAtStage);
+        Assert.Contains("no eligible destination", e.Reason, StringComparison.Ordinal);
+        Assert.Contains("connection 'local' is disabled (not configured)", e.Reason, StringComparison.Ordinal);
+        Assert.Null(e.SelectedModel);
         Assert.Null(e.AttemptedModel);
         Assert.Null(e.ServedByModel);
         Assert.Equal("no_call", e.CostBasis);
+        Assert.Equal(callsBefore, _factory.Provider.Calls);       // no provider (and so no cloud) call
     }
 
     [Fact]
@@ -471,7 +494,7 @@ public sealed class CorrelationRateLimitTests : IClassFixture<CorrelationRateLim
             builder.UseSetting("Auth:Keys:0:Key", "k");
             builder.UseSetting("Auth:Keys:0:Principal", "p");
             builder.UseSetting("Auth:Keys:0:Team", "t");
-            builder.UseSetting("Audit:Path", AuditPath);
+            CorrelationTestKit.IsolatePaths(builder, AuditPath);
             builder.UseSetting("RateLimit:GlobalPerMinute", "1");
             builder.ConfigureTestServices(services =>
                 services.AddSingleton<IChatClientRegistry>(new ChatClientRegistry(
@@ -710,7 +733,7 @@ public sealed class LegacyAuditCompatibilityTests : IDisposable
         Assert.Equal("estimated_failed_call", entries[2].CostBasis);
 
         var ledger = new InMemorySpendLedger();
-        LedgerReplay.Rebuild(entries, ledger);
+        Covenant.Host.LedgerReplay.Rebuild(entries, ledger);
         Assert.Equal(0.002m + 0.01m + 0.0005m, ledger.GlobalSpendUsd);
         Assert.Equal(0.002m, ledger.TeamSpendUsd("legacy-team"));
         Assert.Equal(0.0105m, ledger.TeamSpendUsd("v2-team"));   // the estimated failed-call charge replays

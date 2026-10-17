@@ -30,7 +30,7 @@
          without referencing the Blazor WebAssembly project. Ui types live in Covenant.Ui.* namespaces — qualify
          them in tests where Covenant.Host has a same-named type (ErrorResponse, StatusReport, …). -->
     <Compile Include="..\..\src\Covenant.Ui\Logic\*.cs" Link="UiLogic\%(Filename)%(Extension)" />
-    <Compile Include="..\..\src\Covenant.Ui\Models\Contracts.cs" Link="UiLogic\Contracts.cs" />
+    <Compile Include="..\..\src\Covenant.Ui\Models\*.cs" Link="UiLogic\Models\%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

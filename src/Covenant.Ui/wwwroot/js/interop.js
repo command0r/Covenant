@@ -1,12 +1,14 @@
 // Covenant console — the entire JS surface. No libraries, no network, no logging.
 //
-// Storage rules (TASK 01): localStorage holds ONLY the theme choice. The admin token lives in
+// Storage rules (TASK 01, T08): localStorage holds ONLY the theme choice and the allow-listed console
+// preferences in PREF_KEYS (browser-local presentation defaults; never credentials or server configuration). The admin token lives in
 // sessionStorage (tab-scoped; closing the tab disconnects). Application keys, prompts and responses are
 // never persisted anywhere by this file — they stay in WASM memory.
 (function () {
   "use strict";
 
   var THEME_KEY = "covenant.theme";
+  var PREF_KEYS = { "stream-default": true };
 
   function applyTheme(theme) {
     var t = theme === "light" ? "light" : "dark";
@@ -18,6 +20,8 @@
   try { applyTheme(window.localStorage.getItem(THEME_KEY)); } catch (e) { applyTheme("dark"); }
 
   var traps = {}; // containerId -> keydown handler (focus trap for drawers/dialogs)
+  var escWatchers = {}; // watch id -> document keydown handler (presentation mode Escape)
+  var escSeq = 0;
 
   function focusables(container) {
     var sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -44,6 +48,15 @@
       var t = applyTheme(theme);
       try { window.localStorage.setItem(THEME_KEY, t); } catch (e) { /* preference simply won't persist */ }
       return t;
+    },
+
+    prefGet: function (name) {
+      if (!PREF_KEYS[name]) return null;
+      try { return window.localStorage.getItem("covenant.pref." + name); } catch (e) { return null; }
+    },
+    prefSet: function (name, value) {
+      if (!PREF_KEYS[name]) return false;
+      try { window.localStorage.setItem("covenant.pref." + name, String(value)); return true; } catch (e) { return false; }
     },
 
     focusElement: function (id) {
@@ -77,7 +90,28 @@
       delete traps[containerId];
     },
 
-    // Copy a request id (never a secret) to the clipboard. Resolves true on success.
+    // Presentation mode: Escape anywhere on the page (focus may be on <body> after the Run button disabled itself)
+    // calls the .NET method. Ignored when a dialog/popover inside the page handles its own Escape. Returns a watch id.
+    watchEscape: function (dotnetRef, method) {
+      var id = "esc-" + (++escSeq);
+      var handler = function (ev) {
+        if (ev.key !== "Escape" || ev.defaultPrevented) return;
+        var t = ev.target;
+        if (t && typeof t.closest === "function" && t.closest('[role="dialog"], .popover')) return;
+        dotnetRef.invokeMethodAsync(method);
+      };
+      escWatchers[id] = handler;
+      document.addEventListener("keydown", handler);
+      return id;
+    },
+    unwatchEscape: function (id) {
+      var handler = escWatchers[id];
+      if (!handler) return;
+      document.removeEventListener("keydown", handler);
+      delete escWatchers[id];
+    },
+
+    // Copy operator-selected text (a request id or the visible response — never a credential). Resolves true on success.
     copyText: function (text) {
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {

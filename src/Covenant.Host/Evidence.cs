@@ -113,6 +113,8 @@ public sealed class EvidenceReport
     [JsonPropertyName("chain_failure")] public string? ChainFailure { get; init; }
     [JsonPropertyName("first_invalid_line")] public int? FirstInvalidLine { get; init; }
     [JsonPropertyName("entries")] public required int Entries { get; init; }
+    /// <summary>Control-plane events in the chain (config.activated, …) — not requests (v3).</summary>
+    [JsonPropertyName("events")] public int Events { get; init; }
     [JsonPropertyName("allowed")] public required int Allowed { get; init; }
     [JsonPropertyName("denied")] public required int Denied { get; init; }
     [JsonPropertyName("first_entry_utc")] public DateTimeOffset? FirstEntryUtc { get; init; }
@@ -127,14 +129,15 @@ public sealed class EvidenceReport
     [JsonPropertyName("last_anchor_utc")] public DateTimeOffset? LastAnchorUtc { get; init; }
 }
 
-/// <summary>Durable budgets without new infrastructure: the audit log is the event store, the ledger its
-/// projection rebuilt by replay at boot. Outgrowing replay is the trigger for the audit-store ADR — not before.</summary>
+/// <summary>Pre-v2 projection of audit spend into an in-memory ledger (legacy compositions and tests). Since ADR-0014
+/// the Host no longer rebuilds budgets from the audit log: the persistent budget ledger is the source of accrued spend
+/// (the current audit segment is imported into it once, when no ledger exists).</summary>
 public static class LedgerReplay
 {
     public static void Rebuild(IReadOnlyList<AuditEntry> entries, Covenant.Governance.ISpendLedger ledger)
     {
         foreach (var e in entries)
-            if (e.Usage.CostUsd > 0m)
+            if (e.IsRequest() && e.Usage.CostUsd > 0m)   // control-plane events never carry spend
                 ledger.Record(e.Tags.Team, e.Usage.CostUsd);
     }
 }
@@ -143,7 +146,9 @@ public static class EvidenceExport
 {
     public static EvidenceReport Build(string auditLogPath, TimeProvider clock, string? anchorPath = null)
     {
-        var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditLogPath, anchorPath);
+        var (verification, all) = AuditChainVerifier.VerifyAndRead(auditLogPath, anchorPath);
+        // v3: control-plane events (config.activated, …) are chain-verified but are not requests.
+        var entries = all.Where(e => e.IsRequest()).ToList();
 
         var costByTeam = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var byClassification = new Dictionary<string, int>();
@@ -168,6 +173,7 @@ public static class EvidenceExport
             ChainFailure = verification.Failure,
             FirstInvalidLine = verification.FirstInvalidLine,
             Entries = entries.Count,
+            Events = all.Count - entries.Count,
             Allowed = allowed,
             Denied = denied,
             FirstEntryUtc = entries.Count > 0 ? entries[0].TimestampUtc : null,

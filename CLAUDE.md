@@ -5,7 +5,7 @@ Covenant is a **regulated AI governance & FinOps control plane** for LLM inferen
 This file is always loaded. Area-specific rules live in nested `CLAUDE.md` files (see Map). Keep this file thin; put detail in the area files.
 
 ## Prime directives (never violate)
-1. **We are not building a gateway.** Implement the smallest viable canonical proxy core; spend effort on governance, FinOps, and evidence — that is the moat. Don't chase provider breadth.
+1. **We are not building a gateway.** Implement the smallest viable canonical proxy core; spend effort on governance, FinOps, and evidence — that is the moat. Don't chase provider breadth (OpenAI, Anthropic, Ollama/OpenAI-compatible only). Governed routing, approved fallback, cost attribution and request inspection ARE in scope (ADR-0013) — they are governance, not gateway breadth.
 2. **Governance is pipeline middleware, never a bolt-on.** Policy, attribution, audit, and budgets are ordered stages in the request pipeline.
 3. **Fail-closed.** No policy match → deny. Misconfig → refuse to start. Never default to an unapproved model.
 4. **The perimeter is sacred.** No prompt, response, or metadata leaves the customer boundary. No phone-home. Egress only to the customer-approved model allow-list.
@@ -29,6 +29,5 @@ This file is always loaded. Area-specific rules live in nested `CLAUDE.md` files
 - Prefer the standard library and minimal dependencies; every dependency is audited (license + provenance).
 
 ## Status / source of truth
-Product spec: `docs/PRD-regulated-ai-governance-finops-v0.1.md`.
-Current phase: pre-build, defining architecture.
-First build target — the **P0 demo**: governed proxy → classification routing → real-time attribution → budget/kill switch → tamper-evident audit → one compliance-evidence export.
+Product spec: `docs/PRD-regulated-ai-governance-finops-v0.1.md` (not yet written). Current iteration: `docs/CONSOLE-V2-IMPLEMENTATION-SPEC.md`.
+Current phase: P0 built (governed proxy, classification routing, attribution, budgets/pause, tamper-evident audit, evidence export, embedded console). Now: console v2 — editable versioned configuration (ADR-0011), console inference as authorized test applications (ADR-0012), fallback + real traces (ADR-0013), budget reservations (ADR-0014).

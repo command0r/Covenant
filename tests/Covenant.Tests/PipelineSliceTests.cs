@@ -27,7 +27,8 @@ public class PipelineSliceTests
             yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[half..]);
             yield return new MEAI.ChatResponseUpdate
             {
-                Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 })]
+                Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 10, OutputTokenCount = 5 })],
+                FinishReason = MEAI.ChatFinishReason.Stop,   // terminal completion (review round 2: required for "served")
             };
         }
 

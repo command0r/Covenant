@@ -1,0 +1,246 @@
+@inject PlaygroundState Pg
+@inject WorkspaceConfig Ws
+@inject AppState State
+@implements IDisposable
+
+@* The shared request composer (Playground and the Overview compact composer bind the SAME PlaygroundState form).
+   "Run as" lists GET /admin/applications: only enabled + console-testing applications are selectable; the others
+   stay visible, disabled, with the reason. The profile select offers ONLY the application's granted profiles.
+   Presets populate; Run is always explicit; nothing here submits on render, on preset click or on reload. *@
+
+<div class="composer @(Compact ? "compact" : "")">
+    <div class="composer-grid">
+        <div class="field">
+            <label for="@(IdPrefix + "-app")">Run as</label>
+            <select id="@(IdPrefix + "-app")" class="input" value="@(Pg.Form.ApplicationId ?? "")" @onchange="OnApplication"
+                    disabled="@(Pg.Running || Ws.Applications is null)" aria-describedby="@(AppHelp is null ? null : IdPrefix + "-app-help")"
+                    title="Identity and team come from this application; its credential never reaches the browser.">
+                <option value="" disabled>@(Ws.Applications is null ? (Ws.Loading ? "Loading applications…" : "Applications unavailable") : "Choose an application…")</option>
+                @foreach (var c in ComposerRules.Applications(Ws.Applications))
+                {
+                    <option value="@c.App.Id" disabled="@(!c.Selectable)">@c.Label</option>
+                }
+            </select>
+            @if (AppHelp is { } ah)
+            {
+                <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@ah</span>
+            }
+        </div>
+        <div class="field">
+            <label for="@(IdPrefix + "-profile")">Workload profile</label>
+            @{ var app = ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId); var granted = ComposerRules.GrantedProfiles(app); }
+            <select id="@(IdPrefix + "-profile")" class="input" value="@(Pg.Form.ProfileId ?? "")" @onchange="OnProfile"
+                    disabled="@(Pg.Running || app is null || granted.Count == 0)"
+                    title="Trusted baseline set by the server; detection can only escalate it.">
+                @if (granted.Count == 0)
+                {
+                    <option value="">@(app is null ? "Choose an application first" : "No profile granted — server default")</option>
+                }
+                @foreach (var p in granted)
+                {
+                    <option value="@p">@ComposerRules.ProfileLabel(Ws.Profiles, p)</option>
+                }
+            </select>
+        </div>
+    </div>
+    @if (!Compact)
+    {
+        @* Review round 3: identity/retention explanations live here (and in tooltips), not as repeated lines in the flow. *@
+        <details class="about">
+            <summary>About this</summary>
+            <ul class="plain-list secondary">
+                <li>Identity and team come from the selected application; its credential never reaches the browser. The admin token runs the request as that application.</li>
+                <li>Only profiles granted to the application are offered. Each profile's baseline is a trusted, server-side classification; detection can only escalate it. There is no client-side classification control.</li>
+                <li>Response text is console-only: kept in this tab's memory, never persisted. The audit record holds a prompt fingerprint, not the response.</li>
+                <li>Grants, defaults and baselines are edited under Policies → Applications &amp; workload profiles.</li>
+            </ul>
+        </details>
+    }
+
+    <div class="preset-row" role="group" aria-label="Scenario presets — fill the composer; only Run sends">
+        <span class="preset-label">Presets</span>
+        @foreach (var p in ScenarioPresets.All)
+        {
+            var preset = p;
+            <button type="button" class="preset-chip" aria-pressed="@(Pg.Form.Scenario == preset.Letter && preset.StillMatches(Pg.Form) ? "true" : "false")"
+                    disabled="@Pg.Running" title="@preset.Hint" @onclick="() => Pg.ApplyPreset(preset)">
+                <span class="mono">@preset.Letter</span> @preset.Title
+            </button>
+        }
+    </div>
+    @if (CurrentPreset is { } cur)
+    {
+        <span class="note"><strong>Expected:</strong> @cur.Expectation</span>
+    }
+    @if (Pg.PresetNote is { } pn)
+    {
+        <span class="note warn" role="status">@pn</span>
+    }
+
+    <div class="field">
+        <label for="@(IdPrefix + "-prompt")">Prompt</label>
+        <textarea id="@(IdPrefix + "-prompt")" class="input textarea @(Compact ? "short" : "")" rows="@(Compact ? 3 : 6)"
+                  @bind="Pg.Form.Prompt" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged"
+                  disabled="@Pg.Running"></textarea>
+        @if (Pg.Form.FreshNonce)
+        {
+            <span class="help">A fresh nonce (<span class="mono">[run …]</span>) is appended on every run, so it is never served from cache.</span>
+        }
+    </div>
+
+    @if (!Compact)
+    {
+        <details class="advanced">
+            <summary>Advanced</summary>
+            <div class="advanced-body">
+                <div class="field">
+                    <span id="@(IdPrefix + "-route-l")" class="field-label">Model</span>
+                    <div class="seg" role="radiogroup" aria-labelledby="@(IdPrefix + "-route-l")">
+                        <button type="button" role="radio" aria-checked="@(Pg.Form.Mode == RouteMode.Policy ? "true" : "false")" disabled="@Pg.Running" @onclick="() => SetMode(RouteMode.Policy)">Let policy choose</button>
+                        <button type="button" role="radio" aria-checked="@(Pg.Form.Mode == RouteMode.Catalog ? "true" : "false")" disabled="@(Pg.Running || Overrides.Count == 0)" @onclick="() => SetMode(RouteMode.Catalog)">Eligible model</button>
+                        <button type="button" role="radio" aria-checked="@(Pg.Form.Mode == RouteMode.Explicit ? "true" : "false")" disabled="@Pg.Running" @onclick="() => SetMode(RouteMode.Explicit)">Test input</button>
+                    </div>
+                    @if (Pg.Form.Mode == RouteMode.Catalog)
+                    {
+                        <label for="@(IdPrefix + "-cat")" class="visually-hidden">Model override</label>
+                        <select id="@(IdPrefix + "-cat")" class="input mono" value="@(Pg.Form.CatalogModel ?? "")" @onchange="OnCatalogModel" disabled="@Pg.Running">
+                            @foreach (var o in Overrides)
+                            {
+                                <option value="@o.Value">@(o.Label + " · " + (o.Boundary ?? "boundary not reported"))</option>
+                            }
+                        </select>
+                        <span class="help">Pins this target (no fallback). Policy still checks the final classification — a listed model is not a permission grant.</span>
+                    }
+                    else if (Pg.Form.Mode == RouteMode.Explicit)
+                    {
+                        <label for="@(IdPrefix + "-explicit")" class="field-label">Model id — test input; does not grant permission</label>
+                        <input id="@(IdPrefix + "-explicit")" class="input mono" type="text" spellcheck="false"
+                               @bind="Pg.Form.ExplicitModel" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" />
+                    }
+                </div>
+                <div class="composer-grid three">
+                    <div class="field">
+                        <label for="@(IdPrefix + "-wf")">Workflow</label>
+                        <input id="@(IdPrefix + "-wf")" class="input" type="text" @bind="Pg.Form.Workflow" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" />
+                    </div>
+                    <div class="field">
+                        <label for="@(IdPrefix + "-uc")">Use case</label>
+                        <input id="@(IdPrefix + "-uc")" class="input" type="text" @bind="Pg.Form.UseCase" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" />
+                    </div>
+                    <div class="field">
+                        <label for="@(IdPrefix + "-max")">Max output tokens</label>
+                        <input id="@(IdPrefix + "-max")" class="input mono" type="number" min="1" @bind="Pg.Form.MaxTokens" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" />
+                    </div>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" @bind="Pg.Form.Streaming" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" /> Stream the response
+                </label>
+                <details class="tech">
+                    <summary>Technical details</summary>
+                    <span class="note">Runs through <span class="mono">POST /admin/playground/requests</span> with the admin token (ADR-0012): the Host resolves the selected test application and runs the same governed pipeline as <span class="mono">/v1</span>. The browser holds no application credential. Each Run sends a new <span class="mono">client_request_id</span>; a repeated id is refused (409), so nothing is replayed. Workflow and use case are attribution labels only.</span>
+                </details>
+            </div>
+        </details>
+    }
+
+    @if (ShowActionBar)
+    {
+        <div class="action-bar" role="group" aria-label="Request actions">
+            <button type="button" class="btn primary form" id="@(IdPrefix + "-run")" disabled="@(!Pg.CanRun)" aria-busy="@(Pg.Running ? "true" : null)" @onclick="RunAsync">
+                <Icon Name="play" Size="16" /><span>@RunLabel</span>
+            </button>
+            <button type="button" class="btn form" disabled="@(!Pg.Running)" @onclick="Pg.Cancel">
+                <Icon Name="stop" Size="16" /><span>Cancel</span>
+            </button>
+            <span class="action-status" title="@StatusText">@StatusText</span>
+            @ExtraActions
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public bool Compact { get; set; }
+    [Parameter] public bool ShowActionBar { get; set; } = true;
+    /// <summary>Unique prefix for element ids (label/for pairs) when more than one composer could render.</summary>
+    [Parameter] public string IdPrefix { get; set; } = "cmp";
+    /// <summary>Optional extra actions rendered at the end of the action bar (e.g. "Presentation mode").</summary>
+    [Parameter] public RenderFragment? ExtraActions { get; set; }
+
+    private ScenarioPreset? CurrentPreset => ScenarioPresets.Find(Pg.Form.Scenario) is { } p && p.StillMatches(Pg.Form) ? p : null;
+
+    private IReadOnlyList<OverrideOption> Overrides => ComposerRules.EligibleOverrides(Ws.Config?.Config, Pg.Form.ProfileId, State.Catalog);
+
+    private string RunLabel
+    {
+        get
+        {
+            if (Pg.Running) return "Running…";
+            return CurrentPreset is { } p && ScenarioPresets.IsReady(p, Pg.Form, Ws.Applications)
+                ? "Run preset " + p.Letter
+                : "Run";
+        }
+    }
+
+    /// <summary>Only a problem or a loading state is shown under "Run as"; the identity explanation is a tooltip and
+    /// part of "About this" (review round 3).</summary>
+    private string? AppHelp
+    {
+        get
+        {
+            if (Ws.ApplicationsError is { } e) return e;
+            if (Ws.Applications is null) return Ws.Loading ? "Loading test applications…" : "Test applications not loaded.";
+            if (!Ws.Applications.Any(a => ComposerRules.WhyNotSelectable(a) is null))
+                return "No application is enabled for console testing (allow it under Policies → Applications & workload profiles).";
+            return null;
+        }
+    }
+
+    private string StatusText
+    {
+        get
+        {
+            if (Pg.Running && Pg.Selected is { } r)
+                return "Running request #" + r.Snapshot.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture) + "…";
+            if (Pg.Problem is { } problem) return problem;
+            if (Pg.Selected is { Outcome: { } o } sel)
+                return "Last: #" + sel.Snapshot.Sequence.ToString(System.Globalization.CultureInfo.InvariantCulture) + " " + o.Title;
+            return "Ready to run";
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Pg.Changed += OnChanged;
+        Ws.Changed += OnChanged;
+        await Ws.EnsureLoadedAsync();
+        Pg.EnsureDefaultApplication();
+    }
+
+    private Task RunAsync() => Pg.RunAsync();
+
+    private void OnApplication(ChangeEventArgs e) => Pg.SelectApplication(e.Value?.ToString());
+
+    private void OnProfile(ChangeEventArgs e) => Pg.SelectProfile(e.Value?.ToString());
+
+    private void OnCatalogModel(ChangeEventArgs e)
+    {
+        Pg.Form.CatalogModel = e.Value?.ToString();
+        Pg.NotifyFormChanged();
+    }
+
+    private void SetMode(RouteMode mode)
+    {
+        Pg.Form.Mode = mode;
+        if (mode == RouteMode.Catalog && (string.IsNullOrWhiteSpace(Pg.Form.CatalogModel) || Overrides.All(o => o.Value != Pg.Form.CatalogModel)) && Overrides.Count > 0)
+            Pg.Form.CatalogModel = Overrides[0].Value;
+        Pg.NotifyFormChanged();
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Pg.Changed -= OnChanged;
+        Ws.Changed -= OnChanged;
+    }
+}

@@ -31,7 +31,7 @@ public sealed class ServedPathTests : IClassFixture<ServedPathTests.StubFactory>
             builder.UseSetting("Auth:Keys:0:Key", "k");
             builder.UseSetting("Auth:Keys:0:Principal", "p");
             builder.UseSetting("Auth:Keys:0:Team", "t");
-            builder.UseSetting("Audit:Path", AuditPath);
+            CorrelationTestKit.IsolatePaths(builder, AuditPath);
 
             // Replace the provider registry with in-memory stubs for the policy's OpenAI routes.
             // ConfigureTestServices runs AFTER the app's registrations, so this override wins; the
@@ -51,8 +51,7 @@ public sealed class ServedPathTests : IClassFixture<ServedPathTests.StubFactory>
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            foreach (var f in Directory.GetFiles(Path.GetTempPath(), Path.GetFileName(AuditPath) + "*"))
-                File.Delete(f);
+            CorrelationTestKit.DeleteWithSiblings(AuditPath);
         }
     }
 
@@ -68,6 +67,7 @@ public sealed class ServedPathTests : IClassFixture<ServedPathTests.StubFactory>
             yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[..6]);
             yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply[6..]);
             yield return new MEAI.ChatResponseUpdate { Contents = [new MEAI.UsageContent(new MEAI.UsageDetails { InputTokenCount = 7, OutputTokenCount = 4 })] };
+            yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop };   // terminal completion (real providers send one)
         }
 
         public object? GetService(Type t, object? key = null) => null;

@@ -33,15 +33,39 @@ public sealed partial class RegexDataClassifier : IDataClassifier
     private static partial Regex PhiPattern();
 }
 
-/// <summary>Pipeline stage: classifies the request and records the result on the context.</summary>
+/// <summary>Pipeline stage: classifies the request and records the result on the context.
+/// With a bound configuration (ADR-0012): final = max(trusted baseline, detected) — the detector can only
+/// ESCALATE. Its no-match result (Internal with no signal) means "no escalation", never "public", so Public is
+/// reachable only through a server-configured Public-baseline profile with nothing detected. Without a
+/// configuration the legacy behaviour (classification = detector result) is unchanged.</summary>
 public sealed class ClassifyStage(IDataClassifier classifier) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
         var result = classifier.Classify(ctx.Request);
-        ctx.Classification = result.Classification;
+        if (ctx.Configuration is null)
+        {
+            ctx.Classification = result.Classification;
+        }
+        else
+        {
+            var baseline = ctx.BaselineClassification ?? DataClassification.Internal;
+            ctx.BaselineClassification = baseline;
+            ctx.Classification = ClassificationRules.Combine(baseline, result);
+        }
         ctx.ClassificationSignal = result.Signal;
         ctx.ClassificationEvaluated = true;
         await next(ctx, ct);
+    }
+}
+
+/// <summary>ADR-0012: final = max(trusted baseline, detected); a no-match detector result (Internal with no
+/// signal) is "no escalation". Shared by the classify stage and the policy simulator.</summary>
+public static class ClassificationRules
+{
+    public static DataClassification Combine(DataClassification baseline, ClassificationResult detected)
+    {
+        bool noEscalation = detected.Signal is null && detected.Classification == DataClassification.Internal;
+        return noEscalation || detected.Classification <= baseline ? baseline : detected.Classification;
     }
 }

@@ -1,0 +1,22 @@
+@* Inline validation messages for one field path (and anything below it), from the last preview or the last 422.
+   Give the input aria-describedby="@Id" and aria-invalid when Has(...) is true. *@
+@{ var errors = Issues.ErrorsAt(Path); var warnings = Issues.WarningsAt(Path); }
+@if (errors.Count > 0 || warnings.Count > 0)
+{
+    <span id="@Id" class="field-issues">
+        @foreach (var e in errors)
+        {
+            <span class="help bad">@(e.Message + (IssueHelp.For(e.Code) is { } h ? " — " + h : ""))</span>
+        }
+        @foreach (var w in warnings)
+        {
+            <span class="help warn">@w.Message</span>
+        }
+    </span>
+}
+
+@code {
+    [Parameter, EditorRequired] public IssueIndex Issues { get; set; } = IssueIndex.Empty;
+    [Parameter, EditorRequired] public string Path { get; set; } = "";
+    [Parameter] public string? Id { get; set; }
+}

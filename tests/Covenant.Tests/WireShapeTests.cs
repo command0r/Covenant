@@ -167,7 +167,7 @@ public class WireShapeTests
         public Task<MEAI.ChatResponse> GetResponseAsync(IEnumerable<MEAI.ChatMessage> m, MEAI.ChatOptions? o = null, CancellationToken ct = default)
         { Seen = o; return Task.FromResult(new MEAI.ChatResponse(new MEAI.ChatMessage(MEAI.ChatRole.Assistant, "ok")) { Usage = new MEAI.UsageDetails { InputTokenCount = 1, OutputTokenCount = 1 } }); }
         public async IAsyncEnumerable<MEAI.ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<MEAI.ChatMessage> m, MEAI.ChatOptions? o = null, [EnumeratorCancellation] CancellationToken ct = default)
-        { Seen = o; await Task.Yield(); yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "ok"); }
+        { Seen = o; await Task.Yield(); yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, "ok"); yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop }; }
         public object? GetService(Type t, object? k = null) => null;
         public void Dispose() { }
     }
@@ -205,14 +205,14 @@ public class WireShapeTests
                 b.UseSetting("Auth:Keys:0:Key", "k");
                 b.UseSetting("Auth:Keys:0:Principal", "shape-tester");
                 b.UseSetting("Auth:Keys:0:Team", "t");
-                b.UseSetting("Audit:Path", _auditPath);
+                CorrelationTestKit.IsolatePaths(b, _auditPath);
             });
             _client = _factory.CreateClient();
             _client.DefaultRequestHeaders.Add("x-api-key", "k");
             _client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "k");
         }
 
-        public void Dispose() { _factory.Dispose(); if (File.Exists(_auditPath)) File.Delete(_auditPath); }
+        public void Dispose() { _factory.Dispose(); CorrelationTestKit.DeleteWithSiblings(_auditPath); }
 
         private static StringContent Body(string json) => new(json, Encoding.UTF8, "application/json");
 

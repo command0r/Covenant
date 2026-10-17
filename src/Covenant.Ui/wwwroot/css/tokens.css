@@ -24,6 +24,11 @@
   --blue-bg: #15233A;      /* current nav item, selected row */
   --danger-fill: #B8322A;  /* destructive confirm only */
   --scrim: rgba(0,0,0,.55); /* behind drawers */
+  --local: #5CC8C2;        /* in-perimeter destination (always with the word "Local") */
+  --local-bg: #12292A;
+  --cloud: #B9A2F7;        /* cloud destination (always with the word "Cloud") */
+  --cloud-bg: #251E3B;
+  --shadow: 0 6px 20px rgba(0,0,0,.35);
 }
 
 :root[data-theme="light"] {
@@ -45,6 +50,11 @@
   --red-bg: #FCE6E3;
   --blue-bg: #E3ECFB;
   --danger-fill: #B42318;
+  --local: #0E6B66;
+  --local-bg: #DDF2F1;
+  --cloud: #5F35BF;
+  --cloud-bg: #EEE8FB;
+  --shadow: 0 6px 20px rgba(20,26,32,.14);
 }
 
 :root {

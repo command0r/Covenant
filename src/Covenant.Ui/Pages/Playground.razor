@@ -1,137 +1,89 @@
-@page "/playground/{Scenario?}"
+@page "/playground"
+@page "/playground/{Scenario}"
 @inject AppState State
 @inject PlaygroundState Pg
-@inject ConsoleSession Session
+@inject WorkspaceConfig Ws
 @inject Interop Interop
 @inject NavigationManager Nav
-@implements IDisposable
+@implements IAsyncDisposable
 
 <PageTitle>Playground · Covenant</PageTitle>
 
 @*
-  TASK 04. Every Run sends a real POST /v1/chat/completions with the APPLICATION key (never the admin token);
-  the governed pipeline decides the outcome. Presets only fill the form. Each run freezes a RequestSnapshot, and
-  its result/evidence stay tied to that snapshot. Evidence is looked up by the server's correlation id
-  (X-Covenant-Request-Id == audit Id) — never by timestamp. Response text is console-only and memory-only.
+  T07 request workspace. Run sends POST /admin/playground/requests (admin token) as the selected test application
+  (ADR-0012); the governed pipeline decides. Prompt/composer left, streamed response right, an always-visible
+  action bar, the compact outcome line, the real trace (GET /admin/requests/{id}/trace/stream) and ONE details
+  drawer with the full facts and evidence. /playground/{A-D} only fills the composer. Nothing is submitted on
+  open, on reload or when a history entry is selected.
 *@
 
 @if (_present)
 {
     <RequiresConnection>
-        <div class="present-root" role="region" aria-label="Playground presentation mode">
+        @* Escape is a document-level listener (Interop.WatchEscapeAsync) while presentation mode is active: after Run the
+           Run button disables itself and focus would otherwise fall to <body>, outside any element handler. *@
+        <div class="present-root" id="pg-present-root" tabindex="-1" role="region" aria-label="Playground presentation mode">
             <header class="present-head">
                 <span class="brand">Covenant</span>
                 <span class="env" title="Environment">@State.EnvironmentLabel</span>
-                @if (State.LastStatus?.Mode is { Length: > 0 } mode)
-                {
-                    <span class="subtle">Provider mode: <span class="mono">@mode</span></span>
-                }
-                <span class="indicator" aria-live="polite">
-                    <span class="dot @(State.Paused ? "warn" : "hollow")" aria-hidden="true"></span>
-                    @(State.Paused ? "New provider calls paused" : "New provider calls accepted")
-                </span>
-                <span class="grow"></span>
-                <span class="pause-scope">Pauses NEW provider calls. Cache hits and in-flight calls are not stopped.</span>
-                @if (_pauseError is not null)
-                {
-                    <span role="alert" class="note bad">@_pauseError</span>
-                }
+                @{ var mode = ShellStatus.Mode(State.LastStatus?.Mode); }
+                <span class="mode-badge @mode.Tone">@mode.Label</span>
                 @if (State.Paused)
                 {
-                    <Button Variant="primary" Busy="@_pauseBusy" BusyText="Resuming…" OnClick="ResumeAsync">Resume new provider calls</Button>
+                    <span class="indicator"><span class="dot warn" aria-hidden="true"></span>New provider calls paused</span>
                 }
-                else
-                {
-                    <Button Busy="@_pauseBusy" BusyText="Pausing…" OnClick="PauseAsync">Pause new provider calls</Button>
-                }
-                <Button Id="pg-setup-open" OnClick="OpenSetup">Setup</Button>
-                <Button Variant="ghost" OnClick="TogglePresent">Exit presentation mode</Button>
+                <span class="grow"></span>
+                <span class="subtle secondary">Run as <span class="mono">@(Pg.Form.ApplicationId ?? "—")</span>@(Pg.Form.ProfileId is { } pp ? " · " + ComposerRules.ProfileLabel(Ws.Profiles, pp) : "")</span>
+                <button type="button" class="btn sm" id="pg-present-exit" @onclick="ExitPresent">Exit presentation <span class="subtle">(Esc)</span></button>
             </header>
 
-            <div class="present-scen" role="group" aria-label="Scenario presets (fill the form; only Run sends)">
-                @foreach (var p in ScenarioPresets.All)
-                {
-                    var preset = p;
-                    <button type="button" class="preset" aria-pressed="@(Pg.Form.Scenario == preset.Letter ? "true" : "false")"
-                            disabled="@Pg.Running" @onclick="() => Pg.ApplyPreset(preset)">
-                        @preset.Letter · @preset.Title
-                    </button>
-                }
-            </div>
-
-            <div class="present-main">
-                <section aria-label="Request">
-                    <label for="pp-prompt" class="secondary muted">Prompt</label>
-                    <textarea id="pp-prompt" class="input textarea" @bind="Pg.Form.Prompt" @bind:event="oninput" disabled="@Pg.Running"></textarea>
-                    <span class="secondary muted">@SetupLine()</span>
-                    @if (Pg.Form.Problem is { } problem && Pg.Form.Prompt.Length > 0)
-                    {
-                        <span class="note warn">@problem</span>
-                    }
-                    <div class="btn-row">
-                        <Button Variant="primary" Size="form" Disabled="@(!CanRun)" Busy="@Pg.Running" BusyText="Running…" OnClick="RunAsync">Run request</Button>
-                        <Button Size="form" Disabled="@(!Pg.Running)" OnClick="Cancel">Cancel</Button>
+            <div class="present-grid">
+                <section class="present-prompt" aria-label="Prompt">
+                    <label for="pp-prompt" class="field-label">Prompt</label>
+                    <textarea id="pp-prompt" class="input textarea" @bind="Pg.Form.Prompt" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running"></textarea>
+                    <div class="action-bar">
+                        <button type="button" class="btn primary form" disabled="@(!Pg.CanRun)" aria-busy="@(Pg.Running ? "true" : null)" @onclick="RunAsync">
+                            <Icon Name="play" Size="18" /><span>@(Pg.Running ? "Running…" : "Run")</span>
+                        </button>
+                        <button type="button" class="btn form" id="pg-present-cancel" disabled="@(!Pg.Running)" @onclick="Pg.Cancel"><Icon Name="stop" Size="18" /><span>Cancel</span></button>
+                        @if (!Pg.Running && Pg.Problem is { } pr)
+                        {
+                            <span class="action-status">@pr</span>
+                        }
                     </div>
-                    <span class="note">Cancel stops waiting; it is not a rollback.</span>
                 </section>
 
-                <section aria-label="Result" aria-live="polite">
-                    @if (Pg.Selected is not { } run)
+                <section class="present-response" id="pg-present-result" tabindex="-1" aria-label="Response">
+                    @if (Pg.Selected is { } prun)
                     {
-                        <span class="outcome unknown">Ready</span>
-                        <span class="reason">Pick a scenario and press Run request.</span>
+                        <div class="response md @(prun.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text" aria-busy="@(prun.InFlight ? "true" : "false")">
+                            @ResponseBody(prun)
+                        </div>
+                        @if (!prun.InFlight && !prun.Snapshot.MatchesForm(Pg.Form))
+                        {
+                            <span class="changed-flag">Previous result — the prompt has changed since. Run to update.</span>
+                        }
+                        <RunSummary Run="prun" Large="true" />
                     }
                     else
                     {
-                        <span class="secondary muted">
-                            @run.Snapshot.Title · @Fmt.UtcShort(run.Snapshot.SubmittedUtc) UTC
-                            @if (!run.Snapshot.MatchesForm(Pg.Form))
-                            {
-                                <span> · previous request</span>
-                            }
-                        </span>
-                        @if (run.InFlight)
-                        {
-                            <span class="outcome unknown">Sending request #@run.Snapshot.Sequence…</span>
-                        }
-                        else if (run.Outcome is { } o)
-                        {
-                            <div class="result-head">
-                                <span class="outcome @o.PillKind">@o.Title</span>
-                                <span class="mono secondary muted">@o.StatusLine</span>
-                            </div>
-                            <span class="reason">@o.Explanation</span>
-                        }
-                        <div class="response-box @(run.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text">@(run.Text.Length == 0 ? (run.InFlight ? "Waiting for the first token…" : "No response text.") : run.Text)</div>
-                        <dl class="present-facts">
-                            <div><dt>Model</dt><dd class="mono">@PresentModel(run)</dd></div>
-                            <div><dt>Estimated provider cost</dt><dd>@CostFor(run)</dd></div>
-                            <div><dt>Duration</dt><dd>@DurationFor(run)</dd></div>
-                        </dl>
-                        <div class="btn-row">
-                            <Button Id="pg-inspect" OnClick="OpenInspect" Disabled="@run.InFlight">Inspect evidence</Button>
-                            @if (RequestIdOf(run) is { } rid)
-                            {
-                                <Button Variant="ghost" OnClick="@(() => OpenInRequests(rid))">Open in Requests</Button>
-                            }
-                            <span class="secondary muted">@EvidenceShort(run)</span>
-                        </div>
+                        <div class="response md empty">Run a request to see the response here.</div>
+                    }
+                </section>
+
+                <section class="present-trace" aria-label="Trace">
+                    @if (Pg.Selected is { } trun)
+                    {
+                        <TraceBar Trace="trun.CurrentTrace" FeedState="trun.TraceState" Message="@trun.TraceMessage" />
+                    }
+                    else
+                    {
+                        <TraceBar Trace="TraceView.Empty" />
                     }
                 </section>
             </div>
+            <span class="visually-hidden" role="status" aria-live="polite">@RunText.Announcement(Pg.Selected)</span>
         </div>
-
-        <Drawer @bind-Open="_setupOpen" Title="Request setup" OpenerId="pg-setup-open">
-            @SetupFields
-        </Drawer>
-        <Drawer @bind-Open="_inspectOpen" Title="@(Pg.Selected is { } sr ? "Evidence · " + sr.Snapshot.Title : "Evidence")" OpenerId="pg-inspect">
-            @if (Pg.Selected is { } ir)
-            {
-                @FactsBlock(ir)
-                @EvidenceBlock(ir)
-                @FlowBlock(ir)
-            }
-        </Drawer>
     </RequiresConnection>
 }
 else
@@ -141,168 +93,99 @@ else
             <div class="page-head">
                 <div class="titles">
                     <h1>Playground</h1>
-                    <span class="lede">Send a request through the governed pipeline and inspect exactly what happened to it.</span>
+                    <span class="lede">Run a request as a test application and watch what governance actually does.</span>
                 </div>
-                <span class="pause-scope" style="max-width:360px">The header’s Pause control pauses NEW provider calls. Cache hits and in-flight calls are not stopped.</span>
-                <Button OnClick="TogglePresent">Presentation mode</Button>
+                <button type="button" class="btn" id="pg-present-toggle" @onclick="EnterPresent">
+                    <Icon Name="present" Size="16" /><span>Presentation mode</span>
+                </button>
             </div>
 
-            <div class="pg-cols">
-                <section class="panel" aria-labelledby="setup-h">
-                    <h2 id="setup-h">New request</h2>
-                    <div class="field">
-                        <span class="secondary" style="font-weight:500">Scenario preset <span class="subtle">— fills the form; only Run sends</span></span>
-                        <div class="presets">
-                            @foreach (var p in ScenarioPresets.All)
-                            {
-                                var preset = p;
-                                <button type="button" class="preset" aria-pressed="@(Pg.Form.Scenario == preset.Letter ? "true" : "false")"
-                                        disabled="@Pg.Running" @onclick="() => Pg.ApplyPreset(preset)">
-                                    <span>@preset.Letter · @preset.Title</span>
-                                    <span class="hint">@preset.Hint</span>
-                                </button>
-                            }
-                        </div>
-                        @if (ScenarioPresets.Find(Pg.Form.Scenario) is { } cur)
-                        {
-                            <span class="note">@cur.Note</span>
-                        }
-                        @if (Pg.Form.Scenario == 'C' && RouteHealth.LocalRoute(State.Catalog, DateTimeOffset.UtcNow).State is LocalRouteState.NotConfigured or LocalRouteState.NotRegistered)
-                        {
-                            <span class="note warn">No usable local route is registered, so policy will refuse C (fail-closed). <a href="connections">Set up the connection</a></span>
-                        }
-                    </div>
-
-                    <div class="field">
-                        <label for="pg-prompt">Prompt</label>
-                        <textarea id="pg-prompt" class="input textarea" rows="4" @bind="Pg.Form.Prompt" @bind:event="oninput" disabled="@Pg.Running"></textarea>
-                        @if (Pg.Form.FreshNonce)
-                        {
-                            <span class="help">A fresh nonce (<span class="mono">[run …]</span>) is appended on every run, so this request is never served from cache.</span>
-                        }
-                    </div>
-
-                    @SetupFields
-
-                    <div class="btn-row">
-                        <Button Variant="primary" Size="form" Disabled="@(!CanRun)" Busy="@Pg.Running" BusyText="Running…" OnClick="RunAsync">Run request</Button>
-                        <Button Size="form" Disabled="@(!Pg.Running)" OnClick="Cancel">Cancel</Button>
-                        <Button Size="form" Variant="ghost" Disabled="@(Pg.Running || Pg.Runs.Count == 0)" OnClick="Pg.ClearOutput">Clear output</Button>
-                    </div>
-                    @if (Pg.Form.Problem is { } problem && Pg.Form.Prompt.Length > 0)
-                    {
-                        <span class="note warn">@problem</span>
-                    }
-                    <span class="note">Cancel stops waiting; it is not a rollback. Work or provider cost already incurred remains.</span>
+            <div class="pg-panes">
+                <section class="panel pg-left" aria-label="Request">
+                    <RequestComposer IdPrefix="pg" />
                 </section>
 
-                <section class="panel" aria-labelledby="result-h" aria-live="polite">
-                    <h2 id="result-h">Result</h2>
+                <section class="panel pg-right" aria-labelledby="pg-resp-h">
+                    <div class="panel-head">
+                        <h2 id="pg-resp-h">Response</h2>
+                        @if (Pg.Selected is { } hr)
+                        {
+                            <span class="secondary subtle">@hr.Snapshot.Title · @Fmt.UtcShort(hr.Snapshot.SubmittedUtc) UTC</span>
+                            @if (!hr.InFlight && !hr.Snapshot.MatchesForm(Pg.Form))
+                            {
+                                <span class="changed-flag">Previous request — the composer has changed since</span>
+                            }
+                            <span class="grow"></span>
+                            <span class="btn-row tight">
+                                <button type="button" class="btn ghost sm" aria-pressed="@(_raw ? "true" : "false")" @onclick="() => _raw = !_raw">Raw</button>
+                                <button type="button" class="btn ghost sm" disabled="@(hr.Text.Length == 0)" @onclick="() => CopyResponseAsync(hr)">
+                                    <Icon Name="copy" Size="16" /><span>Copy</span>
+                                </button>
+                                @if (_copyNote is not null)
+                                {
+                                    <span class="subtle secondary" role="status">@_copyNote</span>
+                                }
+                            </span>
+                        }
+                    </div>
+
                     @if (Pg.Selected is not { } run)
                     {
-                        <EmptyState Title="No request yet" Body="Choose a scenario or write a prompt, then Run request. Each result stays tied to the request that produced it." />
+                        <div class="response md empty">No request yet. Choose a preset or write a prompt, pick who to run as, then Run.</div>
+                        <TraceBar Trace="TraceView.Empty" />
                     }
                     else
                     {
-                        <div class="result-head">
-                            <span class="title">@run.Snapshot.Title</span>
-                            <span class="secondary subtle">submitted @Fmt.UtcShort(run.Snapshot.SubmittedUtc) UTC · @run.Snapshot.RoutingLabel · @(run.Snapshot.Streaming ? "streamed" : "buffered")</span>
-                            @if (!run.InFlight && !run.Snapshot.MatchesForm(Pg.Form))
-                            {
-                                <span class="changed-flag">Previous request — the form has changed since</span>
-                            }
+                        <div class="response md @(run.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text" aria-busy="@(run.InFlight ? "true" : "false")">
+                            @ResponseBody(run)
                         </div>
-
-                        @if (run.InFlight)
-                        {
-                            <span class="outcome unknown">Sending request #@run.Snapshot.Sequence…</span>
-                            <span class="secondary muted">Waiting for Covenant. Cancel stops waiting; it does not roll anything back.</span>
-                        }
-                        else if (run.Outcome is { } o)
-                        {
-                            <div class="result-head">
-                                <span class="outcome @o.PillKind">@o.Title</span>
-                                <StatusPill Kind="@o.PillKind" Text="@o.StatusLine" />
-                            </div>
-                            <span class="secondary">@o.Explanation</span>
-                            @if (run.Result?.ErrorReason is { Length: > 0 } why)
-                            {
-                                <span class="secondary muted">Server reason: <span class="mono">@why</span></span>
-                            }
-                            @if (run.Result?.TransportError is { Length: > 0 } te)
-                            {
-                                <span class="note bad">@te</span>
-                            }
-                            @if (run.Evidence.Record is { StoppedAtStage: "provider", AttemptedModel: null })
-                            {
-                                <a href="connections" class="secondary">Review the connection for this route</a>
-                            }
-                        }
-
-                        <div class="field">
-                            <span class="secondary" style="font-weight:500">Response <span class="subtle">— console-only; not persisted; cleared on disconnect or reload</span></span>
-                            <div class="response-box @(run.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text">@(run.Text.Length == 0 ? (run.InFlight ? "Waiting for the first token…" : "No response text.") : run.Text)</div>
-                        </div>
-
-                        @FactsBlock(run)
-
-                        <div class="btn-row">
-                            @if (RequestIdOf(run) is { } rid)
-                            {
-                                <Button OnClick="@(() => OpenInRequests(rid))">Open in Requests</Button>
-                            }
-                            <span class="secondary muted">@EvidenceShort(run)</span>
-                        </div>
-
-                        @if (Pg.Runs.Count > 1)
-                        {
-                            <div class="history" role="group" aria-label="Requests in this session">
-                                <span class="secondary subtle">This session</span>
-                                @foreach (var h in Pg.Runs)
-                                {
-                                    var hr = h;
-                                    <button type="button" class="btn sm @(ReferenceEquals(hr, Pg.Selected) ? "primary" : "ghost")"
-                                            aria-pressed="@(ReferenceEquals(hr, Pg.Selected) ? "true" : "false")" @onclick="() => Pg.Select(hr)">
-                                        #@hr.Snapshot.Sequence @(hr.Snapshot.Scenario is { } sc ? sc.ToString() : "custom")
-                                    </button>
-                                }
-                            </div>
-                        }
+                        <RunSummary Run="run" OnDetails="OpenDetails" DetailsButtonId="pg-details-open" />
+                        <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" />
                     }
                 </section>
             </div>
 
-            <div class="pg-bottom">
-                <section class="panel" aria-labelledby="flow-h">
-                    @if (Pg.Selected is { } fr)
-                    {
-                        @FlowBlock(fr)
-                    }
-                    else
-                    {
-                        @FlowBlock(null)
-                    }
-                </section>
-                <section class="panel" id="evidence" aria-labelledby="ev-h">
-                    <h2 id="ev-h">
-                        <button type="button" class="ev-toggle" aria-expanded="@(_evOpen ? "true" : "false")" @onclick="() => _evOpen = !_evOpen">
-                            <span>Evidence @(Pg.Selected is { } er ? "for request #" + er.Snapshot.Sequence : "")</span>
-                            <span class="secondary subtle">@(_evOpen ? "Hide" : "Show")</span>
-                        </button>
-                    </h2>
-                    @if (_evOpen)
-                    {
-                        if (Pg.Selected is { } evr)
+            @if (Pg.Runs.Count > 0)
+            {
+                <section class="panel history-panel" aria-labelledby="pg-hist-h">
+                    <div class="panel-head">
+                        <h2 id="pg-hist-h"><Icon Name="history" Size="16" /> This session</h2>
+                        <span class="panel-sub">Selecting an entry shows its stored result — it never runs again.</span>
+                        <button type="button" class="btn ghost sm" disabled="@Pg.Running" @onclick="Pg.ClearOutput">Clear</button>
+                    </div>
+                    <ol class="history-list">
+                        @foreach (var h in Enumerable.Reverse(Pg.Runs))
                         {
-                            @EvidenceBlock(evr)
+                            var item = h;
+                            var selected = ReferenceEquals(item, Pg.Selected);
+                            <li>
+                                <button type="button" class="history-item @(selected ? "selected" : "")" aria-current="@(selected ? "true" : null)" @onclick="() => Pg.Select(item)">
+                                    <span class="mono">#@item.Snapshot.Sequence</span>
+                                    <span class="history-label">@item.Snapshot.ScenarioLabel</span>
+                                    @if (item.InFlight)
+                                    {
+                                        <StatusPill Kind="unknown" Text="Running" />
+                                    }
+                                    else if (item.Outcome is { } ho)
+                                    {
+                                        <StatusPill Kind="@ho.PillKind" Text="@ho.Title" />
+                                    }
+                                    <span class="subtle mono">@Fmt.UtcShort(item.Snapshot.SubmittedUtc)</span>
+                                </button>
+                            </li>
                         }
-                        else
-                        {
-                            <span class="secondary muted">Run a request to see its audit evidence here.</span>
-                        }
-                    }
+                    </ol>
                 </section>
-            </div>
+            }
+
+            <span class="visually-hidden" role="status" aria-live="polite">@RunText.Announcement(Pg.Selected)</span>
+
+            <Drawer @bind-Open="_detailsOpen" Title="@(Pg.Selected is { } dr ? dr.Snapshot.Title : "Request details")" OpenerId="pg-details-open">
+                @if (Pg.Selected is { } drun)
+                {
+                    <RunDetails Run="drun" OnNavigate="CloseDetails" />
+                }
+            </Drawer>
         </RequiresConnection>
     </div>
 }
@@ -312,350 +195,173 @@ else
     [SupplyParameterFromQuery(Name = "present")] public string? Present { get; set; }
 
     private bool _present;
+    private bool _wasPresent;
+    private bool _focusPending;
+    private DotNetObjectReference<Playground>? _self;
+    private string? _escapeWatch;
+    private bool _escapeBusy;
+    // Run disables itself while the request runs: focus moves to Cancel, then to the result region when it finishes.
+    private bool _focusCancelPending;
+    private bool _cancelFocused;
     private string? _appliedScenario;
-    private bool _setupOpen;
-    private bool _inspectOpen;
-    private bool _evOpen = true;
-    private bool _pauseBusy;
-    private string? _pauseError;
+    private bool _detailsOpen;
+    private bool _raw;
     private string? _copyNote;
 
-    private bool CanRun => !Pg.Running && Pg.Form.Problem is null;
-
-    private IReadOnlyList<CatalogModel> PermittedModels
-        => State.Catalog is { } c ? c.Models.Where(m => m.Classifications.Count > 0).ToList() : [];
-
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         State.Changed += OnChanged;
         Pg.Changed += OnChanged;
+        Ws.Changed += OnChanged;
+        await Ws.EnsureLoadedAsync();
+        Pg.EnsureDefaultApplication();
+        ApplyScenarioFromRoute();
     }
 
     protected override void OnParametersSet()
     {
         _present = string.Equals(Present, "1", StringComparison.Ordinal);
-        if (!string.Equals(Scenario, _appliedScenario, StringComparison.OrdinalIgnoreCase))
+        if (_present != _wasPresent)
         {
-            _appliedScenario = Scenario;
-            // A scenario in the URL only fills the form, like clicking the preset. Never while a run is in flight.
-            if (!Pg.Running && ScenarioPresets.Find(Scenario) is { } preset) Pg.ApplyPreset(preset);
+            _wasPresent = _present;
+            _focusPending = true;
+        }
+        ApplyScenarioFromRoute();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        await SyncEscapeWatchAsync();
+        if (_focusPending)
+        {
+            _focusPending = false;
+            await FocusAsync(_present ? "pg-present-root" : "pg-present-toggle");
+        }
+        if (!_present)
+        {
+            _focusCancelPending = false;
+            _cancelFocused = false;
+            return;
+        }
+        if (_focusCancelPending && Pg.Running)
+        {
+            _focusCancelPending = false;
+            _cancelFocused = true;
+            await FocusAsync("pg-present-cancel");
+        }
+        else if (_cancelFocused && !Pg.Running)
+        {
+            _cancelFocused = false;
+            await FocusAsync("pg-present-result");
         }
     }
 
-    private Task RunAsync() => Pg.RunAsync();
-
-    private void Cancel() => Pg.Cancel();
-
-    private void TogglePresent()
+    private async Task FocusAsync(string id)
     {
-        _setupOpen = false;
-        _inspectOpen = false;
-        Nav.NavigateTo(Nav.GetUriWithQueryParameter("present", _present ? null : "1"));
+        try { await Interop.FocusElementAsync(id); }
+        catch (JSException) { /* focus is best effort */ }
     }
 
-    private void OpenSetup() => _setupOpen = true;
-    private void OpenInspect() => _inspectOpen = true;
-
-    private void OpenInRequests(string id)
+    /// <summary>Starts the document-level Escape listener while presentation mode is active; disposes it on exit.</summary>
+    private async Task SyncEscapeWatchAsync()
     {
-        _inspectOpen = false;
-        Nav.NavigateTo("requests/" + Uri.EscapeDataString(id));
+        if (_escapeBusy) return;
+        _escapeBusy = true;
+        try
+        {
+            if (_present && _escapeWatch is null)
+            {
+                _self ??= DotNetObjectReference.Create(this);
+                _escapeWatch = await Interop.WatchEscapeAsync(_self, nameof(OnEscapePressed));
+            }
+            else if (!_present && _escapeWatch is { } id)
+            {
+                _escapeWatch = null;
+                await Interop.UnwatchEscapeAsync(id);
+            }
+        }
+        catch (JSException) { /* keyboard exit stays available through the Exit button */ }
+        finally { _escapeBusy = false; }
     }
 
-    private void SetMode(RouteMode mode)
+    /// <summary>Called by the document-level Escape listener (presentation mode only).</summary>
+    [JSInvokable]
+    public Task OnEscapePressed() => InvokeAsync(() => { if (_present) ExitPresent(); });
+
+    /// <summary>A scenario in the URL only fills the composer, like clicking the preset — never runs it.</summary>
+    private void ApplyScenarioFromRoute()
     {
-        Pg.Form.Mode = mode;
-        if (mode == RouteMode.Catalog && string.IsNullOrWhiteSpace(Pg.Form.CatalogModel) && PermittedModels.Count > 0)
-            Pg.Form.CatalogModel = PermittedModels[0].ModelId;
+        if (string.Equals(Scenario, _appliedScenario, StringComparison.OrdinalIgnoreCase)) return;
+        // Apply once applications are known (so the preset can pick a granted profile); a Host without the
+        // applications endpoint still gets the prompt filled.
+        if (Ws.Applications is null && (Ws.Loading || State.Restoring || (State.Connected && Ws.LoadedUtc is null))) return;
+        _appliedScenario = Scenario;
+        if (!Pg.Running && ScenarioPresets.Find(Scenario) is { } preset) Pg.ApplyPreset(preset);
     }
 
-    private void OnKeyInput(ChangeEventArgs e) => State.SetApplicationKey(e.Value?.ToString());
+    private Task RunAsync()
+    {
+        if (_present && Pg.CanRun) _focusCancelPending = true;
+        return Pg.RunAsync();
+    }
 
-    private void ForgetKey() => State.SetApplicationKey(null);
+    private void EnterPresent()
+    {
+        _detailsOpen = false;
+        Nav.NavigateTo(Nav.GetUriWithQueryParameter("present", "1"));
+    }
 
-    private async Task CopyIdAsync(string id)
+    private void ExitPresent() => Nav.NavigateTo(Nav.GetUriWithQueryParameter("present", (string?)null));
+
+    private void OpenDetails() => _detailsOpen = true;
+    private void CloseDetails() => _detailsOpen = false;
+
+    private async Task CopyResponseAsync(PlaygroundRun run)
     {
         bool ok;
-        try { ok = await Interop.CopyTextAsync(id); }
+        try { ok = await Interop.CopyTextAsync(run.Text); }
         catch (JSException) { ok = false; }
-        _copyNote = ok ? "Copied" : "Copy failed — select the id and copy it manually";
+        _copyNote = ok ? "Copied" : "Copy failed — select the text and copy it manually";
     }
 
-    private async Task PauseAsync()
-    {
-        _pauseBusy = true; _pauseError = null;
-        var err = await Session.SetPausedAsync(true, "paused from console (presentation)");
-        _pauseBusy = false;
-        _pauseError = err is null ? null : "Pause failed — " + err;
-    }
-
-    private async Task ResumeAsync()
-    {
-        _pauseBusy = true; _pauseError = null;
-        var err = await Session.SetPausedAsync(false, null);
-        _pauseBusy = false;
-        _pauseError = err is null ? null : "Resume failed — " + err;
-    }
-
-    // ---- Text helpers (all derived from the run's own snapshot / result / audit record) ----
-
-    private static string? RequestIdOf(PlaygroundRun run) => run.Result?.RequestId is { Length: > 0 } id ? id : null;
-
-    private string SetupLine()
-    {
-        var key = string.IsNullOrEmpty(State.ApplicationKey) ? "no application key (the server will answer 401)" : "application key set (memory only)";
-        var route = Pg.Form.RequestedModel ?? RequestSnapshot.PolicyChooses;
-        return $"{key} · {route} · {(Pg.Form.Streaming ? "streamed" : "buffered")}";
-    }
-
-    private static string AwaitingText(PlaygroundRun run) => run.InFlight ? "Awaiting response" : run.Evidence.State switch
-    {
-        EvidenceState.Pending => "Awaiting audit record…",
-        EvidenceState.Unavailable => "Not available — no audit record found yet",
-        EvidenceState.Error => "Not available — evidence lookup failed",
-        _ => RequestIdOf(run) is null ? "Not available — no request id received" : "Not available — no audit record",
-    };
-
-    private static string DurationFor(PlaygroundRun run)
-    {
-        if (run.Evidence.Record is { } rec) return Fmt.Ms(rec.DurationMs) + " (recorded by Covenant)";
-        if (run.InFlight) return Fmt.Ms(run.Clock.Elapsed.TotalMilliseconds) + " so far (client-measured)";
-        return run.Result is { } r ? Fmt.Ms(r.ClientMs) + " (client-measured)" : "Not reported";
-    }
-
-    private static string CostFor(PlaygroundRun run)
-        => run.Evidence.Record is { } rec ? CostText.Cost(rec) : AwaitingText(run);
-
-    private static string TokensFor(PlaygroundRun run)
-        => run.Evidence.Record is { } rec ? CostText.Tokens(rec) : AwaitingText(run);
-
-    private static string PresentModel(PlaygroundRun run)
-    {
-        if (run.Evidence.Record is not { } rec) return AwaitingText(run);
-        var f = ModelFacts.From(rec);
-        return rec.CacheHit || !string.IsNullOrWhiteSpace(rec.ServedByModel) ? f.Served : "Selected: " + f.Selected + " · attempted: " + f.Attempted;
-    }
-
-    private static string EvidenceShort(PlaygroundRun run)
-    {
-        if (run.InFlight) return "";
-        return run.Evidence.State switch
+    /// <summary>Model output, rendered ONLY through SafeMarkdown (input HTML-encoded first; no raw HTML, http(s)
+    /// links only) — or, with Raw, as plain escaped text. This is the console's only MarkupString.</summary>
+    private RenderFragment<PlaygroundRun> ResponseBody => run => @<div class="md-body">
+        @if (run.Text.Length == 0)
         {
-            EvidenceState.Pending => $"Awaiting audit record… (lookup {run.Evidence.Attempts + 1})",
-            EvidenceState.Found => "Audit record found",
-            EvidenceState.Unavailable => run.Evidence.Message ?? EvidenceTracker.UnavailableMessage,
-            EvidenceState.Error => run.Evidence.Message ?? "Evidence lookup failed",
-            _ => run.Outcome?.Outcome == DisplayOutcome.RejectedBeforeGovernance
-                ? "Rejected before governance (400); no evidence record"
-                : RequestIdOf(run) is null ? "No request id was received, so there is no exact record to open" : "",
-        };
-    }
-
-    // ---- Shared fragments (normal layout and presentation drawers) ----
-
-    private RenderFragment SetupFields => @<div style="display:flex;flex-direction:column;gap:14px">
-        <div class="field">
-            <label for="pg-key">Application key</label>
-            <div class="copy-row" style="width:100%">
-                <input id="pg-key" class="input mono" style="flex:1 1 220px" type="password" autocomplete="off" spellcheck="false"
-                       value="@State.ApplicationKey" @oninput="OnKeyInput" placeholder="Paste an application key" />
-                @if (!string.IsNullOrEmpty(State.ApplicationKey))
-                {
-                    <Button Size="sm" Variant="ghost" OnClick="ForgetKey">Forget key</Button>
-                }
-            </div>
-            @if (string.IsNullOrEmpty(State.ApplicationKey))
-            {
-                <span class="help bad" role="status">No application key set — Run will be refused with HTTP 401 (useful only for the authentication-failure demo). Paste an application key, e.g. the <span class="mono">App key</span> printed by scripts/run-local-demo.sh. The admin token does not work here.</span>
-            }
-            <span class="help">Held in this tab's memory only; never stored — a page reload clears it. Identity and team are resolved by Covenant from this key — never from the admin token.</span>
-        </div>
-
-        <div class="field">
-            <span id="pg-route-l" class="secondary" style="font-weight:500">Model routing</span>
-            <div class="seg" role="radiogroup" aria-labelledby="pg-route-l">
-                <button type="button" role="radio" aria-checked="@(Pg.Form.Mode == RouteMode.Policy ? "true" : "false")" disabled="@Pg.Running" @onclick="() => SetMode(RouteMode.Policy)">Let policy choose</button>
-                <button type="button" role="radio" aria-checked="@(Pg.Form.Mode == RouteMode.Catalog ? "true" : "false")" disabled="@(Pg.Running || PermittedModels.Count == 0)" @onclick="() => SetMode(RouteMode.Catalog)">Permitted catalog model</button>
-                <button type="button" role="radio" aria-checked="@(Pg.Form.Mode == RouteMode.Explicit ? "true" : "false")" disabled="@Pg.Running" @onclick="() => SetMode(RouteMode.Explicit)">Advanced: explicit model id</button>
-            </div>
-            @if (Pg.Form.Mode == RouteMode.Policy)
-            {
-                <span class="help">Classification picks the route (see Policies). No model is requested.</span>
-            }
-            else if (Pg.Form.Mode == RouteMode.Catalog)
-            {
-                <label for="pg-cat" class="visually-hidden">Requested model</label>
-                <select id="pg-cat" class="input mono" @bind="Pg.Form.CatalogModel" disabled="@Pg.Running">
-                    @foreach (var m in PermittedModels)
-                    {
-                        <option value="@m.ModelId">@(m.ModelId + " (" + string.Join(", ", m.Classifications) + ")" + (m.Registered ? "" : " — not registered"))</option>
-                    }
-                </select>
-                <span class="help">From GET /admin/catalog. Policy still checks the request’s classification: a listed model is not a permission grant.</span>
-            }
-            else
-            {
-                <label for="pg-explicit" class="secondary">Advanced: explicit model id (test input — does not grant permission)</label>
-                <input id="pg-explicit" class="input mono" type="text" spellcheck="false" @bind="Pg.Form.ExplicitModel" @bind:event="oninput" disabled="@Pg.Running" />
-            }
-            @if (State.Catalog is null)
-            {
-                <span class="help bad">@(State.CatalogError is { } ce ? "Catalog unavailable: " + ce : "Catalog not loaded yet.")</span>
-            }
-        </div>
-
-        <div class="field-row">
-            <div class="field">
-                <label for="pg-max">Max output tokens</label>
-                <input id="pg-max" class="input mono" type="number" min="1" @bind="Pg.Form.MaxTokens" disabled="@Pg.Running" />
-            </div>
-            <div class="field">
-                <label for="pg-wf">Workflow label</label>
-                <input id="pg-wf" class="input" type="text" @bind="Pg.Form.Workflow" @bind:event="oninput" disabled="@Pg.Running" />
-            </div>
-            <div class="field">
-                <label for="pg-uc">Use-case label</label>
-                <input id="pg-uc" class="input" type="text" @bind="Pg.Form.UseCase" @bind:event="oninput" disabled="@Pg.Running" />
-            </div>
-        </div>
-        <span class="help">Labels are attribution text only (X-Covenant-Workflow / X-Covenant-UseCase); they do not change identity, team or permission.</span>
-        <label class="switch">
-            <input type="checkbox" @bind="Pg.Form.Streaming" disabled="@Pg.Running" /> Stream the response (SSE)
-        </label>
-    </div>;
-
-    private RenderFragment<PlaygroundRun> FactsBlock => run => @<dl class="facts">
-        @if (run.Evidence.Record is { } rec)
+            <span>@(run.InFlight ? "Waiting for the first token…" : "No response text.")</span>
+        }
+        else if (_raw)
         {
-            var f = ModelFacts.From(rec);
-            <dt>Selected model</dt><dd class="mono">@f.Selected</dd>
-            <dt>Provider attempted</dt><dd class="mono">@f.Attempted</dd>
-            <dt>Served model</dt><dd class="mono">@f.Served</dd>
-            <dt>Classification</dt><dd>@f.Classification</dd>
-            <dt>Identity</dt><dd class="mono">@rec.Principal · team @Fmt.OrNotRecorded(rec.Tags.Team)</dd>
+            <pre class="raw-text">@run.Text</pre>
         }
         else
         {
-            <dt>Selected / attempted / served</dt><dd>@AwaitingText(run)</dd>
+            @((MarkupString)SafeMarkdown.ToHtml(run.Text))
         }
-        <dt>Duration</dt><dd>@DurationFor(run)</dd>
-        <dt>Tokens</dt><dd>@TokensFor(run)</dd>
-        <dt>Estimated cost</dt><dd>@CostFor(run)</dd>
-        <dt>Request id</dt>
-        <dd>
-            @if (RequestIdOf(run) is { } id)
-            {
-                <span class="copy-row">
-                    <span class="mono wrap-any">@id</span>
-                    <Button Size="sm" Variant="ghost" OnClick="@(() => CopyIdAsync(id))" AriaLabel="Copy request id">Copy</Button>
-                    @if (_copyNote is not null)
-                    {
-                        <span class="subtle" role="status">@_copyNote</span>
-                    }
-                </span>
-            }
-            else
-            {
-                <span>@(run.InFlight ? "Awaiting response" : "None — no response with a request id was received")</span>
-            }
-        </dd>
-    </dl>;
+    </div>;
 
-    private RenderFragment<PlaygroundRun> EvidenceBlock => run => @<div style="display:flex;flex-direction:column;gap:10px">
-        @switch (run.Evidence.State)
+    private void OnChanged()
+    {
+        _ = InvokeAsync(() =>
         {
-            case EvidenceState.Found when run.Evidence.Record is { } rec:
-                var o = OutcomeModel.FromRecord(rec);
-                <dl class="facts">
-                    <dt>Audit record</dt><dd class="mono wrap-any">@rec.Id</dd>
-                    <dt>Recorded</dt><dd>@Fmt.Utc(rec.TimestampUtc)</dd>
-                    <dt>Recorded outcome</dt><dd><StatusPill Kind="@o.PillKind" Text="@o.Title" /></dd>
-                    <dt>Effect / denial kind</dt><dd class="mono">@rec.Effect · @Fmt.OrNotRecorded(rec.DenialKind)</dd>
-                    <dt>Stopped at</dt><dd>@(rec.StoppedAtStage is { } st ? PipelineStages.Label(st) : string.Equals(rec.Effect, "Allow", StringComparison.OrdinalIgnoreCase) ? "Completed" : "Not recorded")</dd>
-                    <dt>Reason</dt><dd>@rec.Reason</dd>
-                    <dt>Cost basis</dt><dd>@CostText.BasisDescription(rec.CostBasis)</dd>
-                    <dt>Prompt fingerprint</dt><dd class="mono wrap-any">sha256 @Fmt.OrNotRecorded(rec.PromptSha256) · @rec.PromptChars chars</dd>
-                </dl>
-                <div class="btn-row">
-                    <Button Variant="primary" OnClick="@(() => OpenInRequests(rec.Id))">Open in Requests</Button>
-                </div>
-                break;
-            case EvidenceState.Pending:
-                <span class="secondary muted" role="status">Awaiting audit record… The audit sink writes asynchronously; looking up <span class="mono">@RequestIdOf(run)</span> (attempt @(run.Evidence.Attempts + 1)).</span>
-                break;
-            case EvidenceState.Unavailable:
-                <ErrorBanner Title="No audit record found yet" Message="@(run.Evidence.Message ?? EvidenceTracker.UnavailableMessage)" OnRetry="@(() => Pg.RetryEvidenceAsync(run))" />
-                <span class="note">This does not mean the audit write failed — the record may still be on its way.</span>
-                break;
-            case EvidenceState.Error:
-                <ErrorBanner Title="Evidence lookup failed" Message="@run.Evidence.Message" OnRetry="@(() => Pg.RetryEvidenceAsync(run))" />
-                break;
-            default:
-                if (run.InFlight)
-                {
-                    <span class="secondary muted">The request is still in flight.</span>
-                }
-                else if (run.Outcome?.Outcome == DisplayOutcome.RejectedBeforeGovernance)
-                {
-                    <span class="secondary muted">Rejected before governance (400); no evidence record — the request never reached the pipeline.</span>
-                }
-                else if (RequestIdOf(run) is null)
-                {
-                    <span class="secondary muted">No request id was received (stopped waiting before the response headers, or Covenant was unreachable), so there is no exact record to look up. Search Requests by time instead — never assume the newest record is this one.</span>
-                }
-                break;
-        }
-    </div>;
+            if (_appliedScenario != Scenario) ApplyScenarioFromRoute();
+            StateHasChanged();
+        });
+    }
 
-    private RenderFragment<PlaygroundRun?> FlowBlock => run => @<div style="display:flex;flex-direction:column;gap:8px">
-        <div class="panel-head">
-            <h2 id="flow-h">Configured processing order</h2>
-        </div>
-        <span class="note">The order assembled at startup — not a measured trace. Only the stage recorded as stopping this request is highlighted; no timings are shown.</span>
-        <ol class="stage-list">
-            @{ var rec = run?.Evidence.Record; var stopKey = PipelineStages.RowKey(rec?.StoppedAtStage); var n = 0; }
-            @foreach (var st in PipelineStages.Configured)
-            {
-                n++;
-                var stopped = stopKey == st.Key;
-                var cacheHit = rec is { CacheHit: true } && st.Key == "cache";
-                <li class="@(stopped ? "stopped" : cacheHit ? "cache-hit" : "")" aria-current="@(stopped || cacheHit ? "step" : null)">
-                    <span class="n">@n</span>
-                    <span class="name">@st.Name</span>
-                    <span class="detail">@st.Detail</span>
-                    @if (stopped)
-                    {
-                        <span class="mark">· stopped here (recorded)</span>
-                    }
-                    else if (cacheHit)
-                    {
-                        <span class="mark">· served from cache here; later stages skipped</span>
-                    }
-                </li>
-            }
-        </ol>
-        <span class="note">
-            Audit wraps every request, including refusals.
-            @if (rec is { } r && string.Equals(r.Effect, "Allow", StringComparison.OrdinalIgnoreCase) && !r.CacheHit)
-            {
-                <span>This request completed: no stage stopped it.</span>
-            }
-            else if (rec is { StoppedAtStage: null, DenialKind: null } lr && string.Equals(lr.Effect, "Deny", StringComparison.OrdinalIgnoreCase))
-            {
-                <span>Stopping stage not recorded (legacy record).</span>
-            }
-            else if (run is { InFlight: false } && rec is null)
-            {
-                <span>The stopping stage is shown once the audit record arrives.</span>
-            }
-        </span>
-    </div>;
-
-    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
-
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         State.Changed -= OnChanged;
         Pg.Changed -= OnChanged;
+        Ws.Changed -= OnChanged;
+        if (_escapeWatch is { } id)
+        {
+            _escapeWatch = null;
+            try { await Interop.UnwatchEscapeAsync(id); }
+            catch (JSException) { /* page is going away */ }
+            catch (JSDisconnectedException) { /* idem */ }
+        }
+        _self?.Dispose();
     }
 }

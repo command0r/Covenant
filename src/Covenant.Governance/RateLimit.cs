@@ -43,21 +43,25 @@ public sealed class RateLimitStage(RateCounter globalCounter, RateCounter teamCo
 
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
-        if (config.PerTeamPerMinute > 0)
+        // Caps come from the request's bound configuration when present (ADR-0011); counters are shared
+        // across versions, so an apply never resets the current window.
+        int perTeam = ctx.Configuration?.Config.Settings.RateLimitPerTeamPerMinute ?? config.PerTeamPerMinute;
+        int global = ctx.Configuration?.Config.Settings.RateLimitGlobalPerMinute ?? config.GlobalPerMinute;
+        if (perTeam > 0)
         {
             var team = ctx.Identity.Tags.Team;
-            if (teamCounter.Increment(team) > config.PerTeamPerMinute)
+            if (teamCounter.Increment(team) > perTeam)
             {
-                ctx.Deny($"rate limit exceeded for team '{team}': {config.PerTeamPerMinute}/min", DenialKind.RateLimited);
+                ctx.Deny($"rate limit exceeded for team '{team}': {perTeam}/min", DenialKind.RateLimited);
                 return;
             }
         }
 
         // Only team-admitted requests count against the appliance cap: the global limit bounds
         // admitted load, not one team's rejected flood.
-        if (config.GlobalPerMinute > 0 && globalCounter.Increment(GlobalKey) > config.GlobalPerMinute)
+        if (global > 0 && globalCounter.Increment(GlobalKey) > global)
         {
-            ctx.Deny($"rate limit exceeded: appliance cap {config.GlobalPerMinute}/min", DenialKind.RateLimited);
+            ctx.Deny($"rate limit exceeded: appliance cap {global}/min", DenialKind.RateLimited);
             return;
         }
 

@@ -1,208 +1,448 @@
 @page "/budgets"
 @inject AppState State
 @inject AdminApi Api
+@inject ConfigEditor Editor
 @implements IDisposable
 
 <PageTitle>Budgets · Covenant</PageTitle>
 
+@*
+  T08. Budget state per scope from the ledger (GET /admin/budgets, ADR-0014): period + period id, spent, reserved,
+  remaining, cap, warning state, enforcement. Caps/thresholds/period/enforcement are edited in the configuration draft
+  (ConfigEditor → Preview impact → Save & apply). Drill-down: GET /admin/budgets/{id}/requests. Amounts via
+  Logic/Money (significant digits; never $0.00 for a non-zero charge).
+*@
+
 <div class="page">
     <RequiresConnection>
-        @if (State.LastStatus is not { } s)
-        {
-            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
-        }
-        else
-        {
-            var b = s.Budget;
-            var f = s.FinOps;
-            var remaining = b.GlobalCapUsd - b.GlobalSpendUsd;
-            var pct = Fmt.PercentClamped(b.GlobalSpendUsd, b.GlobalCapUsd);
-
-            if (b.GlobalCapUsd > 0 && b.GlobalSpendUsd >= b.GlobalCapUsd)
-            {
-                <AlertCard Tone="bad" Title="Global cap reached"
-                           Body="New provider calls are refused at the budget stage until accounting restarts. Cache hits are still served. Archive & reset (Settings → Maintenance) is a maintenance action, not the fix for an exhausted budget." />
-            }
-            else if (pct >= 80)
-            {
-                <AlertCard Tone="warn" Title="@($"Global budget {pct}% used")" Body="Calls already in flight when the cap is reached can still finish; the cap is a pre-call threshold." />
-            }
-
-            <div class="page-head">
-                <div class="titles">
-                    <h1>Budgets</h1>
-                    <span class="lede">Accounting period: the current audit segment<span>@SegmentSuffix</span>. Spend is rebuilt from the audit log at start; it is not a monthly billing cycle.</span>
-                </div>
-                <span class="page-note">Caps managed by configuration; restart required</span>
+        <div class="page-head">
+            <div class="titles">
+                <h1>Budgets</h1>
+                <span class="lede">Provider spend by scope and UTC period, checked before every paid attempt. Spend lives in the budget ledger — independent of audit segments.</span>
             </div>
+            <Button Busy="@_loading" BusyText="Loading…" OnClick="LoadAsync">Refresh</Button>
+        </div>
 
-            <section class="panel" aria-labelledby="g-h">
-                <h2 id="g-h">Global cap</h2>
-                <FactList Inline="true" Facts="@GlobalFacts(b, remaining)" />
-                <span class="meter @(pct >= 100 ? "bad" : pct >= 80 ? "warn" : "")" role="img" aria-label="@(Fmt.Percent(b.GlobalSpendUsd, b.GlobalCapUsd) + " of the global cap used")">
-                    <span style="width:@pct%"></span>
-                </span>
-                <div class="two-col secondary">
-                    <div>
-                        <strong>A threshold, checked before each call</strong>
-                        <p class="muted">Before a provider call, Covenant compares estimated spend recorded so far with the cap and refuses new calls once it is reached. Cache hits are not checked.</p>
-                    </div>
-                    <div>
-                        <strong>Not an exact invoice cap</strong>
-                        <p class="muted">Cost is known only after a call returns, so calls already in flight when the cap is reached can still finish — concurrent calls can overshoot it. Your provider’s invoice remains the billing record.</p>
-                    </div>
-                </div>
-                <p class="secondary subtle">Ledger is reconstructed from the current audit segment; a pre-call threshold check, not an invoice ceiling.</p>
-            </section>
+        <EditorBar Owner="budgets" Subject="Budgets" ClaimedPaths="@ClaimedPaths" OnSaved="LoadAsync"
+                   ViewHint="Viewing applied caps. Edit to change caps, thresholds, periods or enforcement." />
 
-            <section class="panel flush" aria-labelledby="t-h">
-                <div class="panel-head">
-                    <h2 id="t-h">Teams</h2>
-                    <span class="panel-sub">Attribution from the audit record’s team tag</span>
+        <ErrorBanner Title="Budget state unavailable" Message="@_error" OnRetry="LoadAsync" Busy="@_loading" />
+
+        @if (_budgets is null && _loading)
+        {
+            <section class="panel"><Skeleton Lines="4" Label="Loading budget state" /></section>
+        }
+        else if (_endpointMissing)
+        {
+            <div class="alert warn" role="status">
+                <div class="alert-text">
+                    <strong>This Host has no budget ledger yet (GET /admin/budgets is missing)</strong>
+                    <span class="alert-body">Integration pending on the backend. Shown below: the pre-v2 status counters (global and team spend of the current audit segment). Periods, reservations and application scopes are not available on this Host.</span>
                 </div>
-                @if (b.Teams.Count == 0)
+            </div>
+            @if (State.LastStatus is { } s)
+            {
+                <section class="panel">
+                    <h2>Pre-v2 counters</h2>
+                    <FactList Inline="true" Facts="@LegacyFacts(s)" />
+                </section>
+            }
+        }
+        else if (_budgets is { } budgets)
+        {
+            if (budgets.Count == 0)
+            {
+                <EmptyState Title="No budgets reported" Body="A global budget is required by validation; if none is reported, check the Host's configuration." />
+            }
+            else
+            {
+                if (BudgetText.NoSpendAnywhere(budgets))
                 {
-                    <div style="padding:18px"><EmptyState Title="No team spend recorded" Body="Teams appear here once a request attributed to them is recorded or a team cap is configured." /></div>
+                    <div class="alert info" role="status">
+                        <div class="alert-text">
+                            <strong>No provider spend in the current periods</strong>
+                            <span class="alert-body">Requests served by local models with a zero-marginal price reserve and settle $0 provider charge, and refusals or cache hits make no call — so there is nothing to chart. Infrastructure cost (hardware, power, operations) is not measured by Covenant. To see spend, route Public traffic to a priced cloud connection.</span>
+                        </div>
+                        <a class="btn" href="connections">Models &amp; connections</a>
+                    </div>
                 }
-                else
-                {
+                <section class="panel flush" aria-labelledby="bs-h">
+                    <div class="panel-head">
+                        <h2 id="bs-h">Budget state</h2>
+                        <span class="panel-sub">@(_loadedUtc is { } t ? "Read " + Fmt.UtcShort(t) + " UTC from the ledger" : "")</span>
+                    </div>
                     <div class="table-wrap">
-                        <table>
+                        <table class="budget-table">
                             <thead>
                                 <tr>
-                                    <th scope="col">Team</th>
-                                    <th scope="col" class="num">Recorded spend</th>
-                                    <th scope="col" class="num">Team cap</th>
+                                    <th scope="col">Scope</th>
+                                    <th scope="col">Period</th>
+                                    <th scope="col" class="num">Spent</th>
+                                    <th scope="col" class="num">Reserved</th>
                                     <th scope="col" class="num">Remaining</th>
-                                    <th scope="col">Limits that apply</th>
+                                    <th scope="col" class="num">Cap</th>
+                                    <th scope="col">State</th>
+                                    <th scope="col"><span class="visually-hidden">Actions</span></th>
                                 </tr>
                             </thead>
                             <tbody>
-                                @foreach (var t in b.Teams.OrderByDescending(x => x.SpendUsd))
+                                @foreach (var b in budgets)
                                 {
+                                    var row = b;
+                                    var warn = BudgetText.Warning(row.Warning);
+                                    var pct = BudgetText.MeterPercent(row.SpentUsd, row.ReservedUsd, row.CapUsd);
                                     <tr>
-                                        <td class="mono">@t.Team</td>
-                                        <td class="num mono">@Fmt.Usd(t.SpendUsd)</td>
-                                        <td class="num mono">@(t.CapUsd is { } cap ? Fmt.UsdTotal(cap) : "None configured")</td>
-                                        <td class="num mono">@(t.CapUsd is { } c2 ? (c2 - t.SpendUsd >= 0 ? Fmt.Usd(c2 - t.SpendUsd) : "Exceeded") : "—")</td>
-                                        <td class="secondary muted">@(t.CapUsd is null ? "Global cap only" : "Team cap, then global cap")</td>
+                                        <td><strong>@BudgetText.Scope(row.Scope)</strong><br /><span class="mono subtle secondary">@row.Id</span></td>
+                                        <td class="secondary">@BudgetText.Period(row.Period, row.PeriodId)</td>
+                                        <td class="num mono">@Money.Usd(row.SpentUsd)</td>
+                                        <td class="num mono">@Money.Usd(row.ReservedUsd)</td>
+                                        <td class="num mono">@BudgetText.Remaining(row.RemainingUsd)</td>
+                                        <td class="num mono">@Money.Cap(row.CapUsd)
+                                            <span class="meter @(warn.Tone == "bad" ? "bad" : warn.Tone == "warn" ? "warn" : "")" role="img"
+                                                  aria-label="@(Money.Share(row.SpentUsd + row.ReservedUsd, row.CapUsd) + " of the cap spent or reserved")"><span style="width:@pct%"></span></span>
+                                        </td>
+                                        <td class="secondary">
+                                            <span class="indicator"><span class="dot @warn.Tone" aria-hidden="true"></span>@warn.Label</span>
+                                            <span class="subtle">@BudgetText.Enforcement(row.Enforcement) · warn at @BudgetText.Thresholds(row.WarnAt)</span>
+                                        </td>
+                                        <td><button type="button" class="btn sm" id="@("drill-" + row.Id)" @onclick="() => OpenDrillAsync(row)">Requests</button></td>
                                     </tr>
                                 }
                             </tbody>
                         </table>
                     </div>
-                }
-            </section>
+                </section>
+            }
+        }
 
-            <section class="panel" aria-labelledby="sb-h">
-                <h2 id="sb-h">What counts as spend</h2>
-                <ul class="plain-list secondary">
-                    <li>Estimated provider cost: tokens the provider reports × the configured price for that model. Covenant does not read provider invoices.</li>
-                    <li>Local route: $0 by configured price. Hardware, electricity and operations are excluded, not free.</li>
-                    <li>When a priced model reports no usage, cost is estimated from text length and charged (fail-closed). An unpriced model is charged $0 but counted as unknown — never as a saving.</li>
-                </ul>
-                <div class="indicator secondary">
-                    <span class="dot @(UnknownCostCount is > 0 ? "warn" : UnknownCostCount is null ? "" : "hollow")" aria-hidden="true"></span>
-                    @if (_requestsError is not null)
-                    {
-                        <span class="muted">Unknown-cost requests: unavailable (@_requestsError)</span>
-                    }
-                    else if (UnknownCostCount is null)
-                    {
-                        <span class="muted">Unknown-cost requests: counting…</span>
-                    }
-                    else
-                    {
-                        <span>Unknown-cost requests: <span class="mono">@UnknownCostCount</span> <span class="subtle">(@_unpriced unknown · @_estimated charged from a text-length estimate, of @_scanned records scanned)</span></span>
-                    }
+        @if (Editing && Editor.Draft is { } draft)
+        {
+            <section class="panel" aria-labelledby="be-h">
+                <div class="panel-head">
+                    <h2 id="be-h">Edit budgets (draft)</h2>
+                    <span class="panel-sub">Changing a cap never erases spend; lowering it below spend blocks new paid work. Changing a period or id keeps the scope's accrued ledger.</span>
                 </div>
-            </section>
-
-            <section class="panel" aria-labelledby="av-h">
-                <button type="button" class="btn ghost" style="justify-content:space-between;width:100%;text-align:left;min-height:48px"
-                        @onclick="@(() => _avoidedOpen = !_avoidedOpen)" aria-expanded="@(_avoidedOpen ? "true" : "false")" aria-controls="av-body">
-                    <span style="display:flex;flex-direction:column;align-items:flex-start">
-                        <span id="av-h" style="font-size:var(--text-section);font-weight:600">Estimated provider charge avoided</span>
-                        <span class="secondary subtle">@Fmt.Usd(f.EstimatedSavingsUsd) this segment · secondary analysis, not a measured saving</span>
-                    </span>
-                    <span>@(_avoidedOpen ? "Hide" : "Show")</span>
-                </button>
-                @if (_avoidedOpen)
-                {
-                    <div id="av-body" style="display:flex;flex-direction:column;gap:12px">
-                        <p class="secondary muted">Baseline assumption: every served request priced on the Host’s configured strong model at configured prices, uncached. An estimate, not a measured saving.</p>
-                        <div class="table-wrap">
-                            <table class="secondary">
-                                <thead><tr><th scope="col">Source</th><th scope="col" class="num">Estimate</th><th scope="col">Basis</th></tr></thead>
-                                <tbody>
-                                    <tr><td>Complexity router</td><td class="num mono">@Fmt.Usd(f.SavingsRouterUsd)</td><td class="muted">Served by a cheaper permitted cloud model instead of the baseline</td></tr>
-                                    <tr><td>Cache</td><td class="num mono">@Fmt.Usd(f.SavingsCacheUsd)</td><td class="muted">@(f.CacheHits == 0 ? "No cache hits in this segment" : $"{Fmt.Int(f.CacheHits)} cache hits priced at the cached model’s rate")</td></tr>
-                                    <tr><td>Local route</td><td class="num mono">@Fmt.Usd(f.SavingsLocalUsd)</td><td class="muted">@(f.LocalRequests == 0 ? "No local requests in this segment" : $"{Fmt.Int(f.LocalRequests)} requests, {Fmt.Int(f.LocalTokens)} tokens · provider price delta only; infrastructure cost is not configured")</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
+                <ul class="budget-edit-list">
+                    @foreach (var b in draft.Budgets)
+                    {
+                        var cfgRow = b;
+                        var bi = draft.Budgets.IndexOf(cfgRow);
+                        var path = IssueIndex.Budget(bi);
+                        <li>
+                            <div class="policy-head">
+                                <strong>@BudgetText.Scope(cfgRow.Scope)</strong>
+                                <span class="mono subtle secondary">@cfgRow.Id</span>
+                                @if (IsNewBudget(cfgRow))
+                                {
+                                    <span class="changed-flag">New in draft</span>
+                                    <button type="button" class="btn ghost sm" @onclick="() => RemoveBudget(cfgRow)">Remove</button>
+                                }
+                            </div>
+                            <div class="form-grid">
+                                <div class="field">
+                                    <label for="@("cap-" + bi)">Cap (USD)</label>
+                                    <input id="@("cap-" + bi)" class="input mono" type="number" min="0" step="any" @bind="cfgRow.CapUsd" @bind:after="Editor.Touch"
+                                           aria-invalid="@(Editor.Issues.HasErrorAt(path + ".cap_usd") ? "true" : "false")" />
+                                    <FieldIssues Issues="@Editor.Issues" Path="@(path + ".cap_usd")" />
+                                </div>
+                                <div class="field">
+                                    <label for="@("per-" + bi)">Period (UTC)</label>
+                                    <select id="@("per-" + bi)" class="input" value="@(cfgRow.Period ?? "monthly")" @onchange="@(e => SetPeriod(cfgRow, e))">
+                                        <option value="monthly">Monthly</option>
+                                        <option value="daily">Daily</option>
+                                        <option value="none">No period (cumulative)</option>
+                                    </select>
+                                </div>
+                                <div class="field">
+                                    <label for="@("warn-" + bi)">Warn at (% of cap)</label>
+                                    <input id="@("warn-" + bi)" class="input mono" type="text" placeholder="80, 95"
+                                           value="@BudgetText.FormatThresholds(cfgRow.WarnAt)" @onchange="@(e => SetThresholds(cfgRow, bi, e))"
+                                           aria-invalid="@(_thresholdErrors.ContainsKey(bi) || Editor.Issues.HasErrorAt(path + ".warn_at") ? "true" : "false")" />
+                                    @if (_thresholdErrors.TryGetValue(bi, out var te))
+                                    {
+                                        <span class="help bad">@te</span>
+                                    }
+                                    <FieldIssues Issues="@Editor.Issues" Path="@(path + ".warn_at")" />
+                                </div>
+                                <div class="field">
+                                    <label for="@("enf-" + bi)">Enforcement</label>
+                                    <select id="@("enf-" + bi)" class="input" value="@(cfgRow.Enforcement ?? "hard")" @onchange="@(e => SetEnforcement(cfgRow, e))">
+                                        <option value="hard">Hard — refuse paid work over the cap</option>
+                                        <option value="warn-only">Warn only — never block</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <FieldIssues Issues="@Editor.Issues" Path="@path" />
+                        </li>
+                    }
+                </ul>
+                <div class="field-row">
+                    <div class="field">
+                        <label for="nb-kind">New budget scope</label>
+                        <select id="nb-kind" class="input" @bind="_newKind">
+                            <option value="team">Team</option>
+                            <option value="application">Application</option>
+                            <option value="global">Global</option>
+                        </select>
                     </div>
+                    @if (_newKind != "global")
+                    {
+                        <div class="field">
+                            <label for="nb-name">@(_newKind == "team" ? "Team name" : "Application id")</label>
+                            <input id="nb-name" class="input mono" type="text" spellcheck="false" @bind="_newName" @bind:event="oninput" />
+                        </div>
+                    }
+                    <button type="button" class="btn form" @onclick="AddBudget" disabled="@(_newKind != "global" && string.IsNullOrWhiteSpace(_newName))"><Icon Name="plus" Size="16" /><span>Add budget</span></button>
+                </div>
+                @if (_addError is { } ae)
+                {
+                    <span class="note bad" role="status">@ae</span>
                 }
+                <span class="note">Raising or lowering a cap is a configuration activation and is audited with before/after. Hard caps are an estimated bound (reservation from enforced input/output limits), not an invoice ceiling.</span>
             </section>
         }
+
+        <section class="panel two-col" aria-label="What counts as spend">
+            <div>
+                <h2>Provider charge</h2>
+                <ul class="plain-list secondary muted">
+                    <li>Provider-reported tokens × configured price for that connection/model. Covenant does not read provider invoices.</li>
+                    <li>Before each attempt a conservative reservation is held; it settles against reported usage (or an explicit estimate) exactly once, and the remainder is released.</li>
+                    <li>An unpriced paid model is not eligible under a hard budget — unknown cost is never counted as $0.</li>
+                </ul>
+            </div>
+            <div>
+                <h2>Local infrastructure</h2>
+                <ul class="plain-list secondary muted">
+                    <li>Local models priced “zero marginal” settle $0 provider charge.</li>
+                    <li>Hardware, power and operations are excluded — not free. No infrastructure estimate is configured, so none is shown.</li>
+                </ul>
+            </div>
+        </section>
+        <p class="note">Budget period rollover and audit archive are different operations: a budget's period rolls over by UTC date; archiving the audit segment (Settings → Maintenance) never reopens a budget.</p>
+
+        <Drawer Title="@(_drill is { } d ? "Contributing requests · " + BudgetText.Scope(d.Scope) : "")" Open="@(_drill is not null)" OpenChanged="OnDrillOpenChanged"
+                OpenerId="@(_drill is { } dd ? "drill-" + dd.Id : null)">
+            @if (_drill is { } db)
+            {
+                <span class="secondary muted">@BudgetText.Period(db.Period, db.PeriodId) · settled contributions, newest first. Open a request to see its attempts and evidence.</span>
+                @if (_drillLoading)
+                {
+                    <Skeleton Lines="5" Label="Loading contributing requests" />
+                }
+                <ErrorBanner Title="Contributing requests unavailable" Message="@_drillError" OnRetry="@(() => LoadDrillAsync(db))" />
+                @if (_drillRows is { Count: 0 })
+                {
+                    <EmptyState Title="No settled requests in this period" Body="Nothing has been charged to this scope in the current period." />
+                }
+                else if (_drillRows is { } rows)
+                {
+                    <ol class="row-list">
+                        @foreach (var r in rows)
+                        {
+                            var req = r;
+                            <li>
+                                <a class="mono" href="@("requests/" + Uri.EscapeDataString(req.RequestId))">@req.RequestId</a>
+                                <span class="mono">@Money.Usd(req.AmountUsd)</span>
+                                <span class="subtle secondary">@(Fmt.Utc(req.TsUtc) + (req.AttemptId.Length > 0 ? " · attempt " + req.AttemptId : "") + (req.Kind != "settle" && req.Kind.Length > 0 ? " · " + req.Kind : ""))</span>
+                                @if (req.Overrun)
+                                {
+                                    <span class="note warn">Reported charge exceeded the reservation — settled in full.</span>
+                                }
+                            </li>
+                        }
+                    </ol>
+                }
+            }
+        </Drawer>
     </RequiresConnection>
 </div>
 
 @code {
-    private static IReadOnlyList<FactList.Fact> GlobalFacts(BudgetStatus b, decimal remaining) =>
-    [
-        new("Cap", Fmt.UsdTotal(b.GlobalCapUsd), true),
-        new("Recorded spend", Fmt.Usd(b.GlobalSpendUsd), true),
-        new("Remaining", remaining >= 0 ? Fmt.Usd(remaining) : "Exceeded by " + Fmt.Usd(-remaining), true),
-        new("Used", Fmt.Percent(b.GlobalSpendUsd, b.GlobalCapUsd), true),
-    ];
+    private List<BudgetStateDto>? _budgets;
+    private bool _loading;
+    private string? _error;
+    private bool _endpointMissing;
+    private DateTimeOffset? _loadedUtc;
+    private bool _started;
 
-    private bool _avoidedOpen;
-    private string? _requestsError;
-    private int? _unpriced;
-    private int? _estimated;
-    private int _scanned;
-    private bool _loadedOnce;
+    private BudgetStateDto? _drill;
+    private bool _drillLoading;
+    private string? _drillError;
+    private List<BudgetContributionDto>? _drillRows;
 
-    private SegmentInfo? Segment { get; set; }
-    private int? UnknownCostCount => _unpriced is null || _estimated is null ? null : _unpriced + _estimated;
-    private string SegmentSuffix => Segment is { FirstUtc: { } first } ? ", begun " + Fmt.Utc(first) : "";
+    private string _newKind = "team";
+    private string? _newName;
+    private string? _addError;
+    private readonly Dictionary<int, string> _thresholdErrors = new();
 
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    private bool Editing => Editor.Editing && Editor.Owner == "budgets";
 
-    protected override async Task OnParametersSetAsync()
+    private IReadOnlyList<string> ClaimedPaths => Editing && Editor.Draft is { } d ? Enumerable.Range(0, d.Budgets.Count).Select(IssueIndex.Budget).ToList() : [];
+
+    protected override async Task OnInitializedAsync()
     {
-        if (State.Connected && !_loadedOnce) await LoadRequestsAsync();
+        State.Changed += OnStateChanged;
+        Editor.Changed += OnChanged;
+        await Editor.EnsureLoadedAsync();
+        if (State.Connected) await LoadAsync();
     }
 
-    private async Task LoadRequestsAsync()
+    private async Task LoadAsync()
     {
-        _loadedOnce = true;
+        if (_loading || !State.Connected) return;
+        _started = true;
+        _loading = true;
+        _error = null;
+        StateHasChanged();
         try
         {
-            var r = await Api.GetRequestsAsync(1000);
-            Segment = r.Segment;
-            _scanned = r.Items.Count;
-            _unpriced = r.Items.Count(i => i.CostBasis is "unpriced" or "unknown_failed_call");
-            _estimated = r.Items.Count(i => i.CostBasis is "estimated_from_text" or "estimated_failed_call");
-            _requestsError = null;
+            _budgets = await Api.GetBudgetsAsync();
+            _endpointMissing = false;
+            _loadedUtc = DateTimeOffset.UtcNow;
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
         {
-            _requestsError = "requests endpoint not available on this Host";
+            _endpointMissing = true;
+            _budgets = null;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
         }
         catch (Exception ex)
         {
-            _requestsError = ex.Message;
+            _error = ex.Message; // keep the previous rows visible but say they could not be refreshed
         }
-        StateHasChanged();
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
     }
 
-    private void OnChanged()
+    private static IReadOnlyList<FactList.Fact> LegacyFacts(StatusReport s) =>
+    [
+        new("Global cap", Money.Cap(s.Budget.GlobalCapUsd), true),
+        new("Recorded spend", Money.Usd(s.Budget.GlobalSpendUsd), true),
+        new("Teams with spend", s.Budget.Teams.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), true),
+    ];
+
+    private bool IsNewBudget(BudgetConfigDto b) => Editor.Applied?.Config?.Budgets.All(x => !string.Equals(x.Id, b.Id, StringComparison.Ordinal)) ?? true;
+
+    private void SetPeriod(BudgetConfigDto b, ChangeEventArgs e)
     {
-        if (State.Connected && !_loadedOnce) _ = InvokeAsync(LoadRequestsAsync);
-        _ = InvokeAsync(StateHasChanged);
+        b.Period = e.Value?.ToString() is "daily" or "none" ? e.Value!.ToString() : "monthly";
+        Editor.Touch();
     }
 
-    public void Dispose() => State.Changed -= OnChanged;
+    private void SetEnforcement(BudgetConfigDto b, ChangeEventArgs e)
+    {
+        b.Enforcement = e.Value?.ToString() == "warn-only" ? "warn-only" : "hard";
+        Editor.Touch();
+    }
+
+    private void SetThresholds(BudgetConfigDto b, int index, ChangeEventArgs e)
+    {
+        var parsed = BudgetText.ParseThresholds(e.Value?.ToString());
+        if (parsed is null)
+        {
+            _thresholdErrors[index] = "Enter percentages between 0 and 100, separated by commas (e.g. 80, 95).";
+            return;
+        }
+        _thresholdErrors.Remove(index);
+        b.WarnAt = parsed;
+        Editor.Touch();
+    }
+
+    private void AddBudget()
+    {
+        _addError = null;
+        if (Editor.Draft is not { } d) return;
+        string scope = _newKind switch
+        {
+            "global" => "global",
+            "application" => "application:" + (_newName ?? "").Trim(),
+            _ => "team:" + (_newName ?? "").Trim(),
+        };
+        if (d.Budgets.Any(x => string.Equals(x.Scope, scope, StringComparison.OrdinalIgnoreCase)))
+        {
+            _addError = "A budget for " + scope + " already exists in the draft.";
+            return;
+        }
+        var seed = scope.Replace(':', '-');
+        var id = ConnectionRules.UniqueId(seed, d.Budgets.Select(x => x.Id));
+        d.Budgets.Add(new BudgetConfigDto { Id = id, Scope = scope, CapUsd = 0m, Period = "monthly", WarnAt = [0.80m, 0.95m], Enforcement = "hard" });
+        _newName = null;
+        Editor.Touch();
+    }
+
+    private void RemoveBudget(BudgetConfigDto b)
+    {
+        if (Editor.Draft is not { } d) return;
+        d.Budgets.Remove(b);
+        _thresholdErrors.Clear();
+        Editor.Touch();
+    }
+
+    private async Task OpenDrillAsync(BudgetStateDto b)
+    {
+        _drill = b;
+        await LoadDrillAsync(b);
+    }
+
+    private async Task LoadDrillAsync(BudgetStateDto b)
+    {
+        _drillLoading = true;
+        _drillError = null;
+        _drillRows = null;
+        StateHasChanged();
+        try
+        {
+            var page = await Api.GetBudgetRequestsAsync(b.Id);
+            if (!ReferenceEquals(_drill, b)) return;
+            _drillRows = page.Items;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _drillError = "Contributing requests are not available on this Host (GET /admin/budgets/{id}/requests missing).";
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (Exception ex)
+        {
+            _drillError = ex.Message;
+        }
+        finally
+        {
+            _drillLoading = false;
+        }
+    }
+
+    private void OnDrillOpenChanged(bool open)
+    {
+        if (open) return;
+        _drill = null;
+        _drillRows = null;
+        _drillError = null;
+    }
+
+    private void OnStateChanged()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            if (State.Connected && !_started) await LoadAsync();
+            StateHasChanged();
+        });
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        State.Changed -= OnStateChanged;
+        Editor.Changed -= OnChanged;
+    }
 }

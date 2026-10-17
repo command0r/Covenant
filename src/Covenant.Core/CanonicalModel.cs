@@ -29,7 +29,15 @@ public sealed record InferenceRequest(
     string? Credential = null,
     int? MaxOutputTokens = null,
     string? UnsupportedFeature = null,    // set by ingress when the wire carried something governance cannot see (images, tools) → denied in-pipeline, audited
-    string? RequestId = null);            // server-generated correlation id (ADR-0009); never caller-supplied
+    string? RequestId = null,             // server-generated correlation id (ADR-0009); never caller-supplied
+    string? RequestedProfile = null);     // workload profile asked for (X-Covenant-Profile / console); must be granted (ADR-0012)
+
+/// <summary>An application identity resolved by the Host itself (console inference, ADR-0012) — never
+/// taken from a client header or body. Deliberately NOT a member of <see cref="InferenceRequest"/> (the canonical
+/// request every ingress builds from wire input): it can only be attached server-side through
+/// <see cref="InferenceContext.BindConsoleIdentity"/>. The auth stage still enforces enabled + console testing +
+/// profile grant.</summary>
+public sealed record PreAuthenticatedIdentity(string ApplicationId, string Team, string Principal);
 
 /// <summary>Who the pipeline decided the caller is: self-declared until the auth stage overwrites it
 /// on a valid key. Everything downstream reads THIS, never the raw request headers.</summary>
@@ -43,5 +51,8 @@ public sealed record Usage(long InputTokens, long OutputTokens, decimal CostUsd)
 }
 
 /// <summary>The canonical inference response. UsageReported=false means the provider returned no (or
-/// partial) token counts: Usage tokens are then NOT a real zero (ADR-0009).</summary>
-public sealed record InferenceResponse(ChatMessage Message, Usage Usage, string ServedByModel, bool UsageReported = true);
+/// partial) token counts: Usage tokens are then NOT a real zero (ADR-0009).
+/// <para>FinishReason (additive): the provider's terminal finish reason in OpenAI vocabulary ("stop", "length",
+/// "content_filter", "tool_calls"), null when not reported (legacy compositions, buffered SDK responses without one).
+/// "length" ⇒ the answer was truncated at the enforced output bound.</para></summary>
+public sealed record InferenceResponse(ChatMessage Message, Usage Usage, string ServedByModel, bool UsageReported = true, string? FinishReason = null);

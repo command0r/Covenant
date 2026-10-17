@@ -2,18 +2,17 @@
 @inject AppState State
 @inject AdminApi Api
 @inject CatalogState Catalog
-@inject InferenceApi Inference
-@inject EvidenceTracker Evidence
+@inject ConfigEditor Editor
 @inject NavigationManager Nav
 @implements IDisposable
 
 <PageTitle>Models &amp; connections · Covenant</PageTitle>
 
 @*
-  TASK 06 (UI half). Top: the APPLIED configuration as the server reports it (GET /admin/catalog) — "Registered"
-  only ever comes from the server's flag. Bottom: the Ollama wizard. Draft values live only in this page; probing
-  a draft never changes the running configuration, and runtime apply is not available (config + restart).
-  The governed test goes through /v1 with an APPLICATION key, never the admin token.
+  T08. Connections from the versioned configuration (GET /admin/config) joined with the catalog's observed health
+  (GET /admin/catalog). Add / Edit / Disable change the configuration DRAFT; Preview impact → Save & apply activates a
+  new version (PUT /admin/config, If-Match). Test probes the endpoint host-side (POST /admin/providers/probe).
+  Secrets are references only. The old "edit a file and restart" wizard is gone.
 *@
 
 <div class="page">
@@ -21,478 +20,351 @@
         <div class="page-head">
             <div class="titles">
                 <h1>Models &amp; connections</h1>
-                <span class="lede">Where Covenant sends calls. Registration, permission and observed reachability are separate facts.</span>
+                <span class="lede">Where Covenant may send calls: approved connections and the exact models permitted on each. Permission, health and price are separate facts.</span>
             </div>
-            <span class="page-note">Managed by configuration; restart required</span>
-            <Button Busy="@Catalog.Refreshing" BusyText="Refreshing…" OnClick="Catalog.RefreshAsync">Refresh</Button>
+            <div class="btn-row tight">
+                <button type="button" class="btn primary" id="add-ollama" @onclick="AddOllama" disabled="@(!CanEdit)"><Icon Name="local" Size="16" /><span>Add Ollama</span></button>
+                <button type="button" class="btn" id="add-cloud" @onclick="AddCloud" disabled="@(!CanEdit)"><Icon Name="cloud" Size="16" /><span>Add cloud provider</span></button>
+                <Button Busy="@Catalog.Refreshing" BusyText="Refreshing…" OnClick="RefreshAsync">Refresh</Button>
+            </div>
         </div>
 
-        @{ var cat = State.Catalog; var localRoute = RouteHealth.LocalRoute(cat, DateTimeOffset.UtcNow); }
+        <EditorBar Owner="connections" Subject="Connections" ShowEditButton="false"
+                   ViewHint="Add, edit or disable a connection to start a draft." ClaimedPaths="@ClaimedPaths" />
 
-        @if (cat is null)
+        @if (Editor.Current is not { } cfg)
         {
-            if (State.CatalogError is { } ce)
+            if (Editor.Loading || (Editor.Applied is null && Editor.LoadError is null))
             {
-                <ErrorBanner Title="Catalog unavailable" Message="@ce" OnRetry="Catalog.RefreshAsync" />
+                <section class="panel"><Skeleton Lines="5" Label="Loading connections" /></section>
             }
-            else
+            else if (Editor.EndpointMissing)
             {
-                <Skeleton Lines="4" Label="Loading the provider catalog" />
+                <EmptyState Title="Connections cannot be edited on this Host" Body="This Host does not expose versioned configuration (GET /admin/config). Integration pending on the backend; nothing here is editable until it does." />
             }
         }
         else
         {
-            <section class="panel flush" aria-labelledby="cur-h">
-                <div class="panel-head">
-                    <h2 id="cur-h">Running configuration</h2>
-                    <span class="panel-sub">
-                        Mode <span class="mono">@Fmt.OrNotRecorded(cat.Mode)</span> · read @Fmt.Ago(State.CatalogUpdatedUtc, DateTimeOffset.UtcNow)
-                    </span>
-                </div>
-                <div style="padding:14px 18px;display:flex;flex-direction:column;gap:10px">
-                    <span class="indicator"><span class="dot @localRoute.Tone" aria-hidden="true"></span>@localRoute.Text</span>
-                    <dl class="facts">
-                        <dt>Local route configured</dt><dd>@(cat.Local?.Configured == true ? "Yes" : "No")</dd>
-                        <dt>Local:Endpoint (running)</dt><dd class="mono">@Fmt.OrNotRecorded(cat.Local?.Endpoint)</dd>
-                        <dt>Local:ModelId (running)</dt><dd class="mono">@Fmt.OrNotRecorded(cat.Local?.ModelId)</dd>
-                        <dt>Local model registered</dt><dd>@(cat.Local is null ? "Not reported" : cat.Local.Registered ? "Yes (server-reported)" : "No (server-reported)")</dd>
-                        <dt>Endpoint health</dt><dd>@HealthText(cat.Local?.EndpointHealth)</dd>
-                        <dt>Probe allow-list</dt><dd class="mono">@(cat.ProbeAllowList is { Count: > 0 } al ? string.Join(", ", al) : "Not reported")</dd>
-                    </dl>
-                </div>
-                @if (cat.Models.Count == 0)
-                {
-                    <div style="padding:0 18px 18px"><EmptyState Title="No routed models" Body="Policy has no routes, so every request is refused (fail-closed)." /></div>
-                }
-                else
-                {
-                    <div class="table-scroll">
-                        <table style="min-width:1040px">
-                            <thead>
-                                <tr>
-                                    <th scope="col">Adapter</th>
-                                    <th scope="col">Model id</th>
-                                    <th scope="col">Route classifications</th>
-                                    <th scope="col">Registered</th>
-                                    <th scope="col">Permitted</th>
-                                    <th scope="col">Price basis</th>
-                                    <th scope="col">Observed health</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                @foreach (var m in cat.Models)
+            if (State.CatalogError is { } ce)
+            {
+                <ErrorBanner Title="Health unavailable" Message="@("Catalog: " + ce + " — connections are listed from the configuration; observed health is unknown.")" OnRetry="RefreshAsync" />
+            }
+            if (cfg.Connections.Count == 0)
+            {
+                <EmptyState Title="No connections configured" Body="Every request is refused until an approved connection and a policy route exist (fail-closed).">
+                    <button type="button" class="btn primary" @onclick="AddOllama">Add Ollama</button>
+                    <button type="button" class="btn" @onclick="AddCloud">Add cloud provider</button>
+                </EmptyState>
+            }
+            else
+            {
+                <ul class="conn-list" aria-label="Configured connections">
+                    @foreach (var c in cfg.Connections)
+                    {
+                        var conn = c;
+                        var cat = CatalogFor(conn.Id);
+                        var health = HealthFor(conn, cat);
+                        var changed = ChangedInDraft(conn);
+                        var routed = RoutedBy(cfg, conn.Id);
+                        <li class="conn-card @(conn.Enabled ? "" : "disabled")">
+                            <div class="conn-head">
+                                <span class="conn-icon" aria-hidden="true"><Icon Name="@(ComposerRules.BoundaryLabel(conn.Boundary) == "Cloud" ? "cloud" : "local")" Size="20" /></span>
+                                <div class="conn-title">
+                                    <strong class="wrap-any">@(conn.DisplayName ?? conn.Id)</strong>
+                                    <span class="secondary subtle"><span class="mono">@conn.Id</span> · @ConnectionRules.KindLabel(conn.Kind)</span>
+                                </div>
+                                <BoundaryTag Boundary="@ComposerRules.BoundaryLabel(conn.Boundary)" />
+                                <span class="pill @(conn.Enabled ? "served" : "unknown")"><span class="dot" aria-hidden="true"></span>@(conn.Enabled ? "Enabled" : "Disabled")</span>
+                                @if (changed is { } ch)
                                 {
-                                    <tr>
-                                        <td class="mono">@m.Adapter@(m.EndpointHost is { Length: > 0 } eh ? " · " + eh : "")</td>
-                                        <td class="mono wrap-any">@m.ModelId</td>
-                                        <td>@(m.Classifications.Count > 0 ? string.Join(", ", m.Classifications) : "None")</td>
-                                        <td>@(m.Registered ? "Yes" : "No — matching requests are refused at the provider stage")</td>
-                                        <td>@(m.Classifications.Count > 0 ? "Yes, for " + string.Join(", ", m.Classifications) : "No")</td>
-                                        <td>@PriceText(m)</td>
-                                        <td>@HealthText(m.Health)</td>
-                                    </tr>
+                                    <span class="changed-flag">@ch</span>
                                 }
-                            </tbody>
-                        </table>
-                    </div>
-                }
-                <div style="padding:12px 18px" class="note">Health is observed from real governed calls and probes of the applied endpoint; “unknown” means never observed. GET /v1/models is not a health check.</div>
-            </section>
+                            </div>
+                            <dl class="facts">
+                                <dt>Endpoint</dt>
+                                <dd class="mono wrap-any">@(conn.Endpoint ?? "Provider default")
+                                    @if (cat is { EndpointAllowListed: false })
+                                    {
+                                        <span class="note bad"> · not on the startup egress allow-list</span>
+                                    }
+                                </dd>
+                                <dt>Permitted models</dt>
+                                <dd>
+                                    @if (conn.Models.Count == 0)
+                                    {
+                                        <span class="muted">None — this connection serves nothing</span>
+                                    }
+                                    else
+                                    {
+                                        <ul class="inline-list">
+                                            @foreach (var m in conn.Models)
+                                            {
+                                                <li><span class="mono wrap-any">@m.ModelId</span> <span class="subtle">· @Money.Price(m.Price?.InputPer1M, m.Price?.OutputPer1M)@(m.Price?.Basis is { Length: > 0 } b ? " (" + b + ")" : "")</span>@RegisteredNote(cat, m.ModelId)</li>
+                                            }
+                                        </ul>
+                                    }
+                                </dd>
+                                @if (conn.SecretRef is { } sr)
+                                {
+                                    <dt>Credential</dt>
+                                    <dd><span class="mono">@sr</span> · @SecretText(sr, cat)</dd>
+                                }
+                                <dt>Used by</dt>
+                                <dd>@(routed.Count == 0 ? "No policy routes" : string.Join(", ", routed))</dd>
+                                <dt>Health</dt>
+                                <dd>
+                                    <span class="indicator"><span class="dot @health.Tone" aria-hidden="true"></span>@health.Summary</span>
+                                    <details class="tech">
+                                        <summary>Timestamps</summary>
+                                        <dl class="facts">
+                                            @foreach (var (label, value) in health.Details)
+                                            {
+                                                <dt>@label</dt><dd class="wrap-any">@value</dd>
+                                            }
+                                        </dl>
+                                        <span class="note">A probe shows the endpoint answered; only a governed call shows a model served. GET /v1/models is not a health check.</span>
+                                    </details>
+                                </dd>
+                            </dl>
+                            <div class="btn-row tight">
+                                <button type="button" class="btn sm" id="@("edit-" + conn.Id)" @onclick="() => EditConnection(conn)" disabled="@(!CanEdit)">Edit</button>
+                                @if (conn.Endpoint is { Length: > 0 })
+                                {
+                                    <button type="button" class="btn sm" @onclick="() => TestAsync(conn)" disabled="@_testing.Contains(conn.Id)" aria-busy="@(_testing.Contains(conn.Id) ? "true" : null)">
+                                        @(_testing.Contains(conn.Id) ? "Testing…" : "Test")
+                                    </button>
+                                }
+                                else
+                                {
+                                    <span class="secondary subtle">Test: provider default endpoints are not probed — run a governed Public request in the Playground.</span>
+                                }
+                                <button type="button" class="btn sm" @onclick="() => ToggleEnabled(conn)" disabled="@(!CanEdit)">@(conn.Enabled ? "Disable…" : "Enable…")</button>
+                            </div>
+                            @if (_testErrors.TryGetValue(conn.Id, out var terr))
+                            {
+                                <span class="note bad" role="status">Test failed to run: @terr</span>
+                            }
+                            @if (_probes.TryGetValue(conn.Id, out var pr) && !pr.Probe.Allowed)
+                            {
+                                <span class="note bad" role="status">Probe refused: @(ConnectionLogic.Authority(conn.Endpoint) ?? "this destination") is not on the probe allow-list (Providers:ProbeAllowList; restart required).</span>
+                            }
+                            <FieldIssues Issues="@Editor.Issues" Path="@IssueIndex.Connection(cfg.Connections.IndexOf(conn))" />
+                        </li>
+                    }
+                </ul>
+                <span class="note">Disable/Enable change the draft only; preview the impact and save to apply. Disabled connections are never eligible for any route.</span>
+            }
+
+            <details class="panel tech">
+                <summary>Using Open WebUI or another client</summary>
+                <span class="note">Point the client at <span class="mono">@CovenantV1</span> with a Covenant application key (never the admin token). Pointing it at Ollama directly bypasses Covenant: no policy, budget, pause or audit.</span>
+            </details>
         }
 
-        <section class="panel" aria-labelledby="wiz-h">
-            <div class="panel-head">
-                <h2 id="wiz-h">Connect an existing Ollama</h2>
-                <span class="panel-sub">One exact model tag · nothing is applied from here</span>
-            </div>
-            <div class="wizard">
-                <fieldset>
-                    <legend>1 · Endpoint</legend>
-                    <div class="field">
-                        <label for="cx-url">Base URL, as seen from the Covenant host</label>
-                        <input id="cx-url" class="input mono" type="text" spellcheck="false" placeholder="http://ollama-host:11434/v1"
-                               value="@_endpoint" @oninput="OnEndpointInput" aria-invalid="@(EndpointProblem is not null && _endpoint.Length > 0 ? "true" : "false")" aria-describedby="cx-url-h" />
-                        <span id="cx-url-h" class="help @(EndpointProblem is not null && _endpoint.Length > 0 ? "bad" : "")">@(EndpointProblem ?? "Looks valid. Test it next.")</span>
-                        <span class="help">“localhost” means the machine or container running Covenant — not this browser.</span>
-                    </div>
-                    @if (_invalidated)
-                    {
-                        <span class="note warn" role="status">The endpoint changed, so the earlier probe, model choice and checks were cleared. The running configuration is unchanged.</span>
-                    }
-                </fieldset>
+        <Drawer Title="@DrawerTitle" Open="@(_form is not null)" OpenChanged="OnDrawerOpenChanged" OpenerId="@_openerId">
+            @if (_form is { } form)
+            {
+                <ConnectionEditor Form="@form" Envelope="@Editor.Applied" OtherIds="@OtherIds(form)" DraftIndex="@_draftIndex"
+                                  Issues="@Editor.Issues" Validation="@Editor.Validation" ValidationCurrent="@Editor.ValidationCurrent"
+                                  Validating="@Editor.Validating" Saving="@Editor.Saving" CanSave="@Editor.CanSave"
+                                  RemovedStillRouted="@(Editor.Current is { } cur ? form.RemovedModelsStillRouted(cur) : Array.Empty<string>())"
+                                  OnPreview="PreviewFormAsync" OnSave="SaveFormAsync" OnChanged="StateHasChanged"
+                                  OnProbed="@(p => RecordProbe(form.OriginalId ?? form.Id, p))" />
+                @if (Editor.LastOutcome is { Succeeded: false } lo && lo.Kind != EditOutcomeKind.Stale)
+                {
+                    <ErrorBanner Title="Not applied" Message="@lo.Message" />
+                }
+                @if (Editor.Conflict is { } conflict)
+                {
+                    <div class="alert warn" role="alert"><div class="alert-text"><strong>@conflict.Message</strong><span class="alert-body">Use Reload or Compare in the page bar.</span></div></div>
+                }
+            }
+        </Drawer>
 
-                <fieldset disabled="@(EndpointProblem is not null)">
-                    <legend>2 · Test connection <span class="step-state @StepTone(ProbePassed, _probe is not null)">@StepText(ProbePassed, _probe is not null)</span></legend>
-                    <span class="secondary muted">Covenant probes the endpoint from its own host (GET …/models, 5 s timeout, 64 KiB cap, no redirects, allow-listed destinations only). No Covenant credential is forwarded.</span>
-                    <div class="btn-row">
-                        <Button Variant="primary" Busy="@_probing" BusyText="Testing…" OnClick="ProbeAsync">Test connection</Button>
-                    </div>
-                    <ErrorBanner Title="Probe request failed" Message="@_probeError" />
-                    @if (_probe is { } pr)
-                    {
-                        <dl class="facts">
-                            <dt>Allowed destination</dt><dd>@(pr.Allowed ? "Yes" : "No")</dd>
-                            <dt>Reachable</dt><dd>@(pr.Reachable ? "Yes" : "No")</dd>
-                            <dt>HTTP status</dt><dd class="mono">@(pr.HttpStatus?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "None")</dd>
-                            <dt>Duration</dt><dd class="mono">@(pr.DurationMs is { } ms ? Fmt.Ms(ms) : "Not reported")</dd>
-                            <dt>Normalised endpoint</dt><dd class="mono wrap-any">@Fmt.OrNotRecorded(pr.Endpoint)</dd>
-                            <dt>Error</dt><dd>@(pr.Error ?? "None")</dd>
-                        </dl>
-                        @if (!pr.Allowed)
-                        {
-                            <span class="note bad">This destination is not on the operator allow-list. Add <span class="mono">@(ConnectionLogic.Authority(_endpoint) ?? "host:port")</span> to <span class="mono">Providers:ProbeAllowList</span> (e.g. <span class="mono">Providers__ProbeAllowList=@(ConnectionLogic.Authority(_endpoint) ?? "host:port")</span>) and restart Covenant, then test again.</span>
-                        }
-                        else if (!pr.Reachable)
-                        {
-                            <span class="note bad">The probe failed, so the wizard stops here. Check the address from the Covenant host’s point of view, then edit the endpoint or test again.</span>
-                        }
-                        <span class="note">Observed @(pr.CheckedUtc is { } cu ? Fmt.Utc(cu) : Fmt.Utc(_probeAtUtc)). Reachability is a point-in-time observation.</span>
-                    }
-                </fieldset>
-
-                <fieldset disabled="@(!ProbePassed)">
-                    <legend>3 · Installed models <span class="step-state @StepTone(DiscoveryPassed, ProbePassed)">@StepText(DiscoveryPassed, ProbePassed)</span></legend>
-                    <span class="secondary muted">What the endpoint reports as installed. Discovery never registers or permits a model.</span>
-                    @if (ProbePassed && _probe is { } dp)
-                    {
-                        if (dp.Models.Count == 0)
-                        {
-                            <EmptyState Title="No models installed" Body="The endpoint answered but lists no models. Install the exact Qwen tag on that host (outside Covenant), then test again." />
-                        }
-                        else
-                        {
-                            <ul class="plain-list mono">
-                                @foreach (var t in dp.Models)
-                                {
-                                    <li class="wrap-any">@t</li>
-                                }
-                            </ul>
-                        }
-                    }
-                </fieldset>
-
-                <fieldset disabled="@(!DiscoveryPassed)">
-                    <legend>4 · Choose exactly one tag <span class="step-state @StepTone(TagPassed, DiscoveryPassed)">@StepText(TagPassed, DiscoveryPassed)</span></legend>
-                    <span class="secondary muted">Covenant registers exactly one local model (Local:ModelId). The tag must match exactly — it is never guessed.</span>
-                    @if (DiscoveryPassed && _probe is { } tp)
-                    {
-                        <div class="tag-list" role="radiogroup" aria-label="Installed model tags">
-                            @foreach (var t in tp.Models)
-                            {
-                                var tag = t;
-                                <label>
-                                    <input type="radio" name="cx-tag" value="@tag" checked="@(string.Equals(_tag, tag, StringComparison.Ordinal))" @onchange="() => ChooseTag(tag)" />
-                                    <span>@tag</span>
-                                </label>
-                            }
-                        </div>
-                    }
-                </fieldset>
-
-                <fieldset disabled="@(!TagPassed)">
-                    <legend>5 · Review the route and configuration</legend>
-                    @if (TagPassed && _tag is { } rt)
-                    {
-                        <span>@ConnectionLogic.RouteReview(cat?.Mode, rt)</span>
-                        <div class="seg" role="radiogroup" aria-label="Configuration to generate">
-                            <button type="button" role="radio" aria-checked="@(_localOnly ? "false" : "true")" @onclick="() => _localOnly = false">Keep cloud mode</button>
-                            <button type="button" role="radio" aria-checked="@(_localOnly ? "true" : "false")" @onclick="() => _localOnly = true">Local-only mode</button>
-                        </div>
-                        @if (_localOnly)
-                        {
-                            <span class="note">@ConnectionLogic.RouteReview("local-only", rt)</span>
-                        }
-                        <pre class="code-block" aria-label="Generated configuration">@ConnectionLogic.ConfigBlock(_endpoint, rt, _localOnly)</pre>
-                        <span class="note warn">Runtime apply is not available in this version: apply the configuration and restart Covenant. Then check what the running instance actually loaded.</span>
-                    }
-                </fieldset>
-
-                <fieldset disabled="@(!TagPassed)">
-                    <legend>6 · Check applied configuration <span class="step-state @StepTone(AppliedPassed, _appliedChecked)">@StepText(AppliedPassed, _appliedChecked)</span></legend>
-                    <span class="secondary muted">Re-reads GET /admin/catalog. Passes only if the running instance loaded this endpoint and tag and reports the model as registered.</span>
-                    <div class="btn-row">
-                        <Button Busy="@_checking" BusyText="Checking…" OnClick="CheckAppliedAsync">Check applied configuration</Button>
-                    </div>
-                    @if (_appliedChecked)
-                    {
-                        <span class="note @(AppliedPassed ? "" : "bad")" role="status">@_appliedMessage</span>
-                    }
-                </fieldset>
-
-                <fieldset disabled="@(!AppliedPassed)">
-                    <legend>7 · Governed test <span class="step-state @TestTone">@TestStepText</span></legend>
-                    <span class="secondary muted">Sends a short synthetic prompt to Covenant /v1 with an application key and requested model <span class="mono">@(_tag ?? "—")</span>. It passes through the full pipeline to Ollama — never directly. The prompt carries the published sample SSN so that cloud mode routes it to the local model.</span>
-                    @if (string.IsNullOrEmpty(State.ApplicationKey))
-                    {
-                        <div class="field">
-                            <label for="cx-key">Application key (required — the admin token never authorizes inference)</label>
-                            <input id="cx-key" class="input mono" type="password" autocomplete="off" spellcheck="false" @oninput="OnKeyInput" />
-                            <span class="help">Held in this tab's memory only; never stored. Shared with the Playground.</span>
-                        </div>
-                    }
-                    else
-                    {
-                        <span class="secondary">Using the application key held in memory for this tab.</span>
-                    }
-                    <div class="btn-row">
-                        <Button Variant="primary" Busy="@_testing" BusyText="Running test…" OnClick="RunTestAsync">Run governed test</Button>
-                    </div>
-                    @if (_testOutcome is { } to)
-                    {
-                        <div class="result-head">
-                            <span class="outcome @to.PillKind" style="font-size:22px">@(to.Outcome == DisplayOutcome.Paused ? "Paused — not a reachability result" : to.Title)</span>
-                            <StatusPill Kind="@to.PillKind" Text="@to.StatusLine" />
-                        </div>
-                        <span class="secondary">@to.Explanation</span>
-                        <dl class="facts">
-                            <dt>Request id</dt><dd class="mono wrap-any">@(_testResult?.RequestId ?? "None received")</dd>
-                            @if (_testEvidence.Record is { } trec)
-                            {
-                                <dt>Selected / attempted / served</dt><dd class="mono">@ModelFacts.Selected(trec) · @ModelFacts.Attempted(trec) · @ModelFacts.Served(trec)</dd>
-                                <dt>Classification</dt><dd>@ModelFacts.Classification(trec)</dd>
-                            }
-                            else
-                            {
-                                <dt>Evidence</dt><dd>@EvidenceText</dd>
-                            }
-                        </dl>
-                        @if (_testResult?.RequestId is { Length: > 0 } tid)
-                        {
-                            <a class="btn" href="@("requests/" + Uri.EscapeDataString(tid))">Open evidence</a>
-                        }
-                    }
-                </fieldset>
-            </div>
-        </section>
-
-        <section class="panel" aria-labelledby="owui-h">
-            <h2 id="owui-h">Optional: use Open WebUI as a client</h2>
-            <div class="path-row">
-                <span class="hop">Open WebUI</span><span aria-hidden="true">→</span>
-                <span class="hop">Covenant /v1</span><span aria-hidden="true">→</span>
-                <span class="hop">Covenant request pipeline</span><span aria-hidden="true">→</span>
-                <span class="hop">Ollama</span>
-            </div>
-            <dl class="facts">
-                <dt>OpenAI-compatible base URL</dt><dd class="mono">@CovenantV1</dd>
-                <dt>API key</dt><dd>A Covenant application key — never the admin token.</dd>
-                <dt>Supported</dt><dd>Text chat, buffered and streamed. Tools, images and other APIs are not supported and are refused.</dd>
-            </dl>
-            <span class="note">Pointing Open WebUI at Ollama directly bypasses Covenant: no policy, budget, pause or audit.</span>
-        </section>
+        <Drawer Mode="dialog" Title="@(_toggleTarget is { } t ? (t.Enabled ? "Disable " : "Enable ") + (t.DisplayName ?? t.Id) + "?" : "")"
+                Open="@(_toggleTarget is not null)" OpenChanged="@(open => { if (!open) _toggleTarget = null; })">
+            @if (_toggleTarget is { } tt)
+            {
+                <p class="secondary">
+                    @(tt.Enabled
+                        ? "Disabling removes every model on this connection from eligibility. Routes that name it fall to their next approved target, or are refused when none remains. "
+                        : "Enabling makes this connection's permitted models eligible again for the routes that name them. ")
+                    This changes the draft only; you will preview the impact before anything is applied.
+                </p>
+                <div class="btn-row" style="justify-content:flex-end">
+                    <button type="button" class="btn" @onclick="() => _toggleTarget = null">Cancel</button>
+                    <button type="button" class="btn primary" @onclick="ConfirmToggleAsync">@(tt.Enabled ? "Disable in draft & preview" : "Enable in draft & preview")</button>
+                </div>
+            }
+        </Drawer>
     </RequiresConnection>
 </div>
 
 @code {
-    private string _endpoint = "";
-    private bool _invalidated;
+    private ConnectionForm? _form;
+    private int? _draftIndex;
+    private string? _openerId;
+    private ConnectionDto? _toggleTarget;
+    private readonly HashSet<string> _testing = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _testErrors = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (ProbeResponse Probe, DateTimeOffset At)> _probes = new(StringComparer.Ordinal);
 
-    private ProbeResponse? _probe;
-    private DateTimeOffset _probeAtUtc;
-    private bool _probing;
-    private string? _probeError;
+    private bool CanEdit => Editor.Applied is not null && !Editor.Saving && (!Editor.Editing || Editor.Owner == "connections" || !Editor.IsDirty);
 
-    private string? _tag;
-    private bool _localOnly;
+    private IReadOnlyList<string> ClaimedPaths => Editor.Current is { } c ? Enumerable.Range(0, c.Connections.Count).Select(IssueIndex.Connection).ToList() : [];
 
-    private bool _checking;
-    private bool _appliedChecked;
-    private bool _appliedPass;
-    private string? _appliedMessage;
-
-    private bool _testing;
-    private InferenceResult? _testResult;
-    private OutcomeView? _testOutcome;
-    private EvidenceStatus _testEvidence = EvidenceStatus.Idle;
-    private CancellationTokenSource? _cts;
-
-    private string? EndpointProblem => ConnectionLogic.EndpointProblem(_endpoint);
-    private bool ProbePassed => _probe is { Allowed: true, Reachable: true };
-    private bool DiscoveryPassed => ProbePassed && _probe is { Models.Count: > 0 };
-    private bool TagPassed => DiscoveryPassed && _tag is not null && _probe is { } p && p.Models.Contains(_tag);
-    private bool AppliedPassed => TagPassed && _appliedChecked && _appliedPass;
+    private string DrawerTitle => _form is null ? "" : _form.IsNew
+        ? (_form.IsOllama ? "Add Ollama connection" : "Add cloud provider")
+        : "Edit " + (_form.DisplayName.Length > 0 ? _form.DisplayName : _form.Id);
 
     private string CovenantV1 => new Uri(new Uri(Nav.BaseUri).GetLeftPart(UriPartial.Authority)).ToString().TrimEnd('/') + "/v1";
 
-    private string TestTone => _testOutcome is null ? "" : _testOutcome.PillKind switch { "served" => "ok", "failed" => "bad", _ => "warn" };
-    private string TestStepText => _testOutcome is null ? (AppliedPassed ? "Ready" : "Locked") : OutcomeModel.Label(_testOutcome.Outcome);
-
-    private string EvidenceText => _testEvidence.State switch
+    protected override async Task OnInitializedAsync()
     {
-        EvidenceState.Pending => "Awaiting audit record…",
-        EvidenceState.Unavailable => _testEvidence.Message ?? EvidenceTracker.UnavailableMessage,
-        EvidenceState.Error => _testEvidence.Message ?? "Evidence lookup failed",
-        _ => _testResult?.RequestId is null ? "No request id received" : "Not looked up",
-    };
-
-    protected override void OnInitialized() => State.Changed += OnChanged;
-
-    private static string StepText(bool passed, bool attempted) => passed ? "Passed" : attempted ? "Not passed" : "";
-    private static string StepTone(bool passed, bool attempted) => passed ? "ok" : attempted ? "bad" : "";
-
-    private static string HealthText(ModelHealth? h)
-    {
-        if (h is null) return "Not reported";
-        var state = string.IsNullOrWhiteSpace(h.State) ? "unknown" : h.State;
-        var now = DateTimeOffset.UtcNow;
-        var parts = new List<string> { state };
-        parts.Add("last success " + (h.LastSuccessUtc is null ? "never" : Fmt.Ago(h.LastSuccessUtc, now)));
-        if (h.LastFailureUtc is not null) parts.Add("last failure " + Fmt.Ago(h.LastFailureUtc, now));
-        if (!string.IsNullOrWhiteSpace(h.LastError)) parts.Add("error: " + h.LastError);
-        return string.Join(" · ", parts);
+        State.Changed += OnChanged;
+        Editor.Changed += OnChanged;
+        await Editor.EnsureLoadedAsync();
     }
 
-    private static string PriceText(CatalogModel m) => m.PriceBasis switch
-    {
-        "zero" => "$0 configured provider price (infrastructure excluded)",
-        "configured" => $"{(m.InPer1M is { } i ? Fmt.Usd(i, 2) : "?")} in / {(m.OutPer1M is { } o ? Fmt.Usd(o, 2) : "?")} out per 1M tokens",
-        "unpriced" => "Unpriced — cost unknown, not zero",
-        _ => "Not reported",
-    };
+    private Task RefreshAsync() => Catalog.RefreshAsync();
 
-    private void OnEndpointInput(ChangeEventArgs e)
+    private CatalogConnectionDto? CatalogFor(string id)
+        => State.Catalog?.Connections?.FirstOrDefault(c => string.Equals(c.Id, id, StringComparison.Ordinal));
+
+    private ConnectionHealthView HealthFor(ConnectionDto conn, CatalogConnectionDto? cat)
     {
-        var next = e.Value?.ToString() ?? "";
-        if (string.Equals(next, _endpoint, StringComparison.Ordinal)) return;
-        bool hadDraftResults = _probe is not null || _tag is not null || _appliedChecked || _testOutcome is not null;
-        _endpoint = next;
-        InvalidateFromProbe();
-        _invalidated = hadDraftResults;
+        // One shape: the catalog's connection-scoped view (catalog.connections[].models[].health). A connection the
+        // catalog does not list has no observed health yet.
+        var models = cat?.Models.Select(m => m.Health).ToList() ?? new List<ModelHealth?>();
+        ModelHealth? endpointHealth = null;
+        if (State.Catalog?.Local is { } local && ConnectionLogic.SameEndpoint(local.Endpoint, conn.Endpoint)) endpointHealth = local.EndpointHealth;
+        _probes.TryGetValue(conn.Id, out var probe);
+        return ConnectionHealth.Summarize(conn.Enabled, models, probe.Probe, probe.Probe is null ? null : probe.At, endpointHealth, DateTimeOffset.UtcNow);
     }
 
-    /// <summary>Editing the endpoint invalidates every later DRAFT result. The running configuration is untouched.</summary>
-    private void InvalidateFromProbe()
+    private static string RegisteredNote(CatalogConnectionDto? cat, string modelId)
     {
-        _cts?.Cancel();
-        _probe = null;
-        _probeError = null;
-        _tag = null;
-        InvalidateFromApplied();
+        var m = cat?.Models.FirstOrDefault(x => string.Equals(x.ModelId, modelId, StringComparison.Ordinal));
+        return m is { Registered: false } ? " · no provider client (refused at the provider stage)" : "";
     }
 
-    private void InvalidateFromApplied()
+    private string SecretText(string secretRef, CatalogConnectionDto? cat)
     {
-        _appliedChecked = false;
-        _appliedPass = false;
-        _appliedMessage = null;
-        _testResult = null;
-        _testOutcome = null;
-        _testEvidence = EvidenceStatus.Idle;
+        bool? available = cat?.SecretAvailable;
+        if (available is null && Editor.Applied?.Secrets is { } map && map.TryGetValue(secretRef, out var s)) available = s.Available;
+        return available switch
+        {
+            true => "available on the server (value never shown)",
+            false => "NOT SET on the server — set " + ConnectionRules.EnvVarFor(secretRef) + " and restart",
+            null => "availability not reported (checked on preview)",
+        };
     }
 
-    private void ChooseTag(string tag)
+    private string? ChangedInDraft(ConnectionDto conn)
     {
-        if (string.Equals(_tag, tag, StringComparison.Ordinal)) return;
-        _tag = tag;
-        InvalidateFromApplied();
+        if (!Editor.Editing || Editor.Applied?.Config is not { } applied) return null;
+        var before = applied.Connections.FirstOrDefault(c => string.Equals(c.Id, conn.Id, StringComparison.Ordinal));
+        if (before is null) return "New in draft";
+        return string.Equals(ConfigCopy.Canonical(before), ConfigCopy.Canonical(conn), StringComparison.Ordinal) ? null : "Changed in draft";
     }
 
-    private async Task ProbeAsync()
+    private static List<string> RoutedBy(CovenantConfigDto cfg, string connectionId)
+        => cfg.Policies.Where(p => p.Targets.Any(t => string.Equals(t.ConnectionId, connectionId, StringComparison.Ordinal)))
+            .Select(p => (p.Name ?? p.Id) + (p.Enabled ? "" : " (disabled)"))
+            .ToList();
+
+    private IReadOnlyList<string> OtherIds(ConnectionForm form)
+        => (Editor.Current?.Connections ?? []).Select(c => c.Id)
+            .Where(id => !string.Equals(id, form.AppliedAsId ?? form.OriginalId, StringComparison.Ordinal)).ToList();
+
+    private IEnumerable<string> ExistingIds => (Editor.Current?.Connections ?? []).Select(c => c.Id);
+
+    private void AddOllama()
     {
-        if (EndpointProblem is not null || _probing) return;
-        var endpoint = _endpoint.Trim();
-        _probing = true;
-        _probeError = null;
-        _invalidated = false;
-        _probe = null;
-        _tag = null;
-        InvalidateFromApplied();
+        _form = ConnectionForm.NewOllama(ExistingIds);
+        _draftIndex = null;
+        _openerId = "add-ollama";
+    }
+
+    private void AddCloud()
+    {
+        _form = ConnectionForm.NewCloud("OpenAi", ExistingIds);
+        _draftIndex = null;
+        _openerId = "add-cloud";
+    }
+
+    private void EditConnection(ConnectionDto conn)
+    {
+        _form = ConnectionForm.FromConnection(conn);
+        _draftIndex = Editor.Current?.Connections.IndexOf(conn) is int i and >= 0 && Editor.Editing ? i : null;
+        _openerId = "edit-" + conn.Id;
+    }
+
+    private void OnDrawerOpenChanged(bool open)
+    {
+        if (!open) _form = null;
+    }
+
+    /// <summary>Puts the form into the draft and asks the Host for validation + impact.</summary>
+    private async Task PreviewFormAsync()
+    {
+        if (_form is not { } form || !Editor.BeginEdit("connections") || Editor.Draft is not { } draft) return;
+        _draftIndex = form.ApplyTo(draft);
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private async Task SaveFormAsync()
+    {
+        var outcome = await Editor.SaveAsync();
+        if (outcome.Succeeded) _form = null;
+    }
+
+    private void ToggleEnabled(ConnectionDto conn) => _toggleTarget = conn;
+
+    private async Task ConfirmToggleAsync()
+    {
+        if (_toggleTarget is not { } target) return;
+        _toggleTarget = null;
+        if (!Editor.BeginEdit("connections") || Editor.Draft is not { } draft) return;
+        var inDraft = draft.Connections.FirstOrDefault(c => string.Equals(c.Id, target.Id, StringComparison.Ordinal));
+        if (inDraft is null) return;
+        inDraft.Enabled = !inDraft.Enabled;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private async Task TestAsync(ConnectionDto conn)
+    {
+        if (conn.Endpoint is not { Length: > 0 } endpoint || !_testing.Add(conn.Id)) return;
+        _testErrors.Remove(conn.Id);
         try
         {
             var result = await Api.ProbeAsync(endpoint);
-            // Ignore a stale answer if the endpoint was edited while the probe was running.
-            if (string.Equals(_endpoint.Trim(), endpoint, StringComparison.Ordinal))
-            {
-                _probe = result;
-                _probeAtUtc = DateTimeOffset.UtcNow;
-            }
+            RecordProbe(conn.Id, result);
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
         {
-            // handled by ConsoleSession
+            // ConsoleSession disconnects.
         }
         catch (Exception ex)
         {
-            _probeError = ex.Message;
+            _testErrors[conn.Id] = ex.Message;
         }
         finally
         {
-            _probing = false;
+            _testing.Remove(conn.Id);
         }
-        // A probe of the APPLIED endpoint updates its observed health on the server.
         await Catalog.RefreshAsync();
     }
 
-    private async Task CheckAppliedAsync()
-    {
-        if (!TagPassed || _tag is not { } tag) return;
-        _checking = true;
-        try
-        {
-            await Catalog.RefreshAsync();
-            var (pass, message) = ConnectionLogic.CheckApplied(State.Catalog, _endpoint, tag);
-            _appliedPass = pass;
-            _appliedMessage = message + " Read " + Fmt.Utc(State.CatalogUpdatedUtc) + ".";
-            _appliedChecked = true;
-        }
-        finally
-        {
-            _checking = false;
-        }
-    }
-
-    private void OnKeyInput(ChangeEventArgs e) => State.SetApplicationKey(e.Value?.ToString());
-
-    private async Task RunTestAsync()
-    {
-        if (!AppliedPassed || _testing || _tag is not { } tag) return;
-        _testing = true;
-        _testResult = null;
-        _testOutcome = null;
-        _testEvidence = EvidenceStatus.Idle;
-        _cts?.Cancel();
-        var cts = new CancellationTokenSource();
-        _cts = cts;
-        try
-        {
-            var form = new PlaygroundForm
-            {
-                Prompt = ConnectionLogic.GovernedTestPrompt(),
-                Mode = RouteMode.Explicit,
-                ExplicitModel = tag,
-                MaxTokens = 16,
-                Workflow = "connection-test",
-                UseCase = "local-route-check",
-            };
-            var snapshot = RequestSnapshot.Freeze(1, form, DateTimeOffset.UtcNow);
-            var result = await Inference.SendAsync(snapshot, null, cts.Token);
-            _testResult = result;
-            _testOutcome = OutcomeModel.Compute(result.ToOutcomeInput(null));
-            StateHasChanged();
-
-            if (result.RequestId is { Length: > 0 } id && result.HttpStatus is not null)
-            {
-                var final = await Evidence.TrackAsync(id, s => { _testEvidence = s; _ = InvokeAsync(StateHasChanged); }, cts.Token);
-                if (final.State != EvidenceState.Idle) _testEvidence = final;
-                _testOutcome = OutcomeModel.Compute(result.ToOutcomeInput(_testEvidence.Record));
-            }
-        }
-        finally
-        {
-            _testing = false;
-            if (ReferenceEquals(_cts, cts)) _cts = null;
-            cts.Dispose();
-        }
-        // The backend records success/failure from this real call; re-read shared health so the header and catalog
-        // show a later failure even after an earlier success (last success time is kept by the server).
-        await Catalog.RefreshAsync();
-    }
+    private void RecordProbe(string connectionId, ProbeResponse p) => _probes[connectionId] = (p, DateTimeOffset.UtcNow);
 
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
 
     public void Dispose()
     {
         State.Changed -= OnChanged;
-        _cts?.Cancel();
+        Editor.Changed -= OnChanged;
     }
 }

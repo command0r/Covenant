@@ -1,5 +1,7 @@
 @inherits LayoutComponentBase
 @inject AppState State
+@inject PlaygroundState Pg
+@inject Interop Interop
 @implements IDisposable
 
 <div class="shell">
@@ -9,9 +11,10 @@
         @if (State.Connected && State.Paused)
         {
             <div class="pause-banner" role="status">
+                <Icon Name="pause" Size="16" />
                 <strong>New provider calls paused</strong>
-                <span class="muted">@(string.IsNullOrWhiteSpace(State.PauseReason) ? "No reason recorded." : State.PauseReason)</span>
-                <span class="subtle">Cache hits bypass this stage; in-flight work is not cancelled; downstream actions are outside Covenant.</span>
+                <span class="muted wrap-any">@(string.IsNullOrWhiteSpace(State.PauseReason) ? "No reason recorded." : State.PauseReason)</span>
+                <span class="subtle">Cache hits and in-flight calls continue.</span>
             </div>
         }
         <main id="main">
@@ -22,6 +25,17 @@
 
 @code {
     protected override void OnInitialized() => State.Changed += OnChanged;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        // Browser-local console preference (Settings → Console preferences); absent = streaming.
+        try
+        {
+            if (await Interop.PrefGetAsync("stream-default") is "false") Pg.SetStreamingDefault(false);
+        }
+        catch (JSException) { /* storage unavailable: keep the default */ }
+    }
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
     public void Dispose() => State.Changed -= OnChanged;
 }

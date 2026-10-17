@@ -1,163 +1,688 @@
 @page "/policies"
 @inject AppState State
+@inject ConfigEditor Editor
+@inject WorkspaceConfig Ws
+@inject NavigationManager Nav
+@inject Interop Interop
 @implements IDisposable
 
 <PageTitle>Policies · Covenant</PageTitle>
 
+@*
+  T08 + review round 2 (U4). Routing policies from the versioned configuration (ADR-0013): a coloured route view
+  (classification/profile → primary → approved fallbacks, Local/Cloud, state, strategy) and an editable list: create a
+  policy, remove one (impact shown first), edit classification/profile applicability, targets, order, pause/resume, retry,
+  and "Split this policy" (Public → cloud + local fallback; Internal/PII/PHI → local). Every change edits the DRAFT only;
+  Preview impact → Save & apply via ConfigEditor. Cloud targets are never offered for PII/PHI. Simulator = dry run.
+  Review round 3: "Applications & workload profiles" (Components/ProfilesEditor.razor, #applications) edits profiles and
+  existing applications' grants in the same draft.
+*@
+
 <div class="page">
     <RequiresConnection>
-        @if (State.LastStatus is not { } s)
+        <div class="page-head">
+            <div class="titles">
+                <h1>Policies</h1>
+                <span class="lede">Which approved destination serves each classification, in what order, and when a request is refused.</span>
+            </div>
+            @if (Editor.Current is { } hc)
+            {
+                var badge = ShellStatus.Mode(hc.Mode);
+                <span class="mode-badge @badge.Tone" title="@badge.Description">@badge.Label</span>
+            }
+            <a class="btn" href="playground">Try in Playground</a>
+        </div>
+
+        <EditorBar Owner="policies" Subject="Policies" ClaimedPaths="@ClaimedPaths"
+                   ViewHint="Viewing the applied routing. Edit to change targets, order, pauses, mode, profiles or application grants." />
+
+        @if (Editor.Current is not { } cfg)
         {
-            <ErrorBanner Title="Status unavailable" Message="@(State.FeedError ?? "No status snapshot has been received from the Host yet.")" />
+            if (Editor.Loading || (Editor.Applied is null && Editor.LoadError is null))
+            {
+                <section class="panel"><Skeleton Lines="5" Label="Loading policies" /></section>
+            }
+            else if (Editor.EndpointMissing)
+            {
+                <EmptyState Title="Policies cannot be shown or edited on this Host" Body="This Host does not expose versioned configuration (GET /admin/config) — integration pending on the backend." />
+            }
         }
         else
         {
-            var groups = s.Routes.GroupBy(r => r.Classification).OrderBy(g => ClassificationOrder(g.Key)).ToList();
-            var unresolved = RouteHealth.UnresolvedRoutes(s, State.Catalog);
-
-            <div class="page-head">
-                <div class="titles">
-                    <h1>Policies</h1>
-                    <span class="lede">Routing is decided by classification. Application keys set identity and team; they do not grant models.</span>
+            <section class="panel" aria-labelledby="mode-h">
+                <div class="panel-head">
+                    <h2 id="mode-h">Mode</h2>
+                    <span class="panel-sub">@ModeSentence(cfg.Mode)</span>
                 </div>
-                <span class="page-note">Managed by configuration; restart required</span>
-                <a class="btn primary form" href="playground">Try in Playground</a>
-            </div>
-
-            <section class="panel" aria-labelledby="sum-h">
-                <h2 id="sum-h">In plain words</h2>
-                <ul class="plain-list">
-                    @foreach (var g in groups)
+                @if (PolicyRoutes.IsLegacy(cfg.Mode))
+                {
+                    <div class="alert warn" role="status">
+                        <div class="alert-text">
+                            <strong>Imported legacy rules</strong>
+                            <span class="alert-body">This configuration reproduces the pre-v2 startup routing exactly (legacy cloud mode). Review the effective routes below before relying on it. “Move to Hybrid defaults” builds a DRAFT — Public → approved cloud model with local fallback; Internal, PII and PHI → local only — and previews it; nothing is applied until you save.</span>
+                        </div>
+                        <button type="button" class="btn" @onclick="MoveToHybridAsync" disabled="@(!CanStartEdit)">Move to Hybrid defaults…</button>
+                    </div>
+                    @if (_hybridProblem is { } hp)
                     {
-                        <li>
-                            <strong>@g.Key</strong> requests may use
-                            @foreach (var (r, i) in g.Select((x, idx) => (x, idx)))
-                            {
-                                if (i > 0) { <span>, </span> }
-                                <span class="mono">@r.Adapter:@r.Model</span>
-                            }
-                            @if (g.Count() > 1 && s.RoutingThresholdTokens > 0)
-                            {
-                                <span>; requests estimated under ~@Fmt.Int(s.RoutingThresholdTokens) tokens take the cheapest route and larger ones escalate.</span>
-                            }
-                            else
-                            {
-                                <span>.</span>
-                            }
-                        </li>
+                        <span class="note bad" role="status">@hp</span>
                     }
-                    <li>A caller may ask for a specific model only if it is in the route set for the request’s classification.</li>
-                    <li>Each request starts with the restrictive default for enforcement. That default is never reported as a detection — when a stage before Classify refuses, the record shows “Not evaluated”.</li>
-                    @if (s.Routes.Count == 0)
+                }
+                <div class="seg" role="radiogroup" aria-label="Provider mode">
+                    <button type="button" role="radio" aria-checked="@(PolicyRoutes.IsLocalOnly(cfg.Mode) ? "true" : "false")" disabled="@(!Editing)" @onclick="@(() => SetModeAsync("local-only"))">Local-only</button>
+                    <button type="button" role="radio" aria-checked="@(IsHybrid(cfg.Mode) ? "true" : "false")" disabled="@(!Editing)" @onclick="@(() => SetModeAsync("hybrid"))">Hybrid</button>
+                    @if (PolicyRoutes.IsLegacy(cfg.Mode))
                     {
-                        <li><strong>No routes are configured.</strong> Every request is refused by policy (fail-closed).</li>
+                        <button type="button" role="radio" aria-checked="true" disabled>Legacy cloud (imported)</button>
+                    }
+                </div>
+                @if (Editing)
+                {
+                    <span class="note">Changing the mode previews its impact automatically. Local-only: cloud targets can never execute. Hybrid: approved cloud targets may serve Public/Internal; PII/PHI never route to cloud destinations.</span>
+                }
+            </section>
+
+            <section class="panel" aria-labelledby="rv-h">
+                <div class="panel-head">
+                    <h2 id="rv-h">Effective routes</h2>
+                    <span class="panel-sub">@(Editing ? "Draft — not applied" : "Applied version v" + (Editor.AppliedVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?")) · from configuration; availability is shown under Models &amp; connections</span>
+                </div>
+                @if (cfg.Policies.Count == 0)
+                {
+                    <EmptyState Title="No policies" Body="Every request is refused (fail-closed) until a policy routes its classification." />
+                }
+                else
+                {
+                    <ol class="route-view">
+                        @foreach (var p in OrderedPolicies(cfg))
+                        {
+                            var pol = p;
+                            var targets = PolicyRoutes.Targets(pol, cfg);
+                            <li class="route-row state-@PolicyText.StateKind(pol)">
+                                <span class="route-scope">@PolicyText.Applicability(pol)</span>
+                                <span class="route-arrow" aria-hidden="true">→</span>
+                                <span class="route-targets">
+                                    @if (!pol.Enabled || pol.Paused)
+                                    {
+                                        <span class="route-chip refused">@(pol.Paused ? "Refused — policy paused" : "Not evaluated — disabled")</span>
+                                    }
+                                    else if (targets.All(x => !x.Eligible))
+                                    {
+                                        <span class="route-chip refused">Refused — no eligible target</span>
+                                    }
+                                    @foreach (var (t, i) in targets.Select((x, n) => (x, n)))
+                                    {
+                                        <span class="route-chip @(t.Eligible ? (t.Boundary == "Cloud" ? "cloud" : "local") : "excluded")" title="@(t.ExcludedReason ?? PolicyRoutes.RoleLabel(i))">
+                                            <span class="route-role">@PolicyRoutes.RoleLabel(i)</span>
+                                            <span class="mono wrap-any">@t.Key</span>
+                                            @if (t.Eligible) { <BoundaryTag Boundary="@t.Boundary" /> }
+                                            else { <span class="route-why">@t.ExcludedReason</span> }
+                                        </span>
+                                    }
+                                </span>
+                                <span class="route-meta secondary subtle">@PolicyText.StrategyName(pol) · <StatusPill Kind="@PolicyText.StateKind(pol)" Text="@PolicyText.StateText(pol)" /></span>
+                            </li>
+                        }
+                    </ol>
+                    <ul class="plain-list secondary summary-lines">
+                        @foreach (var p in OrderedPolicies(cfg))
+                        {
+                            <li class="mono wrap-any">@PolicyRoutes.SummaryLine(p, cfg)</li>
+                        }
+                        <li>@PolicyText.SensitiveNeverCloud</li>
+                    </ul>
+                }
+            </section>
+
+            <section class="panel flush" aria-labelledby="pl-h">
+                <div class="panel-head">
+                    <h2 id="pl-h">Policies</h2>
+                    <span class="panel-sub">@(Editing ? "Editing the draft" : "Read-only — choose Edit above")</span>
+                    @if (Editing && _newPolicy is null)
+                    {
+                        <span class="grow"></span>
+                        <button type="button" class="btn sm" id="pol-create" @onclick="() => StartCreate(cfg)"><span>Create policy…</span></button>
+                    }
+                </div>
+                @if (Editing && _newPolicy is { } np)
+                {
+                    var npOptions = PolicyEditing.TargetOptions(np.Classifications, cfg);
+                    var npProblems = PolicyEditing.Problems(np, cfg);
+                    <div class="policy-create pad" role="group" aria-labelledby="pc-h">
+                        <h3 id="pc-h">New policy (draft)</h3>
+                        <div class="form-grid">
+                            <div class="field">
+                                <label for="pc-id">Policy id</label>
+                                <input id="pc-id" class="input mono" @bind="np.Id" @bind:event="oninput" spellcheck="false" />
+                            </div>
+                            <div class="field">
+                                <label for="pc-name">Name</label>
+                                <input id="pc-name" class="input" @bind="np.Name" @bind:event="oninput" />
+                            </div>
+                            <div class="field">
+                                <label for="pc-st">Strategy</label>
+                                <select id="pc-st" class="input" @bind="np.Strategy">
+                                    <option value="fixed">Fixed + fallback</option>
+                                    <option value="length-heuristic">Length-based heuristic</option>
+                                </select>
+                            </div>
+                        </div>
+                        <fieldset class="inline-fieldset">
+                            <legend class="field-label">Classifications it applies to</legend>
+                            @foreach (var c in PolicyEditing.AllClassifications)
+                            {
+                                var cls = c;
+                                <label class="switch"><input type="checkbox" checked="@np.Classifications.Contains(cls)" @onchange="@(e => ToggleNew(np.Classifications, cls, e))" /> @PolicyText.ClassificationLabel(cls)</label>
+                            }
+                        </fieldset>
+                        <fieldset class="inline-fieldset">
+                            <legend class="field-label">Workload profiles (optional — none checked = every profile)</legend>
+                            @foreach (var pr in cfg.Profiles)
+                            {
+                                var prof = pr;
+                                <label class="switch"><input type="checkbox" checked="@np.Profiles.Contains(prof.Id)" @onchange="@(e => ToggleNew(np.Profiles, prof.Id, e))" /> @(prof.Name ?? prof.Id) <span class="subtle">(@PolicyText.ClassificationLabel(prof.Baseline))</span></label>
+                            }
+                        </fieldset>
+                        <div class="field-row">
+                            <div class="field">
+                                <label for="pc-add">Approved targets in order (primary first)</label>
+                                <select id="pc-add" class="input mono" value="@_newTargetPick" @onchange="@(e => _newTargetPick = e.Value?.ToString() ?? "")">
+                                    <option value="">Choose a permitted model…</option>
+                                    @foreach (var o in npOptions.Where(o => !np.Targets.Contains(o.Value)))
+                                    {
+                                        <option value="@o.Value" disabled="@(o.DisabledReason is not null)">@(o.Label + (o.DisabledReason is { } dr ? " — " + dr : ""))</option>
+                                    }
+                                </select>
+                            </div>
+                            <button type="button" class="btn form" disabled="@(string.IsNullOrEmpty(_newTargetPick))" @onclick="() => AddNewTarget(np, npOptions)">Add target</button>
+                        </div>
+                        @if (np.Targets.Count > 0)
+                        {
+                            <ol class="plain-list secondary">
+                                @foreach (var (t, ti) in np.Targets.Select((x, n) => (x, n)))
+                                {
+                                    var key = t;
+                                    <li><span class="subtle">@PolicyRoutes.RoleLabel(ti)</span> <span class="mono wrap-any">@key</span>
+                                        <button type="button" class="btn ghost sm" @onclick="() => { np.Targets.Remove(key); }" aria-label="@("Remove " + key)">Remove</button></li>
+                                }
+                            </ol>
+                        }
+                        @if (np.Classifications.Any(PolicyText.IsSensitive))
+                        {
+                            <span class="note">@PolicyText.SensitiveNeverCloud Cloud models are not offered.</span>
+                        }
+                        @if (npProblems.Count > 0)
+                        {
+                            <ul class="plain-list secondary warn-text" aria-live="polite">
+                                @foreach (var pp in npProblems) { <li>@pp</li> }
+                            </ul>
+                        }
+                        <div class="btn-row">
+                            <button type="button" class="btn primary" disabled="@(npProblems.Count > 0)" @onclick="() => AddPolicyAsync(np)">Add to draft and preview impact</button>
+                            <button type="button" class="btn" @onclick="CancelCreate">Cancel</button>
+                        </div>
+                    </div>
+                }
+                <div class="pause-explain secondary">
+                    <span><strong>Pause policy:</strong> @PolicyText.PausedPolicyExplained</span>
+                    <span><strong>Pause route:</strong> @PolicyText.PausedRouteExplained</span>
+                </div>
+                <ul class="policy-list">
+                    @foreach (var p in cfg.Policies)
+                    {
+                        var pol = p;
+                        var pi = cfg.Policies.IndexOf(pol);
+                        var targets = PolicyRoutes.Targets(pol, cfg);
+                        var options = PolicyRoutes.Options(pol, cfg);
+                        <li class="policy-item">
+                            <div class="policy-head">
+                                <div class="conn-title">
+                                    <strong class="wrap-any">@(pol.Name ?? pol.Id)</strong>
+                                    <span class="secondary subtle"><span class="mono">@pol.Id</span> · @PolicyText.Applicability(pol) · @PolicyText.StrategyName(pol)</span>
+                                </div>
+                                <StatusPill Kind="@PolicyText.StateKind(pol)" Text="@PolicyText.StateText(pol)" />
+                                @if (Editing)
+                                {
+                                    <button type="button" class="btn sm" @onclick="() => TogglePolicyPause(pol)" aria-describedby="@("pph-" + pol.Id)">
+                                        <Icon Name="@(pol.Paused ? "play" : "pause")" Size="16" /><span>@(pol.Paused ? "Resume policy" : "Pause policy")</span>
+                                    </button>
+                                    <button type="button" class="btn ghost sm" @onclick="() => AskRemove(pol)">Remove policy…</button>
+                                }
+                                @if (PolicyEditing.CanSplit(pol))
+                                {
+                                    <button type="button" class="btn sm" disabled="@(!Editing && !CanStartEdit)" @onclick="() => AskSplit(pol)">Split this policy…</button>
+                                }
+                            </div>
+                            <span id="@("pph-" + pol.Id)" class="visually-hidden">@PolicyText.PausedPolicyExplained</span>
+                            @if (Editing && _removeAsk == pol.Id)
+                            {
+                                <div class="alert warn" role="alertdialog" aria-labelledby="@("rm-h-" + pol.Id)">
+                                    <div class="alert-text">
+                                        <strong id="@("rm-h-" + pol.Id)">Remove policy @pol.Id from the draft?</strong>
+                                        <ul class="plain-list secondary">
+                                            @foreach (var line in PolicyEditing.RemovalImpact(pol, cfg)) { <li>@line</li> }
+                                        </ul>
+                                        <span class="alert-body">The Host's impact preview runs right after; nothing is applied until Save &amp; apply.</span>
+                                    </div>
+                                    <div class="btn-row">
+                                        <button type="button" class="btn primary" @onclick="() => RemovePolicyAsync(pol)">Remove and preview impact</button>
+                                        <button type="button" class="btn" @onclick="() => _removeAsk = null">Keep</button>
+                                    </div>
+                                </div>
+                            }
+                            @if (_splitAsk == pol.Id)
+                            {
+                                var plan = PolicyEditing.PlanSplit(pol, cfg);
+                                <div class="alert info" role="alertdialog" aria-labelledby="@("sp-h-" + pol.Id)">
+                                    <div class="alert-text">
+                                        <strong id="@("sp-h-" + pol.Id)">Split @pol.Id into two draft policies</strong>
+                                        @if (plan.Problem is { } spProblem)
+                                        {
+                                            <span class="alert-body warn-text">@spProblem</span>
+                                        }
+                                        else if (plan.PublicPolicy is { } pp && plan.RestrictedPolicy is { } rp)
+                                        {
+                                            <ul class="plain-list secondary">
+                                                <li><span class="mono">@pp.Id</span> — @PolicyText.Applicability(pp) → <span class="mono wrap-any">@(string.Join(" → ", pp.Targets.Select(PolicyRoutes.Key)))</span></li>
+                                                <li><span class="mono">@rp.Id</span> — @PolicyText.Applicability(rp) → <span class="mono wrap-any">@(string.Join(" → ", rp.Targets.Select(PolicyRoutes.Key)))</span> (local only)</li>
+                                                @foreach (var n in plan.Notes) { <li class="subtle">@n</li> }
+                                            </ul>
+                                            <span class="alert-body">@PolicyText.SensitiveNeverCloud The impact preview runs right after; nothing is applied until Save &amp; apply.</span>
+                                        }
+                                    </div>
+                                    <div class="btn-row">
+                                        <button type="button" class="btn primary" disabled="@(plan.Problem is not null)" @onclick="() => SplitAsync(pol)">Split and preview impact</button>
+                                        <button type="button" class="btn" @onclick="() => _splitAsk = null">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+                            @if (Editing)
+                            {
+                                <fieldset class="inline-fieldset">
+                                    <legend class="field-label">Applies to classifications</legend>
+                                    @foreach (var c in PolicyEditing.AllClassifications)
+                                    {
+                                        var cls = c;
+                                        <label class="switch"><input type="checkbox" checked="@pol.Classifications.Contains(cls)" @onchange="@(e => ToggleClassification(pol, cls, e))" /> @PolicyText.ClassificationLabel(cls)</label>
+                                    }
+                                </fieldset>
+                                <fieldset class="inline-fieldset">
+                                    <legend class="field-label">Workload profiles (none checked = every profile)</legend>
+                                    @foreach (var pr in cfg.Profiles)
+                                    {
+                                        var prof = pr;
+                                        <label class="switch"><input type="checkbox" checked="@pol.Profiles.Contains(prof.Id)" @onchange="@(e => ToggleProfile(pol, prof.Id, e))" /> @(prof.Name ?? prof.Id)</label>
+                                    }
+                                </fieldset>
+                                @if (_applicabilityError.TryGetValue(pol.Id, out var apErr))
+                                {
+                                    <span class="note bad" role="status">@apErr</span>
+                                }
+                            }
+                            <table class="target-table secondary">
+                                <thead><tr><th scope="col">Order</th><th scope="col">Target</th><th scope="col">State</th>@if (Editing) { <th scope="col"><span class="visually-hidden">Actions</span></th> }</tr></thead>
+                                <tbody>
+                                    @foreach (var (t, ti) in targets.Select((x, n) => (x, n)))
+                                    {
+                                        var row = t;
+                                        var index = ti;
+                                        <tr>
+                                            <td>@PolicyRoutes.RoleLabel(index)</td>
+                                            <td><span class="mono wrap-any">@row.Key</span> <BoundaryTag Boundary="@row.Boundary" /></td>
+                                            <td class="@(row.Eligible ? "" : "warn-text")">@(row.Eligible ? "Eligible" : row.ExcludedReason)
+                                                <FieldIssues Issues="@Editor.Issues" Path="@IssueIndex.Target(pi, index)" />
+                                            </td>
+                                            @if (Editing)
+                                            {
+                                                <td class="row-actions">
+                                                    <button type="button" class="btn ghost sm icon-btn" aria-label="@("Move " + row.Key + " up")" disabled="@(index == 0)" @onclick="() => Move(pol, index, up: true)">↑</button>
+                                                    <button type="button" class="btn ghost sm icon-btn" aria-label="@("Move " + row.Key + " down")" disabled="@(index == pol.Targets.Count - 1)" @onclick="() => Move(pol, index, up: false)">↓</button>
+                                                    <button type="button" class="btn ghost sm" @onclick="() => ToggleRoutePause(pol, index)" title="@PolicyText.PausedRouteExplained">@(row.Target.Paused ? "Resume route" : "Pause route")</button>
+                                                    <button type="button" class="btn ghost sm" @onclick="() => RemoveTarget(pol, index)" aria-label="@("Remove " + row.Key)">Remove</button>
+                                                </td>
+                                            }
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                            @if (pol.Targets.Count == 0)
+                            {
+                                <span class="note warn">No targets: every request this policy matches is refused.</span>
+                            }
+
+                            @if (Editing)
+                            {
+                                <div class="policy-edit">
+                                    <div class="field-row">
+                                        <div class="field">
+                                            <label for="@("add-" + pol.Id)">Add approved target</label>
+                                            <select id="@("add-" + pol.Id)" class="input mono" value="@(_add.TryGetValue(pol.Id, out var sel) ? sel : "")" @onchange="@(e => _add[pol.Id] = e.Value?.ToString() ?? "")">
+                                                <option value="">@(options.Count == 0 ? "No further enabled, permitted models" : "Choose a permitted model…")</option>
+                                                @foreach (var o in options)
+                                                {
+                                                    <option value="@o.Value" disabled="@(o.DisabledReason is not null)">@(o.Label + (o.DisabledReason is { } dr ? " — " + dr : ""))</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <button type="button" class="btn form" @onclick="() => AddTarget(pol)" disabled="@(!_add.TryGetValue(pol.Id, out var pick) || string.IsNullOrEmpty(pick))">Add</button>
+                                    </div>
+                                    @if (PolicyText.CoversSensitive(pol))
+                                    {
+                                        <span class="note">@PolicyText.SensitiveNeverCloud Cloud models are not offered for this policy.</span>
+                                    }
+                                    <div class="form-grid">
+                                        <div class="field">
+                                            <label for="@("st-" + pol.Id)">Strategy</label>
+                                            <select id="@("st-" + pol.Id)" class="input" value="@(PolicyText.IsLengthHeuristic(pol) ? "length-heuristic" : "fixed")" @onchange="@(e => SetStrategy(pol, e))">
+                                                <option value="fixed">Fixed + fallback (primary, then approved fallbacks in order)</option>
+                                                <option value="length-heuristic">Length-based heuristic (short → first target, long → last)</option>
+                                            </select>
+                                        </div>
+                                        @if (PolicyText.IsLengthHeuristic(pol))
+                                        {
+                                            <div class="field">
+                                                <label for="@("th-" + pol.Id)">Threshold (estimated tokens)</label>
+                                                <input id="@("th-" + pol.Id)" class="input mono" type="number" min="0" @bind="pol.ThresholdTokens" @bind:after="Editor.Touch" />
+                                                <FieldIssues Issues="@Editor.Issues" Path="@(IssueIndex.Policy(pi) + ".threshold_tokens")" />
+                                            </div>
+                                        }
+                                        <div class="field">
+                                            <label for="@("ma-" + pol.Id)">Max attempts (1–3)</label>
+                                            <input id="@("ma-" + pol.Id)" class="input mono" type="number" min="1" max="3" value="@(Retry(pol).MaxAttempts?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "")" @onchange="@(e => SetRetryInt(pol, e, deadline: false))" placeholder="2" />
+                                            <FieldIssues Issues="@Editor.Issues" Path="@(IssueIndex.Policy(pi) + ".retry.max_attempts")" />
+                                        </div>
+                                        <div class="field">
+                                            <label for="@("dl-" + pol.Id)">Total deadline (ms)</label>
+                                            <input id="@("dl-" + pol.Id)" class="input mono" type="number" min="1000" max="600000" value="@(Retry(pol).DeadlineMs?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "")" @onchange="@(e => SetRetryInt(pol, e, deadline: true))" placeholder="120000" />
+                                            <FieldIssues Issues="@Editor.Issues" Path="@(IssueIndex.Policy(pi) + ".retry.deadline_ms")" />
+                                        </div>
+                                    </div>
+                                    <fieldset class="inline-fieldset">
+                                        <legend class="field-label">Fall back on (transient failures only, never after content was streamed)</legend>
+                                        @foreach (var kind in RetryKinds)
+                                        {
+                                            var k = kind;
+                                            <label class="switch"><input type="checkbox" checked="@RetryOn(pol, k.Key)" @onchange="@(e => SetRetryOn(pol, k.Key, e))" /> @k.Label</label>
+                                        }
+                                    </fieldset>
+                                </div>
+                            }
+                            <details class="tech">
+                                <summary>Refusal conditions</summary>
+                                <ul class="plain-list secondary">
+                                    @foreach (var line in PolicyRoutes.RefusalConditions(pol, cfg))
+                                    {
+                                        <li>@line</li>
+                                    }
+                                </ul>
+                                @if (pol.Explanation is { Length: > 0 } ex)
+                                {
+                                    <span class="note">Policy note: @ex</span>
+                                }
+                            </details>
+                            <FieldIssues Issues="@Editor.Issues" Path="@IssueIndex.Policy(pi)" />
+                        </li>
                     }
                 </ul>
             </section>
 
-            <section class="panel flush" aria-labelledby="rules-h">
-                <div class="panel-head">
-                    <h2 id="rules-h">Classification routes</h2>
-                    <span class="panel-sub">Read-only · as loaded at start · @(Fmt.Int(s.Routes.Count) + (s.Routes.Count == 1 ? " route" : " routes"))</span>
-                </div>
-                @if (s.Routes.Count == 0)
-                {
-                    <div style="padding:18px"><EmptyState Title="No routes configured" Body="Policy:Routes is empty; every request is refused." /></div>
-                }
-                else
-                {
-                    <div class="table-wrap">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th scope="col">Classification</th>
-                                    <th scope="col">Adapter</th>
-                                    <th scope="col">Model</th>
-                                    <th scope="col">Adapter status</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                @foreach (var g in groups)
-                                {
-                                    var first = true;
-                                    foreach (var r in g)
-                                    {
-                                        <tr>
-                                            <td>@(first ? g.Key : "")</td>
-                                            <td class="mono">@r.Adapter</td>
-                                            <td class="mono">@r.Model</td>
-                                            <td>@AdapterStatus(r)</td>
-                                        </tr>
-                                        first = false;
-                                    }
-                                }
-                            </tbody>
-                        </table>
-                    </div>
-                }
-                @if (unresolved.Count > 0)
-                {
-                    <div style="padding:14px 18px">
-                        <AlertCard Tone="warn" Title="@UnresolvedTitle(unresolved.Count)"
-                                   Body="Matching requests pass routing and are refused at the Provider stage — never sent elsewhere."
-                                   ActionText="Set up the connection" ActionHref="connections" />
-                    </div>
-                }
-            </section>
+            <ProfilesEditor Cfg="cfg" Editing="Editing" />
 
-            <section class="panel" aria-labelledby="flow-h">
-                <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
-                    <h2 id="flow-h">Configured processing order</h2>
-                    <span class="panel-sub">A request stops at the first stage that refuses it; a cache hit skips every stage after Cache. Audit wraps the whole pipeline and records every outcome, including refusals.</span>
-                </div>
-                <p class="mono secondary">auth → shape → classify → policy → cache → rate limit → pause/budget → provider → attribution (audit wraps)</p>
-                <ol class="stages">
-                    @foreach (var (name, desc, i) in Stages.Select((st, idx) => (st.Name, st.Desc, idx + 1)))
-                    {
-                        <li><span class="n">@i</span><span><span class="name">@name</span> <span class="muted secondary">— @desc</span></span></li>
-                    }
-                </ol>
-            </section>
-
-            <section class="panel" aria-labelledby="ed-h">
-                <h2 id="ed-h">Editing policies in the console is not available</h2>
-                <span class="secondary muted">An editor needs validation, versioned configuration, authorization, a review-then-apply step and defined rollback first. Per-application model grants do not exist today.</span>
-            </section>
+            <PolicySimulator Applications="@Ws.Applications" Profiles="@cfg.Profiles" Draft="@(Editor.IsDirty ? Editor.Draft : null)" AppliedVersion="@Editor.AppliedVersion" />
         }
     </RequiresConnection>
 </div>
 
 @code {
-    private static readonly (string Name, string Desc)[] Stages =
+    private sealed record RetryKind(string Key, string Label);
+
+    private static readonly RetryKind[] RetryKinds =
     [
-        ("Auth", "Application key → principal and team. Unknown key: refused (Unauthenticated)."),
-        ("Shape", "Only plain text chat is governed; tools, images and audio are refused (Unsupported)."),
-        ("Classify", "Public / Internal / PII / PHI from the prompt text; the restrictive default applies until evaluated."),
-        ("Policy", "Allowed route set for the classification; a requested model outside it is refused."),
-        ("Cache", "An identical governed request within the TTL is answered from cache — no provider call, no charge."),
-        ("Rate limit", "Per-principal limits; over the limit: refused (RateLimited)."),
-        ("Pause / budget", "Paused: refused. Estimated spend at or over the cap: refused (checked before the call)."),
-        ("Provider", "The adapter call; a permitted route with no registered adapter is refused here, never redirected."),
-        ("Attribution", "Reported usage × configured price, attributed to the team; written to the audit chain."),
+        new("connect", "Connection failure"),
+        new("timeout", "Provider timeout"),
+        new("429", "429 rate limited"),
+        new("5xx", "500/502/503/504"),
     ];
 
-    private static int ClassificationOrder(string c) => c.ToLowerInvariant() switch
-    {
-        "public" => 0, "internal" => 1, "pii" => 2, "phi" => 3, _ => 9,
-    };
+    private static readonly string[] DefaultRetryOn = ["connect", "timeout", "429", "5xx"];
 
-    private static string UnresolvedTitle(int n)
-        => n == 1 ? "1 route permitted by policy but not served by any registered adapter"
-                  : n + " routes permitted by policy but not served by any registered adapter";
+    private readonly Dictionary<string, string> _add = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _applicabilityError = new(StringComparer.Ordinal);
+    private string? _hybridProblem;
+    private NewPolicyForm? _newPolicy;
+    private string _newTargetPick = "";
+    private string? _removeAsk;
+    private string? _splitAsk;
 
-    private string AdapterStatus(Covenant.Ui.Models.RouteView r)
+    private bool Editing => Editor.Editing && Editor.Owner == "policies";
+    private bool CanStartEdit => Editor.Applied is not null && !Editor.Saving && (!Editor.IsDirty || Editor.Owner == "policies");
+
+    private IReadOnlyList<string> ClaimedPaths => Editor.Current is { } c
+        ? Enumerable.Range(0, c.Policies.Count).Select(IssueIndex.Policy)
+            .Concat(Enumerable.Range(0, c.Profiles.Count).Select(IssueIndex.Profile))
+            .Concat(Enumerable.Range(0, c.Applications.Count).Select(IssueIndex.Application)).ToList()
+        : [];
+
+    // policies#applications (linked from Settings): focus the section once it has rendered (focus scrolls it into view).
+    private bool _anchorDone;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (State.Catalog is null)
-            return State.CatalogError is null ? "Checking…" : "Unknown (catalog unavailable)";
-        return RouteHealth.IsRegistered(r, State.Catalog) ? "Registered" : "Not registered — refused at Provider";
+        if (_anchorDone || Editor.Current is null) return;
+        _anchorDone = true;
+        if (!new Uri(Nav.Uri).Fragment.Equals("#applications", StringComparison.OrdinalIgnoreCase)) return;
+        try { await Interop.FocusElementAsync("applications"); }
+        catch (JSException) { /* best effort */ }
     }
 
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    protected override async Task OnInitializedAsync()
+    {
+        Editor.Changed += OnChanged;
+        Ws.Changed += OnChanged;
+        State.Changed += OnChanged;
+        await Editor.EnsureLoadedAsync();
+        await Ws.EnsureLoadedAsync();
+    }
+
+    private static IEnumerable<PolicyDto> OrderedPolicies(CovenantConfigDto cfg)
+        => cfg.Policies.OrderBy(p => p.Classifications.Count == 0 ? 9 : p.Classifications.Min(PolicyText.ClassificationOrder)).ThenBy(p => p.Profiles.Count == 0 ? 1 : 0);
+
+    private static bool IsHybrid(string? mode) => string.Equals(mode, "hybrid", StringComparison.OrdinalIgnoreCase);
+
+    private static string ModeSentence(string? mode)
+    {
+        if (PolicyRoutes.IsLocalOnly(mode)) return "Local-only: only in-perimeter connections can execute.";
+        if (IsHybrid(mode)) return "Hybrid: local and approved cloud routes; PII/PHI never route to cloud destinations.";
+        if (PolicyRoutes.IsLegacy(mode)) return "Legacy cloud: imported pre-v2 routing.";
+        return "Mode not reported.";
+    }
+
+    private static RetrySettingsDto Retry(PolicyDto p) => p.Retry ?? new RetrySettingsDto();
+
+    private static bool RetryOn(PolicyDto p, string key) => (p.Retry?.On ?? (IEnumerable<string>)DefaultRetryOn).Contains(key, StringComparer.Ordinal);
+
+    private async Task SetModeAsync(string mode)
+    {
+        if (!Editing || Editor.Draft is not { } d || string.Equals(d.Mode, mode, StringComparison.Ordinal)) return;
+        d.Mode = mode;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private async Task MoveToHybridAsync()
+    {
+        _hybridProblem = null;
+        if (!Editor.BeginEdit("policies") || Editor.Draft is not { } d) return;
+        var problem = HybridDefaults.ApplyTo(d);
+        if (problem is not null)
+        {
+            _hybridProblem = problem;
+            return;
+        }
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void StartCreate(CovenantConfigDto cfg)
+    {
+        _newPolicy = new NewPolicyForm { Id = PolicyEditing.UniqueId("policy", cfg), Name = "", Classifications = ["Public"] };
+        _newTargetPick = "";
+    }
+
+    private void CancelCreate()
+    {
+        _newPolicy = null;
+        _newTargetPick = "";
+    }
+
+    private static void ToggleNew(List<string> list, string value, ChangeEventArgs e)
+    {
+        list.Remove(value);
+        if (e.Value is bool b && b) list.Add(value);
+    }
+
+    private void AddNewTarget(NewPolicyForm f, IReadOnlyList<TargetOption> options)
+    {
+        var o = options.FirstOrDefault(x => x.Value == _newTargetPick && x.DisabledReason is null);
+        if (o is not null && !f.Targets.Contains(o.Value)) f.Targets.Add(o.Value);
+        _newTargetPick = "";
+    }
+
+    private async Task AddPolicyAsync(NewPolicyForm f)
+    {
+        if (!Editing || Editor.Draft is not { } d) return;
+        if (PolicyEditing.Add(d, f).Count > 0) return;
+        _newPolicy = null;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void AskRemove(PolicyDto p)
+    {
+        _removeAsk = p.Id;
+        _splitAsk = null;
+    }
+
+    private async Task RemovePolicyAsync(PolicyDto p)
+    {
+        _removeAsk = null;
+        if (!Editing || Editor.Draft is not { } d || !PolicyEditing.Remove(d, p.Id)) return;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void AskSplit(PolicyDto p)
+    {
+        // The split edits the draft: start editing here when nobody else holds an unsaved draft.
+        if (!Editing && !Editor.BeginEdit("policies")) return;
+        _splitAsk = p.Id;
+        _removeAsk = null;
+    }
+
+    private async Task SplitAsync(PolicyDto p)
+    {
+        _splitAsk = null;
+        if (!Editing || Editor.Draft is not { } d) return;
+        var problem = PolicyEditing.ApplySplit(d, p.Id);
+        if (problem is not null)
+        {
+            _applicabilityError[p.Id] = problem;
+            return;
+        }
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void ToggleClassification(PolicyDto p, string cls, ChangeEventArgs e)
+    {
+        var next = p.Classifications.Where(c => c != cls).ToList();
+        if (e.Value is bool b && b) next.Add(cls);
+        ApplyApplicability(p, Editor.Draft is { } d ? PolicyEditing.SetClassifications(p, next, d) : "Not editing.");
+    }
+
+    private void ToggleProfile(PolicyDto p, string profile, ChangeEventArgs e)
+    {
+        var next = p.Profiles.Where(x => x != profile).ToList();
+        if (e.Value is bool b && b) next.Add(profile);
+        ApplyApplicability(p, Editor.Draft is { } d ? PolicyEditing.SetProfiles(p, next, d) : "Not editing.");
+    }
+
+    private void ApplyApplicability(PolicyDto p, string? error)
+    {
+        if (error is null)
+        {
+            _applicabilityError.Remove(p.Id);
+            Editor.Touch();
+        }
+        else _applicabilityError[p.Id] = error;
+    }
+
+    private void TogglePolicyPause(PolicyDto p)
+    {
+        p.Paused = !p.Paused;
+        Editor.Touch();
+    }
+
+    private void ToggleRoutePause(PolicyDto p, int index)
+    {
+        if (index < 0 || index >= p.Targets.Count) return;
+        p.Targets[index].Paused = !p.Targets[index].Paused;
+        Editor.Touch();
+    }
+
+    private void Move(PolicyDto p, int index, bool up)
+    {
+        if (up ? PolicyRoutes.MoveUp(p.Targets, index) : PolicyRoutes.MoveDown(p.Targets, index)) Editor.Touch();
+    }
+
+    private void RemoveTarget(PolicyDto p, int index)
+    {
+        if (index < 0 || index >= p.Targets.Count) return;
+        p.Targets.RemoveAt(index);
+        Editor.Touch();
+    }
+
+    private void AddTarget(PolicyDto p)
+    {
+        if (!_add.TryGetValue(p.Id, out var value) || string.IsNullOrEmpty(value)) return;
+        var option = Editor.Draft is { } d ? PolicyRoutes.Options(p, d).FirstOrDefault(o => o.Value == value && o.DisabledReason is null) : null;
+        if (option is null) return;
+        p.Targets.Add(new PolicyTargetDto { ConnectionId = option.ConnectionId, ModelId = option.ModelId });
+        _add.Remove(p.Id);
+        Editor.Touch();
+    }
+
+    private void SetStrategy(PolicyDto p, ChangeEventArgs e)
+    {
+        p.Strategy = e.Value?.ToString() == "length-heuristic" ? "length-heuristic" : "fixed";
+        if (p.Strategy == "length-heuristic" && p.ThresholdTokens is null) p.ThresholdTokens = 400;
+        Editor.Touch();
+    }
+
+    private void SetRetryInt(PolicyDto p, ChangeEventArgs e, bool deadline)
+    {
+        var retry = p.Retry ??= new RetrySettingsDto();
+        int? value = int.TryParse(e.Value?.ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : null;
+        if (deadline) retry.DeadlineMs = value; else retry.MaxAttempts = value;
+        Editor.Touch();
+    }
+
+    private void SetRetryOn(PolicyDto p, string key, ChangeEventArgs e)
+    {
+        var retry = p.Retry ??= new RetrySettingsDto();
+        List<string> on = retry.On ?? new List<string>(DefaultRetryOn);
+        on.RemoveAll(x => x == key);
+        if (e.Value is bool b && b) on.Add(key);
+        retry.On = RetryKinds.Select(k => k.Key).Where(on.Contains).ToList();
+        Editor.Touch();
+    }
+
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
-    public void Dispose() => State.Changed -= OnChanged;
+
+    public void Dispose()
+    {
+        Editor.Changed -= OnChanged;
+        Ws.Changed -= OnChanged;
+        State.Changed -= OnChanged;
+    }
 }

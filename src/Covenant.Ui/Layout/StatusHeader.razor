@@ -1,49 +1,38 @@
 @inject AppState State
 @inject ConsoleSession Session
 @inject CatalogState Catalog
+@inject Interop Interop
 @implements IDisposable
 
-@* Slim status header. Shows only what is actually known: "Console connected" means the admin API answered,
-   not that providers are available or that anything is "serving". Freshness comes from the status feed. *@
+@* Shell header. Shows only what is known: environment, provider mode (from /admin/status), a compact health chip,
+   freshness ("Live", or "Stale · 12 s" only when stale — exact time in the tooltip), the global pause control
+   with its scope, and the theme switch. The ticking element is NOT a live region; one visually hidden polite
+   region announces state changes only (connected / paused / stale). *@
 <header class="status-header">
     <span class="env" title="Environment">@(State.Connected ? State.EnvironmentLabel : "—")</span>
 
-    <span class="indicator" aria-live="polite">
-        <span class="dot @(State.Connected ? (State.IsStale ? "warn" : "ok") : "bad")" aria-hidden="true"></span>
-        @(State.Connected ? "Console connected" : "Console disconnected")
+    @if (State.Connected)
+    {
+        var mode = ShellStatus.Mode(State.LastStatus?.Mode);
+        <span class="mode-badge @mode.Tone" title="@mode.Description">
+            @if (mode.Tone == "local") { <Icon Name="local" Size="16" /> }
+            else if (mode.Tone is "hybrid" or "legacy") { <Icon Name="cloud" Size="16" /> }
+            <span>@mode.Label</span>
+        </span>
+    }
+
+    @{ var fresh = ShellStatus.Freshness(State.Connected, State.IsStale, State.LastUpdatedUtc, DateTimeOffset.UtcNow, State.FeedError); }
+    <span class="indicator fresh @fresh.Tone" title="@(fresh.Title + (State.FeedMode == FeedMode.Polling ? " · polling every 3 s (stream unavailable)" : ""))">
+        <span class="dot @fresh.Tone" aria-hidden="true"></span>
+        <span>@fresh.Label</span>
     </span>
 
     @if (State.Connected)
     {
-        <span class="indicator" aria-live="polite">
-            <span class="dot @(State.IsStale ? "warn" : "hollow")" aria-hidden="true"></span>
-            @if (State.FeedError is not null)
-            {
-                <span>@State.FeedError</span>
-            }
-            else if (State.IsStale)
-            {
-                <span>Stale · last update @Fmt.Ago(State.LastUpdatedUtc, DateTimeOffset.UtcNow)</span>
-            }
-            else
-            {
-                <span>Updated @Seconds s ago</span>
-                if (State.FeedMode == FeedMode.Polling)
-                {
-                    <span class="subtle">· polling</span>
-                }
-            }
-        </span>
-
-        <span class="indicator" aria-live="polite">
-            <span class="dot @(State.Paused ? "warn" : "hollow")" aria-hidden="true"></span>
-            @(State.Paused ? "New provider calls paused" : "New provider calls accepted")
-        </span>
-
-        var local = RouteHealth.LocalRoute(State.Catalog, DateTimeOffset.UtcNow);
-        <a class="indicator header-link" href="connections" title="@(local.LastError is { Length: > 0 } e ? "Last error: " + e : "Open Models & connections")">
-            <span class="dot @local.Tone" aria-hidden="true"></span>
-            @local.Text
+        var health = Health();
+        <a class="indicator header-link health" href="@health.Href" title="@health.Title">
+            <span class="dot @health.Tone" aria-hidden="true"></span>
+            <span>@health.Text</span>
         </a>
     }
 
@@ -53,31 +42,81 @@
     {
         if (_error is not null)
         {
-            <span class="indicator" role="alert" style="color:var(--red)">@_error</span>
+            <span class="indicator note bad" role="alert">@_error</span>
         }
-        if (State.Paused)
-        {
-            <Button Variant="primary" Busy="@_busy" BusyText="Resuming…" OnClick="ResumeAsync" Id="pause-toggle">Resume new provider calls</Button>
-        }
-        else
-        {
-            <Button Busy="@_busy" BusyText="Pausing…" OnClick="PauseAsync" Id="pause-toggle">Pause new provider calls</Button>
-        }
+        <span class="pause-control" @onkeydown="OnPauseKeyDown">
+            @if (State.Paused)
+            {
+                <button type="button" id="pause-toggle" class="btn primary sm" disabled="@_busy" aria-busy="@(_busy ? "true" : null)" @onclick="ResumeAsync">
+                    <Icon Name="play" Size="16" /><span>@(_busy ? "Resuming…" : "Resume provider calls")</span>
+                </button>
+            }
+            else
+            {
+                <button type="button" id="pause-toggle" class="btn sm" disabled="@_busy" aria-busy="@(_busy ? "true" : null)" @onclick="PauseAsync">
+                    <Icon Name="pause" Size="16" /><span>@(_busy ? "Pausing…" : "Pause new provider calls")</span>
+                </button>
+            }
+            <button type="button" id="pause-info" class="btn ghost sm icon-btn" aria-expanded="@(_pauseInfo ? "true" : "false")"
+                    aria-controls="pause-scope" aria-label="What pausing affects" @onclick="TogglePauseInfo">
+                <Icon Name="info" Size="16" />
+            </button>
+            @if (_pauseInfo)
+            {
+                <span id="pause-scope" class="popover" role="note">
+                    <strong>Pause affects new provider calls only.</strong>
+                    <span>While paused, requests that need a provider call are refused at the pause stage and audited.</span>
+                    <span>Cache hits are still served (no provider call is made). In-flight calls are not cancelled and finish normally.</span>
+                    <span>Actions downstream of Covenant are outside its control.</span>
+                </span>
+            }
+        </span>
     }
+
+    <button type="button" class="btn ghost sm icon-btn" @onclick="ToggleThemeAsync"
+            aria-label="@(_theme == "light" ? "Switch to dark theme" : "Switch to light theme")"
+            title="@(_theme == "light" ? "Switch to dark theme" : "Switch to light theme")">
+        <Icon Name="@(_theme == "light" ? "moon" : "sun")" Size="18" />
+    </button>
+
+    <span class="visually-hidden" role="status" aria-live="polite">@ShellStatus.Announcement(State.Connected, State.Paused, State.IsStale)</span>
 </header>
 
 @code {
+    private sealed record HealthChip(string Text, string Tone, string Href, string Title);
+
     private bool _busy;
+    private bool _pauseInfo;
     private string? _error;
+    private string _theme = "dark";
     private System.Threading.Timer? _timer;
 
-    private int Seconds => Math.Max(0, State.SecondsSinceUpdate(DateTimeOffset.UtcNow));
-
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         State.Changed += OnChanged;
-        // Re-render once a second so "Updated n s ago" counts; AppState.Tick handles the stale flip itself.
-        _timer = new System.Threading.Timer(_ => OnChanged(), null, 1000, 1000);
+        // Re-render once a second ONLY while stale, so "Stale · n s" counts; nothing ticks while live.
+        _timer = new System.Threading.Timer(_ => { if (State.Connected && State.IsStale) OnChanged(); }, null, 1000, 1000);
+        try { _theme = await Interop.GetThemeAsync(); } catch (JSException) { _theme = "dark"; }
+    }
+
+    private HealthChip Health()
+    {
+        var s = State.LastStatus;
+        if (s is not null && !s.ChainValid)
+            return new("Audit chain failed", "bad", "evidence", "The current audit segment's hash chain does not verify");
+        // Review round 2 (B11): the CURRENT runtime connection's health (catalog.local.connection_id + status
+        // connection_health, pushed every 2 s) — never an adapter that merely happens to be named "local".
+        var local = RouteHealth.LocalRoute(State.Catalog, s, DateTimeOffset.UtcNow);
+        var title = local.Text + (local.LastError is { Length: > 0 } e ? " · last error: " + e : "");
+        return local.State switch
+        {
+            LocalRouteState.Degraded => new("Local route degraded", "warn", "connections", title),
+            LocalRouteState.NotRegistered => new("Local route not registered", "bad", "connections", title),
+            LocalRouteState.Ready => new("Chain verified · local ready", "ok", "connections", title),
+            LocalRouteState.NotConfigured => new("Chain verified · no local route", "hollow", "connections", title),
+            LocalRouteState.NotObserved => new("Chain verified · local not yet observed", "hollow", "connections", title),
+            _ => new("Health unknown", "hollow", "connections", title),
+        };
     }
 
     private async Task PauseAsync()
@@ -94,6 +133,19 @@
         var err = await Session.SetPausedAsync(false, null);
         _busy = false;
         _error = err is null ? null : "Resume failed — " + err;
+    }
+
+    private void TogglePauseInfo() => _pauseInfo = !_pauseInfo;
+
+    private void OnPauseKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape" && _pauseInfo) _pauseInfo = false;
+    }
+
+    private async Task ToggleThemeAsync()
+    {
+        var next = _theme == "light" ? "dark" : "light";
+        try { _theme = await Interop.SetThemeAsync(next); } catch (JSException) { /* keep current */ }
     }
 
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);

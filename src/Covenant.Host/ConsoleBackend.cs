@@ -260,6 +260,8 @@ public sealed class RequestsPage
 {
     [JsonPropertyName("segment")] public required SegmentInfo Segment { get; init; }
     [JsonPropertyName("items")] public required List<AuditEntry> Items { get; init; }
+    /// <summary>Opaque newest-first position of the next page of the SAME segment; null on the last page.</summary>
+    [JsonPropertyName("next_cursor")] public string? NextCursor { get; init; }
 }
 
 public sealed class SegmentInfo
@@ -269,6 +271,14 @@ public sealed class SegmentInfo
     [JsonPropertyName("chain_valid")] public required bool ChainValid { get; init; }
     [JsonPropertyName("first_utc")] public DateTimeOffset? FirstUtc { get; init; }
     [JsonPropertyName("last_utc")] public DateTimeOffset? LastUtc { get; init; }
+    /// <summary>Control-plane events in this segment (config.activated, …), excluded from Entries/items (v3).</summary>
+    [JsonPropertyName("events")] public int Events { get; init; }
+    /// <summary>Opaque segment id (GET /admin/audit/segments): "current" or an archived segment's id.</summary>
+    [JsonPropertyName("id")] public string? Id { get; init; }
+    [JsonPropertyName("label")] public string? Label { get; init; }
+    /// <summary>Always present (review round 2, B8): whether this page belongs to the current segment — the UI never infers
+    /// the segment from the first row.</summary>
+    [JsonPropertyName("is_current")] public bool IsCurrent { get; init; }
 }
 
 public sealed class CatalogReport
@@ -277,6 +287,10 @@ public sealed class CatalogReport
     [JsonPropertyName("models")] public required List<CatalogModel> Models { get; init; }
     [JsonPropertyName("local")] public required LocalConfigView Local { get; init; }
     [JsonPropertyName("probe_allow_list")] public required List<string> ProbeAllowList { get; init; }
+    // v2 (ADR-0011): multiple connections, keyed by connection id; models keyed "connectionId:modelId".
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; init; }
+    [JsonPropertyName("connections")] public List<CatalogConnection>? Connections { get; init; }
+    [JsonPropertyName("egress_allow_list")] public List<string>? EgressAllowList { get; init; }
 }
 
 public sealed class CatalogModel
@@ -291,6 +305,10 @@ public sealed class CatalogModel
     [JsonPropertyName("out_per_1m")] public decimal? OutPer1M { get; init; }
     [JsonPropertyName("endpoint_host")] public string? EndpointHost { get; init; }
     [JsonPropertyName("health")] public required HealthView Health { get; init; }
+    // v2 additive: connection-scoped identity.
+    [JsonPropertyName("connection_id")] public string? ConnectionId { get; init; }
+    [JsonPropertyName("boundary")] public string? Boundary { get; init; }
+    [JsonPropertyName("key")] public string? Key { get; init; }
 }
 
 public sealed class LocalConfigView
@@ -301,4 +319,21 @@ public sealed class LocalConfigView
     [JsonPropertyName("model_id")] public string? ModelId { get; init; }
     [JsonPropertyName("registered")] public required bool Registered { get; init; }
     [JsonPropertyName("endpoint_health")] public required HealthView EndpointHealth { get; init; }
+    /// <summary>Review round 2 (B11): the local-boundary connection this view describes (connection id) and the CURRENT
+    /// runtime health of exactly that connection + model, observed from real governed attempts (key
+    /// "connection_id:model_id"). Use this — not a legacy "local" adapter name — for the header.</summary>
+    [JsonPropertyName("connection_id")] public string? ConnectionId { get; init; }
+    [JsonPropertyName("health")] public HealthView? Health { get; init; }
+}
+
+/// <summary>Current runtime health of one configured connection + model (review round 2, B11): /admin/status
+/// <c>connection_health</c>. Observed from real attempts and probes; "unknown" until observed.</summary>
+public sealed class ConnectionHealthView
+{
+    [JsonPropertyName("key")] public required string Key { get; init; }
+    [JsonPropertyName("connection_id")] public required string ConnectionId { get; init; }
+    [JsonPropertyName("model_id")] public required string ModelId { get; init; }
+    [JsonPropertyName("boundary")] public required string Boundary { get; init; }
+    [JsonPropertyName("enabled")] public required bool Enabled { get; init; }
+    [JsonPropertyName("health")] public required HealthView Health { get; init; }
 }

@@ -50,6 +50,7 @@ public sealed class AccountingTests
             }
             yield return new MEAI.ChatResponseUpdate(MEAI.ChatRole.Assistant, reply);
             if (Usage() is { } u) yield return new MEAI.ChatResponseUpdate { Contents = [new MEAI.UsageContent(u)] };
+            yield return new MEAI.ChatResponseUpdate { FinishReason = MEAI.ChatFinishReason.Stop };   // terminal completion (real providers send one)
         }
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;

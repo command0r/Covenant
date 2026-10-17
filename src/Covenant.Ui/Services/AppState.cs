@@ -5,10 +5,10 @@ namespace Covenant.Ui.Services;
 public enum FeedMode { None, Stream, Polling }
 
 /// <summary>The one place the console keeps state across navigation: connection, the last status snapshot and
-/// its freshness, pause state, and the two credentials — which are handled differently on purpose.
-/// The admin token is mirrored to tab-scoped sessionStorage by ConsoleSession; the application key exists
-/// ONLY in this object's memory: never persisted, never logged, cleared on disconnect.
-/// Pure state: no HTTP, no JS. Raises Changed; components re-render via InvokeAsync(StateHasChanged).</summary>
+/// its freshness, pause state, and the admin token (mirrored to tab-scoped sessionStorage by ConsoleSession).
+/// Console v2 (ADR-0012): the console holds NO application credential — requests run as an authorized test
+/// application resolved by the Host. Pure state: no HTTP, no JS. Raises Changed; components re-render via
+/// InvokeAsync(StateHasChanged).</summary>
 public sealed class AppState
 {
     public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(8);
@@ -48,9 +48,6 @@ public sealed class AppState
 
     /// <summary>Why the user is on /connect (e.g. "Token rejected", "Disconnected"); cleared on connect.</summary>
     public string? ConnectMessage { get; private set; }
-
-    /// <summary>Application key for the Playground — in memory only (see class remarks).</summary>
-    public string? ApplicationKey { get; private set; }
 
     public bool Paused => LastStatus?.KillSwitch.Engaged == true;
     public string? PauseReason => LastStatus?.KillSwitch.Reason;
@@ -108,12 +105,6 @@ public sealed class AppState
         Notify();
     }
 
-    public void SetApplicationKey(string? key)
-    {
-        ApplicationKey = string.IsNullOrWhiteSpace(key) ? null : key;
-        Notify();
-    }
-
     /// <summary>Called once a second by the feed; flips IsStale when the last snapshot ages past StaleAfter.
     /// Only notifies on a change so the shell does not re-render every tick for nothing.</summary>
     public void Tick(DateTimeOffset nowUtc)
@@ -132,7 +123,6 @@ public sealed class AppState
     public void Disconnect(string? message)
     {
         AdminToken = null;
-        ApplicationKey = null;
         Connected = false;
         LastStatus = null;
         LastUpdatedUtc = null;

@@ -1,0 +1,103 @@
+@* The Host's validation + impact analysis of the current draft (POST /admin/config/validate): errors (with field
+   path and, where the fix is outside the console, what to change), warnings, then the impact — classifications
+   before → after, newly refused, pricing gaps, unavailable destinations, applications affected. The console words
+   the Host's result; it never computes an impact itself. *@
+
+<div class="impact" aria-live="polite">
+    <div class="impact-head">
+        <strong>@(Result.Valid ? "Preview: valid" : "Preview: not valid — cannot be saved")</strong>
+        <span class="secondary subtle">@(Current ? "Computed by the Host for the current draft" : "Out of date — the draft changed after this preview; preview again before saving")</span>
+    </div>
+
+    @if (Result.Errors.Count > 0)
+    {
+        <div class="impact-block bad" role="alert">
+            <strong>@Count(Result.Errors.Count, "error", "errors")</strong>
+            <ul class="plain-list secondary">
+                @foreach (var e in Result.Errors)
+                {
+                    <li>
+                        <span class="mono subtle">@(e.Path ?? "—")</span> @e.Message
+                        @if (IssueHelp.For(e.Code) is { } help)
+                        {
+                            <details class="tech"><summary>How to fix</summary><span class="note">@help</span></details>
+                        }
+                        @if (ClaimedPaths.Any(p => IssueIndex.Under(e.Path, p)))
+                        {
+                            <span class="subtle"> (also shown next to the field)</span>
+                        }
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+    @if (Result.Warnings.Count > 0)
+    {
+        <div class="impact-block warn">
+            <strong>@Count(Result.Warnings.Count, "warning", "warnings")</strong>
+            <ul class="plain-list secondary">
+                @foreach (var w in Result.Warnings)
+                {
+                    <li><span class="mono subtle">@(w.Path ?? "—")</span> @w.Message</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (Result.Impact is { } impact)
+    {
+        <div class="impact-block">
+            <strong>Impact: @ImpactText.Headline(impact)</strong>
+            @{ var routes = ImpactText.ChangedRoutes(impact); }
+            @if (routes.Count > 0)
+            {
+                <div class="table-wrap">
+                    <table class="secondary">
+                        <thead><tr><th scope="col">Classification / profile</th><th scope="col">Before</th><th scope="col">After</th></tr></thead>
+                        <tbody>
+                            @foreach (var r in routes)
+                            {
+                                <tr>
+                                    <td>@r.Scope</td>
+                                    <td class="mono wrap-any @(r.WasRefused ? "warn-text" : "")">@r.Before</td>
+                                    <td class="mono wrap-any @(r.NowRefused ? "bad-text" : "")">@r.After</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            }
+            @if (impact.NewlyRefused.Count > 0)
+            {
+                <div class="impact-list bad"><strong>Would now be refused</strong> <span class="mono wrap-any">@string.Join(" · ", impact.NewlyRefused)</span></div>
+            }
+            @if (impact.UnavailableDestinations.Count > 0)
+            {
+                <div class="impact-list warn"><strong>Unavailable destinations</strong> <span class="mono wrap-any">@string.Join(" · ", impact.UnavailableDestinations)</span></div>
+            }
+            @if (impact.PricingGaps.Count > 0)
+            {
+                <div class="impact-list warn"><strong>Pricing gaps (cost unknown, not zero)</strong> <span class="mono wrap-any">@string.Join(" · ", impact.PricingGaps)</span></div>
+            }
+            @if (impact.ApplicationsAffected.Count > 0)
+            {
+                <div class="impact-list"><strong>Applications affected</strong> <span class="mono wrap-any">@string.Join(" · ", impact.ApplicationsAffected)</span></div>
+            }
+            <span class="note">Applying never resets spend or audit history. Requests already running finish on the version they started with.</span>
+        </div>
+    }
+    else if (Result.Errors.Count > 0)
+    {
+        <span class="note">No impact preview: the Host does not analyse a candidate with structural errors.</span>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public ConfigValidationResultDto Result { get; set; } = default!;
+    /// <summary>False when the draft changed after this preview.</summary>
+    [Parameter] public bool Current { get; set; }
+    [Parameter] public IReadOnlyList<string> ClaimedPaths { get; set; } = [];
+
+    private static string Count(int n, string one, string many)
+        => n.ToString(System.Globalization.CultureInfo.InvariantCulture) + " " + (n == 1 ? one : many);
+}

@@ -1,9 +1,15 @@
 @page "/"
 @inject AppState State
 @inject ConsoleSession Session
+@inject WorkspaceConfig Ws
+@inject PlaygroundState Pg
 @implements IDisposable
 
 <PageTitle>Overview · Covenant</PageTitle>
+
+@* T07 Overview: setup checks (each missing item links to the exact page/action — and none of them is a
+   "demo ready" verdict), spend/request metrics for the labelled audit segment, recent outcomes, a modest
+   activity chart, and the shared composer (same state as Playground; Run is explicit). *@
 
 <div class="page">
     <RequiresConnection>
@@ -14,83 +20,84 @@
         else
         {
             var f = s.FinOps;
-
-            @* ---- What needs attention (first) ---- *@
-            if (State.Paused)
-            {
-                <AlertCard Tone="warn" Title="New provider calls paused"
-                           Body="@("Requests that need a provider call are refused at the pause stage. " + (string.IsNullOrWhiteSpace(s.KillSwitch.Reason) ? "No reason recorded." : "Reason: " + s.KillSwitch.Reason))"
-                           ActionText="Resume" Busy="@_busy" OnAction="ResumeAsync" />
-            }
-            if (!s.ChainValid)
-            {
-                <AlertCard Tone="bad" Title="Audit chain verification failed"
-                           Body="The hash chain of the current audit segment does not verify. Do not archive or reset; open Evidence for the failure detail."
-                           ActionText="Open evidence" ActionHref="evidence" />
-            }
-            if (State.IsStale)
-            {
-                <AlertCard Tone="warn" Title="Status is stale"
-                           Body="@(State.FeedError ?? ("No status update for " + Fmt.Ago(State.LastUpdatedUtc, DateTimeOffset.UtcNow) + ". Totals below are from the last snapshot."))"
-                           ActionText="Refresh now" Busy="@_refreshing" OnAction="RefreshAsync" />
-            }
-            if (RouteHealth.LocalRouteMissing(s, State.Catalog))
-            {
-                <AlertCard Tone="warn" Title="Local route has no registered adapter"
-                           Body="Policy permits the local route but nothing serves it. Matching requests pass routing and are refused at the Provider stage — never sent elsewhere."
-                           ActionText="Review connection" ActionHref="connections" />
-            }
-            var localRoute = RouteHealth.LocalRoute(State.Catalog, DateTimeOffset.UtcNow);
-            if (localRoute.State == LocalRouteState.Degraded)
-            {
-                <AlertCard Tone="warn" Title="@localRoute.Text"
-                           Body="@("The most recent observed call or probe of the local model failed" + (localRoute.LastError is { Length: > 0 } le ? " (" + le + ")" : "") + ". Requests routed to it fail closed; they are never sent elsewhere.")"
-                           ActionText="Review connection" ActionHref="connections" />
-            }
-            if (State.Catalog is null && State.CatalogError is not null)
-            {
-                <AlertCard Tone="info" Title="Route health unknown" Body="@("The provider catalog could not be read (" + State.CatalogError + "), so unresolved routes cannot be detected.")" />
-            }
-            if (!State.Paused && s.ChainValid && !State.IsStale && !RouteHealth.LocalRouteMissing(s, State.Catalog) && localRoute.State != LocalRouteState.Degraded && State.Catalog is not null)
-            {
-                <div class="alert ok" role="status">
-                    <div class="alert-text">
-                        <strong>Nothing needs attention</strong>
-                        <span class="alert-body">New provider calls are accepted, the audit chain verifies, and every configured route has a registered adapter.</span>
-                    </div>
-                </div>
-            }
-
             <div class="page-head">
                 <div class="titles">
                     <h1>Overview</h1>
-                    <span class="lede">@SegmentLabel(s). Opening this page never resets accounting.</span>
+                    <span class="lede">@SegmentLabel(s)</span>
                 </div>
-                <a class="btn form" href="requests">View requests</a>
-                <a class="btn primary form" href="playground">Run a request</a>
+                <a class="btn" href="requests"><Icon Name="requests" Size="16" /><span>View requests</span></a>
             </div>
 
-            @* ---- Summary row ---- *@
+            <div class="ov-top">
+                <section class="panel" aria-labelledby="checks-h">
+                    <div class="panel-head">
+                        <h2 id="checks-h">Setup checks</h2>
+                        <span class="panel-sub">Each check stands alone</span>
+                    </div>
+                    <ul class="check-list">
+                        @foreach (var c in Checks(s))
+                        {
+                            <li class="check @c.Tone" title="@c.Title">
+                                <span class="dot @c.Tone" aria-hidden="true"></span>
+                                <span class="check-name">@c.Name</span>
+                                <span class="check-value">
+                                    <span class="check-status">@c.Value</span>
+                                    @if (c.Id is { Length: > 0 } cid)
+                                    {
+                                        <span class="check-id mono">@cid</span>
+                                    }
+                                </span>
+                                @if (c.ActionText is not null && c.Href is not null)
+                                {
+                                    <a class="check-action" href="@c.Href" aria-label="@(c.ActionText + " — " + c.Name)">@c.ActionText</a>
+                                }
+                                else if (c.ActionText is not null && c.Resume)
+                                {
+                                    <button type="button" class="btn sm check-action" disabled="@_busy" @onclick="ResumeAsync" aria-label="Resume provider calls"><Icon Name="play" Size="14" /><span>@c.ActionText</span></button>
+                                }
+                            </li>
+                        }
+                    </ul>
+                </section>
+
+                <section class="panel" aria-labelledby="ov-run-h">
+                    <div class="panel-head">
+                        <h2 id="ov-run-h">Run a request</h2>
+                        <a class="secondary" href="playground">Open the full Playground</a>
+                    </div>
+                    <RequestComposer Compact="true" IdPrefix="ov" />
+                    @if (Pg.Selected is { } run)
+                    {
+                        <div class="ov-result">
+                            <span class="secondary subtle">@run.Snapshot.Title</span>
+                            <RunSummary Run="run" />
+                            <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" Compact="true" />
+                            <a class="secondary" href="playground">See the response and details in Playground</a>
+                        </div>
+                    }
+                </section>
+            </div>
+
             <dl class="summary-grid">
                 <div class="summary-card">
                     <dt>Served</dt>
                     <dd class="value">@Fmt.Int(f.Allowed)</dd>
-                    <dd class="hint">@(f.CacheHits > 0 ? $"Including {Fmt.Int(f.CacheHits)} served from cache" : "Allowed by policy and answered")</dd>
+                    <dd class="hint">@(f.CacheHits > 0 ? $"Including {Fmt.Int(f.CacheHits)} from cache" : "Allowed and answered")</dd>
                 </div>
                 <div class="summary-card">
                     <dt>Refused or failed</dt>
                     <dd class="value">@Fmt.Int(f.Denied)</dd>
-                    <dd class="hint">Every refusal is an audit entry · reasons below</dd>
+                    <dd class="hint">Each one is an audit entry</dd>
                 </div>
                 <div class="summary-card">
                     <dt>Estimated provider charges</dt>
                     <dd class="value">@Fmt.Usd(f.TotalCostUsd)</dd>
-                    <dd class="hint">Reported tokens × configured prices · infrastructure excluded</dd>
+                    <dd class="hint">Infrastructure excluded</dd>
                 </div>
                 <div class="summary-card">
                     <dt>Global budget used</dt>
                     <dd class="value">@Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd)</dd>
-                    <dd class="hint">@Fmt.Usd(s.Budget.GlobalSpendUsd) of @Fmt.UsdTotal(s.Budget.GlobalCapUsd) cap</dd>
+                    <dd class="hint">@Fmt.Usd(s.Budget.GlobalSpendUsd) of @Fmt.UsdTotal(s.Budget.GlobalCapUsd)</dd>
                     <dd>
                         <span class="meter @MeterTone(s)" role="img" aria-label="@(Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " of the global cap used")">
                             <span style="width:@(Fmt.PercentClamped(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd))%"></span>
@@ -99,120 +106,82 @@
                 </div>
             </dl>
 
-            <div class="alert @(s.ChainValid ? "ok" : "bad")" role="status">
-                <span class="indicator">
-                    <span class="dot @(s.ChainValid ? "ok" : "bad")" aria-hidden="true"></span>
-                    @(s.ChainValid ? "Audit chain verifies" : "Audit chain verification FAILED")
-                </span>
-                <span class="subtle secondary">Checked @Fmt.Ago(State.LastUpdatedUtc, DateTimeOffset.UtcNow) · @Fmt.Int(s.AuditEntries) entries in this segment</span>
-                <a href="evidence">Open evidence</a>
-            </div>
-
-            @* ---- Activity ---- *@
-            <section class="panel" aria-labelledby="act-h">
-                <div class="panel-head">
-                    <h2 id="act-h">Activity</h2>
-                    <span class="panel-sub">@ActivityWindow(f)</span>
-                </div>
-                @if (f.Activity.Count == 0)
-                {
-                    <EmptyState Title="No activity in this segment" Body="Requests per minute appear here once the first request is recorded." />
-                }
-                else
-                {
-                    var peakReq = Math.Max(1, f.Activity.Max(b => b.Requests));
-                    var peakCost = f.Activity.Max(b => b.CostUsd);
-                    <div class="chart">
-                        <div class="legend">
-                            <span class="title">Requests per minute</span>
-                            <span><span class="swatch" style="background:var(--accent)"></span>Served</span>
-                            <span><span class="swatch" style="background:var(--amber)"></span>Refused or failed</span>
-                            <span class="subtle">peak @peakReq / min</span>
-                        </div>
-                        <div class="bars" role="img" aria-label="@($"Requests per minute over {f.Activity.Count} minutes, peak {peakReq}")">
-                            @foreach (var b in f.Activity)
-                            {
-                                var served = b.Requests - b.Denied;
-                                <div class="bar" title="@($"{Fmt.UtcShort(b.T)} UTC · {b.Requests} requests, {b.Denied} refused")">
-                                    <div class="refused" style="height:@(Pct(b.Denied, peakReq))%"></div>
-                                    <div class="served" style="height:@(Pct(served, peakReq))%"></div>
-                                </div>
-                            }
-                        </div>
-                        <div class="axis"><span>@Fmt.UtcShort(f.Activity[0].T) UTC</span><span>@Fmt.UtcShort(f.Activity[^1].T) UTC</span></div>
-                    </div>
-                    <div class="chart">
-                        <div class="legend">
-                            <span class="title">Estimated provider charges per minute (USD)</span>
-                            <span class="subtle">peak @Fmt.Usd(peakCost) / min</span>
-                        </div>
-                        <div class="bars short" role="img" aria-label="@($"Estimated provider charges per minute, peak {Fmt.Usd(peakCost)}")">
-                            @foreach (var b in f.Activity)
-                            {
-                                <div class="bar" title="@($"{Fmt.UtcShort(b.T)} UTC · {Fmt.Usd(b.CostUsd)}")">
-                                    <div class="cost" style="height:@(peakCost > 0 ? (int)Math.Round(b.CostUsd / peakCost * 100m) : 0)%"></div>
-                                </div>
-                            }
-                        </div>
-                        <div class="axis"><span>@Fmt.UtcShort(f.Activity[0].T) UTC</span><span>@Fmt.UtcShort(f.Activity[^1].T) UTC</span></div>
-                    </div>
-                }
-            </section>
-
             <div class="two-col">
-                <section class="panel flush" aria-labelledby="not-h" style="flex:1.4 1 420px">
+                <section class="panel flush" aria-labelledby="recent-h" style="flex:1.3 1 420px">
                     <div class="panel-head">
-                        <h2 id="not-h">Recent notable outcomes</h2>
+                        <h2 id="recent-h">Recent outcomes</h2>
                         <a href="requests" class="secondary">All requests</a>
                     </div>
-                    @if (Notable(f).Count == 0)
+                    @if (f.Recent.Count == 0)
                     {
-                        <div style="padding:18px"><EmptyState Title="No refusals, failures or pauses recorded" Body="Served requests are listed under Requests." /></div>
+                        <p class="secondary muted pad">No requests recorded in this segment yet.</p>
                     }
                     else
                     {
                         <ul class="row-list">
-                            @foreach (var r in Notable(f))
+                            @foreach (var r in f.Recent.Take(6))
                             {
                                 <li>
                                     <span class="mono secondary subtle">@Fmt.UtcShort(r.T)</span>
                                     <StatusPill Kind="@StatusPill.KindFor(r.Effect, null)" />
-                                    <span class="secondary muted" style="flex:1 1 260px">
-                                        @r.Reason
-                                        @if (r.Model is { Length: > 0 })
+                                    <span class="secondary muted row-main">
+                                        <span class="mono">@(r.Model ?? "no model")</span> · <span class="mono">@r.Team</span>
+                                        @if (!string.Equals(r.Effect, "Allow", StringComparison.OrdinalIgnoreCase) && r.Reason.Length > 0)
                                         {
-                                            <span> · </span><span class="mono">@r.Model</span>
+                                            <span> · @r.Reason</span>
                                         }
-                                        <span> · </span><span class="mono">@r.Team</span>
                                     </span>
-                                    <a class="mono secondary" href="@("requests/" + Uri.EscapeDataString(r.Id))">@r.Id</a>
+                                    <a class="mono secondary" href="@("requests/" + Uri.EscapeDataString(r.Id))" aria-label="@("Open request " + r.Id)">Open</a>
                                 </li>
                             }
                         </ul>
                     }
                 </section>
 
-                <section class="panel flush" aria-labelledby="den-h" style="flex:1 1 340px">
-                    <div class="panel-head" style="flex-direction:column;align-items:flex-start;gap:0">
-                        <h2 id="den-h">Refusals by reason</h2>
-                        <span class="panel-sub">This segment, grouped from the audit reason text</span>
+                <section class="panel" aria-labelledby="act-h" style="flex:1 1 340px">
+                    <div class="panel-head">
+                        <h2 id="act-h">Activity</h2>
+                        <span class="panel-sub">@ActivityWindow(f)</span>
                     </div>
-                    @if (f.DenialsByReason.Count == 0)
+                    @if (f.Activity.Count == 0)
                     {
-                        <div style="padding:18px" class="secondary muted">No refusals in this segment.</div>
+                        <p class="secondary muted">Requests per minute appear once the first request is recorded.</p>
                     }
                     else
                     {
-                        <div class="table-wrap">
+                        var peakReq = Math.Max(1, f.Activity.Max(b => b.Requests));
+                        <div class="chart">
+                            <div class="legend">
+                                <span><span class="swatch" style="background:var(--accent)"></span>Served</span>
+                                <span><span class="swatch" style="background:var(--amber)"></span>Refused or failed</span>
+                                <span class="subtle">peak @peakReq / min</span>
+                            </div>
+                            <div class="bars short" role="img" aria-label="@($"Requests per minute over {f.Activity.Count} minutes, peak {peakReq}")">
+                                @foreach (var b in f.Activity)
+                                {
+                                    var served = b.Requests - b.Denied;
+                                    <div class="bar" title="@($"{Fmt.UtcShort(b.T)} UTC · {b.Requests} requests, {b.Denied} refused · {Fmt.Usd(b.CostUsd)}")">
+                                        <div class="refused" style="height:@(Pct(b.Denied, peakReq))%"></div>
+                                        <div class="served" style="height:@(Pct(served, peakReq))%"></div>
+                                    </div>
+                                }
+                            </div>
+                            <div class="axis"><span>@Fmt.UtcShort(f.Activity[0].T) UTC</span><span>@Fmt.UtcShort(f.Activity[^1].T) UTC</span></div>
+                        </div>
+                    }
+                    @if (f.DenialsByReason.Count > 0)
+                    {
+                        <details class="tech">
+                            <summary>Refusals by reason (@Fmt.Int(f.DenialsByReason.Values.Sum()))</summary>
                             <table class="secondary">
                                 <tbody>
                                     @foreach (var kv in f.DenialsByReason.OrderByDescending(k => k.Value))
                                     {
-                                        <tr><td>@kv.Key</td><td class="num mono">@Fmt.Int(kv.Value)</td></tr>
+                                        <tr><td class="wrap-any">@kv.Key</td><td class="num mono">@Fmt.Int(kv.Value)</td></tr>
                                     }
                                 </tbody>
                             </table>
-                        </div>
+                        </details>
                     }
                 </section>
             </div>
@@ -221,10 +190,87 @@
 </div>
 
 @code {
-    private bool _busy;
-    private bool _refreshing;
+    /// <summary>One setup check. <see cref="Value"/> is a short status (no ids); <see cref="Id"/> (a scope or connection id)
+    /// is rendered separately and is the only part allowed to break anywhere; <see cref="Title"/> holds the long form.</summary>
+    private sealed record Check(string Name, string Value, string Tone, string? ActionText = null, string? Href = null, bool Resume = false,
+        string? Id = null, string? Title = null);
 
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    private bool _busy;
+
+    protected override async Task OnInitializedAsync()
+    {
+        State.Changed += OnChanged;
+        Ws.Changed += OnChanged;
+        Pg.Changed += OnChanged;
+        await Ws.EnsureLoadedAsync();
+    }
+
+    private IEnumerable<Check> Checks(StatusReport s)
+    {
+        var fresh = ShellStatus.Freshness(State.Connected, State.IsStale, State.LastUpdatedUtc, DateTimeOffset.UtcNow, State.FeedError);
+        yield return fresh.Stale
+            ? new Check("Console", "Status " + fresh.Label.ToLowerInvariant(), "warn", Title: "Connected; the status feed is stale and retrying")
+            : new Check("Console", "Live", "ok", Title: "Connected · live status");
+
+        var mode = ShellStatus.Mode(s.Mode);
+        yield return mode.Tone == "unknown"
+            ? new Check("Mode", "Not reported", "warn", "Open", "connections", Title: ShellStatus.ModeNotReported)
+            : new Check("Mode", mode.Label, mode.Tone == "legacy" ? "warn" : "ok", mode.Tone == "legacy" ? "Review" : null, mode.Tone == "legacy" ? "policies" : null, Title: mode.Description);
+
+        var local = RouteHealth.LocalRoute(State.Catalog, State.LastStatus, DateTimeOffset.UtcNow);
+        yield return local.State switch
+        {
+            LocalRouteState.Ready => new Check("Local route", "Ready", "ok", Id: local.Target, Title: local.Text),
+            LocalRouteState.Degraded => new Check("Local route", "Degraded", "warn", "Review", "connections", Id: local.Target, Title: local.Text + (local.LastError is { Length: > 0 } le ? " · " + le : "")),
+            LocalRouteState.NotRegistered => new Check("Local route", "Not registered", "bad", "Fix", "connections", Id: local.Target, Title: local.Text),
+            LocalRouteState.NotConfigured => new Check("Local route", "Not configured", "warn", "Add", "connections", Title: "No local connection — sensitive requests will be refused"),
+            LocalRouteState.NotObserved => new Check("Local route", "Not yet observed", "hollow", "Test", "connections", Id: local.Target, Title: local.Text),
+            _ => new Check("Local route", "Unknown", "hollow", "Open", "connections", Title: State.CatalogError ?? local.Text),
+        };
+
+        yield return State.Paused
+            ? new Check("Provider calls", "Paused", "warn", "Resume", Resume: true, Title: string.IsNullOrWhiteSpace(s.KillSwitch.Reason) ? "Paused" : "Paused — " + s.KillSwitch.Reason)
+            : new Check("Provider calls", "Accepted", "ok");
+
+        yield return BudgetCheck(s);
+
+        if (Ws.ApplicationsError is { } ae)
+            yield return new Check("Test applications", "Unavailable", "warn", Title: ae);
+        else if (Ws.Applications is { } apps)
+        {
+            int testable = apps.Count(a => ComposerRules.WhyNotSelectable(a) is null);
+            yield return testable == 0
+                ? new Check("Test applications", "None testable", "warn", "Settings", "settings", Title: "No application is enabled for console testing")
+                : new Check("Test applications", testable.ToString(System.Globalization.CultureInfo.InvariantCulture) + " available", "ok", Title: "Applications the console can run as");
+        }
+
+        yield return s.ChainValid
+            ? new Check("Audit chain", "Verifies", "ok", Title: "The current segment's hash chain verifies")
+            : new Check("Audit chain", "Fails", "bad", "Open", "evidence", Title: "The current segment's hash chain does not verify");
+    }
+
+    private Check BudgetCheck(StatusReport s)
+    {
+        if (Ws.Budgets is { Count: > 0 } budgets)
+        {
+            var worst = budgets.FirstOrDefault(b => string.Equals(b.Warning, "exceeded", StringComparison.OrdinalIgnoreCase))
+                        ?? budgets.FirstOrDefault(b => string.Equals(b.Warning, "critical", StringComparison.OrdinalIgnoreCase))
+                        ?? budgets.FirstOrDefault(b => string.Equals(b.Warning, "warn", StringComparison.OrdinalIgnoreCase));
+            if (worst is null) return new Check("Budgets", "No warning", "ok", Title: "No budget has reached a warning threshold");
+            var tone = string.Equals(worst.Warning, "warn", StringComparison.Ordinal) ? "warn" : "bad";
+            return new Check("Budgets", worst.Warning + " · " + Fmt.Percent(worst.SpentUsd, worst.CapUsd), tone, "Open", "budgets", Id: worst.Scope,
+                Title: worst.Scope + ": " + worst.Warning + " · " + Fmt.Usd(worst.SpentUsd) + " of " + Fmt.UsdTotal(worst.CapUsd));
+        }
+        var pct = Fmt.PercentClamped(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd);
+        if (s.Budget.GlobalCapUsd <= 0) return new Check("Budgets", "No global cap", "hollow", "Open", "budgets");
+        var used = Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " of global";
+        var title = Fmt.Usd(s.Budget.GlobalSpendUsd) + " of " + Fmt.UsdTotal(s.Budget.GlobalCapUsd);
+        return pct >= 95
+            ? new Check("Budgets", used, "bad", "Open", "budgets", Title: title)
+            : pct >= 80
+                ? new Check("Budgets", used, "warn", "Open", "budgets", Title: title)
+                : new Check("Budgets", used, "ok", Title: title);
+    }
 
     private static int Pct(int value, int peak) => peak <= 0 ? 0 : (int)Math.Round(value * 100.0 / peak);
 
@@ -240,19 +286,16 @@
     {
         var oldest = s.FinOps.Activity.Count > 0 ? s.FinOps.Activity[0].T : (DateTimeOffset?)null;
         return oldest is null
-            ? "Totals cover the current audit segment (no entries yet)"
-            : "Current audit segment since " + Fmt.Utc(oldest);
+            ? "Totals cover the current audit segment (no entries yet). Opening this page never resets accounting."
+            : "Totals cover the current audit segment since " + Fmt.Utc(oldest) + ". Opening this page never resets accounting.";
     }
 
     private static string ActivityWindow(FinOpsSummary f)
     {
-        if (f.Activity.Count == 0) return "Per-minute buckets · nothing recorded";
+        if (f.Activity.Count == 0) return "Per minute · nothing recorded";
         var span = f.Activity[^1].T - f.Activity[0].T + TimeSpan.FromMinutes(1);
-        return $"Per-minute buckets · {Fmt.Duration(span)} ending {Fmt.UtcShort(f.Activity[^1].T)} UTC (most recent hour retained)";
+        return $"Per minute · {Fmt.Duration(span)} to {Fmt.UtcShort(f.Activity[^1].T)} UTC";
     }
-
-    private static List<RecentRequest> Notable(FinOpsSummary f)
-        => f.Recent.Where(r => !string.Equals(r.Effect, "Allow", StringComparison.OrdinalIgnoreCase)).Take(8).ToList();
 
     private async Task ResumeAsync()
     {
@@ -261,13 +304,12 @@
         _busy = false;
     }
 
-    private async Task RefreshAsync()
-    {
-        _refreshing = true;
-        await Session.TryRefreshAsync();
-        _refreshing = false;
-    }
-
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
-    public void Dispose() => State.Changed -= OnChanged;
+
+    public void Dispose()
+    {
+        State.Changed -= OnChanged;
+        Ws.Changed -= OnChanged;
+        Pg.Changed -= OnChanged;
+    }
 }

@@ -1,0 +1,304 @@
+@inject ConfigEditor Editor
+@inject NavigationManager Nav
+@implements IDisposable
+
+@* The shared View/Edit bar of every configuration editor page (ADR-0011): applied version + history/rollback,
+   Edit → Preview impact → Save & apply / Cancel, the stale-edit conflict, 422 errors, and the unsaved-change guard
+   (in-app navigation via RegisterLocationChangingHandler; reload/close via NavigationLock). "Applied version vN" is
+   only ever shown from the Host's answers; nothing here reports success before the 200 with the new version. *@
+
+<NavigationLock ConfirmExternalNavigation="@OwnsDirtyDraft" />
+
+<section class="panel editor-bar @(Editor.Editing && Editor.Owner == Owner ? "editing" : "")" aria-label="@(Subject + " configuration")">
+    <div class="editor-row">
+        <div class="editor-state">
+            @if (Editor.Applied is { } env)
+            {
+                <span class="version-chip mono" title="@("ETag " + env.Etag)">@("Applied version " + V(env.Version))</span>
+            }
+            else if (Editor.Loading)
+            {
+                <span class="secondary muted">Loading configuration…</span>
+            }
+            @if (Editor.Editing && Editor.Owner == Owner)
+            {
+                <span class="edit-flag @(Editor.IsDirty ? "dirty" : "")" role="status">
+                    @(Editor.IsDirty ? "Unsaved draft" : "Editing — no changes yet")
+                </span>
+                @if (Editor.IsDirty && !Editor.ValidationCurrent && !Editor.Validating)
+                {
+                    <span class="secondary subtle">Preview the impact before saving.</span>
+                }
+            }
+            else if (Editor.Editing && Editor.Owner != Owner)
+            {
+                <span class="secondary subtle">Another page holds a draft.</span>
+            }
+            else
+            {
+                <span class="secondary subtle">@ViewHint</span>
+            }
+        </div>
+        <div class="btn-row tight">
+            <button type="button" class="btn sm" id="@(_id + "-hist")" @onclick="OpenHistory" disabled="@(Editor.Applied is null)">
+                <Icon Name="history" Size="16" /><span>Version history</span>
+            </button>
+            @if (!(Editor.Editing && Editor.Owner == Owner) && ShowEditButton)
+            {
+                <button type="button" class="btn primary sm" @onclick="BeginEdit" disabled="@(Editor.Applied is null || (Editor.Editing && Editor.IsDirty))">Edit</button>
+            }
+            else if (Editor.Editing && Editor.Owner == Owner)
+            {
+                <button type="button" class="btn sm" @onclick="PreviewAsync" disabled="@(Editor.Validating || Editor.Saving || !Editor.IsDirty)" aria-busy="@(Editor.Validating ? "true" : null)">
+                    @(Editor.Validating ? "Previewing…" : "Preview impact")
+                </button>
+                <button type="button" class="btn primary sm" @onclick="SaveAsync" disabled="@(!Editor.CanSave)" aria-busy="@(Editor.Saving ? "true" : null)"
+                        title="@(Editor.CanSave ? "Apply as a new configuration version" : SaveBlockedReason)">
+                    @(Editor.Saving ? "Saving… (waiting for the Host)" : "Save & apply")
+                </button>
+                <button type="button" class="btn ghost sm" id="@(_id + "-cancel")" @onclick="RequestCancel" disabled="@Editor.Saving">Cancel</button>
+            }
+        </div>
+    </div>
+
+    @if (Editor.AppliedNotice is { } notice && !(Editor.Editing && Editor.IsDirty))
+    {
+        <div class="alert ok" role="status"><div class="alert-text"><strong>@notice</strong><span class="alert-body">Confirmed by the Host; the console reloaded configuration, catalog and status.</span></div></div>
+    }
+    @if (Editor.LoadError is { } le)
+    {
+        <ErrorBanner Title="Configuration unavailable" Message="@le" OnRetry="@(() => Editor.EnsureLoadedAsync(true))" />
+    }
+
+    @if (Editor.Conflict is { } conflict && Editor.Owner == Owner)
+    {
+        <div class="alert warn" role="alert">
+            <div class="alert-text">
+                <strong>@conflict.Message</strong>
+                <span class="alert-body">Covenant never overwrites a newer version. Reload discards your draft and shows the active version; Compare lists what changed on each side.</span>
+                @if (conflict.ServerChanges is { } sc)
+                {
+                    <span class="alert-body"><strong>Changed in the active version:</strong> @(sc.Count == 0 ? "no effective difference" : string.Join("; ", sc))</span>
+                }
+                @if (conflict.YourChanges is { } yc)
+                {
+                    <span class="alert-body"><strong>Your draft changes:</strong> @(yc.Count == 0 ? "none" : string.Join("; ", yc))</span>
+                }
+            </div>
+            <div class="btn-row tight">
+                <button type="button" class="btn sm" @onclick="Editor.CompareAsync">Compare</button>
+                <button type="button" class="btn primary sm" @onclick="Editor.ReloadDiscardingDraftAsync">Reload active version</button>
+            </div>
+        </div>
+    }
+
+    @if (Editor.LastOutcome is { Succeeded: false } lo && lo.Kind is not EditOutcomeKind.Stale && Editor.Owner == Owner)
+    {
+        <ErrorBanner Title="@(lo.Kind == EditOutcomeKind.Invalid ? "Not applied — validation failed" : "Not applied")" Message="@lo.Message" />
+    }
+    @if (Editor.ValidationError is { } ve && Editor.Owner == Owner)
+    {
+        <ErrorBanner Title="Impact preview unavailable" Message="@ve" />
+    }
+    @if (Editor.Validation is { } v && Editor.Editing && Editor.Owner == Owner)
+    {
+        <ImpactPreview Result="@v" Current="@Editor.ValidationCurrent" ClaimedPaths="@ClaimedPaths" />
+    }
+    @ChildContent
+</section>
+
+<Drawer Title="Configuration version history" @bind-Open="_historyOpen" OpenerId="@(_id + "-hist")">
+    <p class="secondary muted">Each apply and each rollback is a new immutable version; history is never rewritten. Spend and audit history are not reset by either.</p>
+    @if (Editor.VersionsLoading && Editor.Versions is null)
+    {
+        <Skeleton Lines="4" Label="Loading version history" />
+    }
+    <ErrorBanner Title="History unavailable" Message="@Editor.VersionsError" OnRetry="Editor.LoadVersionsAsync" />
+    @if (Editor.Versions is { Count: 0 })
+    {
+        <EmptyState Title="No activated versions reported" />
+    }
+    else if (Editor.Versions is { } versions)
+    {
+        <ol class="version-list">
+            @foreach (var ver in versions)
+            {
+                var row = ver;
+                <li class="@(row.Active ? "active" : "")">
+                    <div class="version-head">
+                        <span class="mono"><strong>@V(row.Version)</strong></span>
+                        @if (row.Active) { <span class="pill served"><span class="dot" aria-hidden="true"></span>Active</span> }
+                        <span class="secondary subtle">@Fmt.Utc(row.CreatedUtc) · @Fmt.OrNotRecorded(row.Origin)</span>
+                    </div>
+                    <span class="secondary wrap-any">@(row.ChangeSummary ?? "No change summary recorded")</span>
+                    @if (row.RolledBackFrom is { } rb)
+                    {
+                        <span class="secondary subtle">@("Rollback of " + V(rb))</span>
+                    }
+                    @if (!row.Active && _confirmTarget == row.Version)
+                    {
+                            <div class="confirm-inline" role="group" aria-label="@("Confirm rollback to v" + row.Version.ToString(System.Globalization.CultureInfo.InvariantCulture))">
+                                <span class="secondary">@RollbackSentence(row.Version)</span>
+                                <div class="btn-row tight">
+                                    <button type="button" class="btn ghost sm" @onclick="() => _confirmTarget = null" disabled="@Editor.Saving">Cancel</button>
+                                    <button type="button" class="btn danger sm" @onclick="() => RollbackAsync(row.Version)" disabled="@Editor.Saving" aria-busy="@(Editor.Saving ? "true" : null)">
+                                        @(Editor.Saving ? "Rolling back…" : "Roll back — create new version")
+                                    </button>
+                                </div>
+                            </div>
+                    }
+                    else if (!row.Active)
+                    {
+                            <button type="button" class="btn sm" @onclick="() => _confirmTarget = row.Version" disabled="@(Editor.IsDirty || Editor.Saving)"
+                                    title="@(Editor.IsDirty ? "Save or cancel your unsaved draft first" : null)">@("Roll back to " + V(row.Version) + "…")</button>
+                    }
+                </li>
+            }
+        </ol>
+    }
+    @if (_rollbackOutcome is { } ro)
+    {
+        if (ro.Succeeded)
+        {
+            <div class="alert ok" role="status"><div class="alert-text"><strong>@ro.Message</strong><span class="alert-body">Confirmed by the Host.</span></div></div>
+        }
+        else
+        {
+            <ErrorBanner Title="Rollback not applied" Message="@ro.Message" />
+        }
+    }
+</Drawer>
+
+<Drawer Mode="dialog" Title="Discard unsaved changes?" @bind-Open="_discardOpen" OpenerId="@(_id + "-cancel")">
+    <p class="secondary">Your draft of the @Subject.ToLowerInvariant() configuration has not been applied. Discarding it changes nothing on the server; the active version stays @(Editor.AppliedVersion is { } av ? V(av) : "unchanged").</p>
+    <div class="btn-row" style="justify-content:flex-end">
+        <button type="button" class="btn" @onclick="KeepEditing">Keep editing</button>
+        <button type="button" class="btn danger" @onclick="ConfirmDiscard">@(_pendingTarget is null ? "Discard draft" : "Discard draft and leave")</button>
+    </div>
+</Drawer>
+
+@code {
+    /// <summary>Owner key of this page's draft ("connections", "policies", "budgets", "settings").</summary>
+    [Parameter, EditorRequired] public string Owner { get; set; } = "";
+    /// <summary>"Connections", "Policies", … (dialog wording).</summary>
+    [Parameter] public string Subject { get; set; } = "Configuration";
+    [Parameter] public bool ShowEditButton { get; set; } = true;
+    [Parameter] public string ViewHint { get; set; } = "Viewing the applied configuration.";
+    /// <summary>Path prefixes that the page shows inline next to fields (others are listed in the preview).</summary>
+    [Parameter] public IReadOnlyList<string> ClaimedPaths { get; set; } = [];
+    [Parameter] public EventCallback OnSaved { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+
+    private readonly string _id = "ed-" + Guid.NewGuid().ToString("n")[..8];
+    private IDisposable? _guard;
+    private bool _historyOpen;
+    private bool _discardOpen;
+    private string? _pendingTarget;
+    private int? _confirmTarget;
+    private EditOutcome? _rollbackOutcome;
+
+    private bool OwnsDirtyDraft => Editor.Owner == Owner && Editor.IsDirty;
+
+    private string SaveBlockedReason
+    {
+        get
+        {
+            if (!Editor.IsDirty) return "No changes to save";
+            if (Editor.Conflict is not null) return "The active version changed — reload first";
+            if (!Editor.ValidationCurrent) return "Preview the impact of the current draft first";
+            if (Editor.Validation is { Valid: false }) return "Fix the validation errors first";
+            return "Not available";
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        Editor.Changed += OnChanged;
+        _guard = Nav.RegisterLocationChangingHandler(OnLocationChanging);
+        await Editor.EnsureLoadedAsync();
+    }
+
+    private ValueTask OnLocationChanging(LocationChangingContext context)
+    {
+        if (OwnsDirtyDraft)
+        {
+            context.PreventNavigation();
+            _pendingTarget = context.TargetLocation;
+            _discardOpen = true;
+            _ = InvokeAsync(StateHasChanged);
+        }
+        return ValueTask.CompletedTask;
+    }
+
+    private void BeginEdit() => Editor.BeginEdit(Owner);
+
+    private async Task PreviewAsync() => await Editor.ValidateAsync();
+
+    private async Task SaveAsync()
+    {
+        var outcome = await Editor.SaveAsync();
+        if (outcome.Succeeded) await OnSaved.InvokeAsync();
+    }
+
+    private void RequestCancel()
+    {
+        if (!Editor.IsDirty)
+        {
+            Editor.Discard();
+            return;
+        }
+        _pendingTarget = null;
+        _discardOpen = true;
+    }
+
+    private void KeepEditing()
+    {
+        _pendingTarget = null;
+        _discardOpen = false;
+    }
+
+    private void ConfirmDiscard()
+    {
+        var target = _pendingTarget;
+        _pendingTarget = null;
+        _discardOpen = false;
+        Editor.Discard();
+        if (target is not null) Nav.NavigateTo(target);
+    }
+
+    private async Task OpenHistory()
+    {
+        _historyOpen = true;
+        _confirmTarget = null;
+        _rollbackOutcome = null;
+        await Editor.LoadVersionsAsync();
+    }
+
+    private string RollbackSentence(int target)
+    {
+        var active = Editor.AppliedVersion ?? 0;
+        var next = (active + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var t = target.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return "Covenant validates v" + t + "'s content against today's startup environment and activates it as a NEW version (v" + next
+               + ", or the next free number if an interrupted apply used it). v" + t + " and the current v"
+               + active.ToString(System.Globalization.CultureInfo.InvariantCulture) + " stay in history unchanged. Spend and audit history are not reset.";
+    }
+
+    private async Task RollbackAsync(int target)
+    {
+        _rollbackOutcome = await Editor.RollbackAsync(target);
+        _confirmTarget = null;
+        if (_rollbackOutcome.Succeeded) await OnSaved.InvokeAsync();
+    }
+
+    private static string V(int version) => "v" + version.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Editor.Changed -= OnChanged;
+        _guard?.Dispose();
+        Editor.Release(Owner);
+    }
+}

@@ -1,0 +1,146 @@
+@* Horizontal, compact view of the REAL request trace (ADR-0013): one chip per pipeline stage with its reported
+   state and server-measured duration; provider attempts are counted on the provider chip. Nothing is animated
+   from configuration — a chip changes only when an event arrives. Skipped stages are drawn visibly different
+   (dashed, "Skipped"). Clicking a chip opens a small popover with state, reason code, duration and attempts;
+   Escape closes it (and does not bubble, so presentation mode stays open). Review round 3: two rows of five stages up to
+   1440 px (one row of ten only when wide — CSS container query); state and duration on separate lines so neither clips;
+   the chip's title carries the full text. *@
+
+<div class="trace @(Compact ? "compact" : "")" role="group" aria-label="Request trace">
+    <ol class="trace-steps">
+        @foreach (var step in Trace.Steps)
+        {
+            var s = step;
+            var key = StateKey(s.State);
+            var open = _open == s.Stage;
+            <li class="trace-step s-@key @(open ? "open" : "")">
+                <button type="button" class="trace-chip" aria-expanded="@(open ? "true" : "false")" aria-controls="@(_id + "-pop")"
+                        title="@ChipTitle(s)" @onclick="() => Toggle(s.Stage)">
+                    <Icon Name="@IconFor(s.State)" Size="16" />
+                    <span class="trace-name">@Name(s)</span>
+                    <span class="trace-meta">@TraceModel.StateText(s.State)</span>
+                    @if (Duration(s) is { } dur)
+                    {
+                        <span class="trace-dur">@dur</span>
+                    }
+                </button>
+            </li>
+        }
+    </ol>
+
+    @if (_open is { } openStage && Trace.Steps.FirstOrDefault(x => x.Stage == openStage) is { } sel)
+    {
+        <div id="@(_id + "-pop")" class="trace-pop" role="dialog" aria-label="@(sel.Label + " stage details")" @onkeydown="OnPopKeyDown" @onkeydown:stopPropagation="true">
+            <div class="trace-pop-head">
+                <strong>@sel.Label</strong>
+                <button type="button" class="btn ghost sm" @onclick="Close">Close</button>
+            </div>
+            <dl class="facts">
+                <dt>State</dt><dd>@TraceModel.StateText(sel.State)</dd>
+                <dt>Reason code</dt><dd class="mono wrap-any">@(sel.ReasonCode ?? "None reported")</dd>
+                <dt>Duration</dt><dd>@(sel.DurationMs is { } d ? Fmt.Ms(d) + " (server-measured)" : "Not reported")</dd>
+                @if (sel.Target is { Length: > 0 } t && sel.Attempts.Count == 0)
+                {
+                    <dt>Target</dt><dd class="mono wrap-any">@t</dd>
+                }
+            </dl>
+            @if (sel.Attempts.Count > 0)
+            {
+                <ol class="attempt-list">
+                    @foreach (var a in sel.Attempts)
+                    {
+                        <li>
+                            <span class="mono">#@a.Number</span>
+                            <span class="mono wrap-any">@(a.Target ?? "target not reported")</span>
+                            <span class="state-text s-@StateKey(a.State)">@TraceModel.StateText(a.State)</span>
+                            <span class="subtle">@(a.DurationMs is { } ad ? Fmt.Ms(ad) : "duration not reported")</span>
+                            @if (a.EffectiveMaxOutputTokens is { } eff)
+                            {
+                                <span class="subtle">output bound: requested @(a.RequestedMaxOutputTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none") · enforced @eff.ToString(System.Globalization.CultureInfo.InvariantCulture)</span>
+                            }
+                            @if (a.ReasonCode is { Length: > 0 } rc)
+                            {
+                                <span class="mono subtle wrap-any">@rc</span>
+                            }
+                        </li>
+                    }
+                </ol>
+            }
+        </div>
+    }
+
+    <span class="trace-source">@SourceText</span>
+</div>
+
+@code {
+    [Parameter] public TraceView Trace { get; set; } = TraceView.Empty;
+    [Parameter] public TraceFeedState FeedState { get; set; }
+    [Parameter] public string? Message { get; set; }
+    [Parameter] public bool Compact { get; set; }
+
+    private readonly string _id = "trace-" + Guid.NewGuid().ToString("n")[..8];
+    private string? _open;
+
+    private void Toggle(string stage) => _open = _open == stage ? null : stage;
+    private void Close() => _open = null;
+
+    private void OnPopKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Escape") _open = null;
+    }
+
+    public static string StateKey(TraceStepState s) => s switch
+    {
+        TraceStepState.Pending => "pending",
+        TraceStepState.Running => "running",
+        TraceStepState.Passed => "passed",
+        TraceStepState.Refused => "refused",
+        TraceStepState.Failed => "failed",
+        TraceStepState.Cancelled => "cancelled",
+        TraceStepState.Skipped => "skipped",
+        _ => "notreported",
+    };
+
+    private static string IconFor(TraceStepState s) => s switch
+    {
+        TraceStepState.Running => "running",
+        TraceStepState.Passed => "check",
+        TraceStepState.Refused or TraceStepState.Failed => "cross",
+        TraceStepState.Cancelled => "stop",
+        TraceStepState.Skipped => "skip",
+        _ => "pending",
+    };
+
+    private static string Name(TraceStepView s)
+        => s.Label + (s.Attempts.Count > 1 ? " ×" + s.Attempts.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+
+    /// <summary>Server-measured duration, only for a stage that actually ran.</summary>
+    private static string? Duration(TraceStepView s)
+        => s.DurationMs is { } d && s.State is not (TraceStepState.Pending or TraceStepState.Skipped or TraceStepState.NotReported)
+            ? Fmt.Ms(d)
+            : null;
+
+    private static string ChipTitle(TraceStepView s)
+        => Name(s) + " · " + TraceModel.StateText(s.State) + (Duration(s) is { } d ? " · " + d : "");
+
+    private string SourceText
+    {
+        get
+        {
+            var version = Trace.ConfigVersion is { } v ? " · config v" + v.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
+            if (Trace.Source == "audit summary") return "From the audit record (live trace no longer retained)" + version;
+            return FeedState switch
+            {
+                TraceFeedState.Locating => "Submitted — locating the request id to follow its live trace…",
+                TraceFeedState.Connecting => "Connecting to the live trace…",
+                TraceFeedState.Live => (Trace.Complete ? "Trace complete" : "Live trace") + version,
+                TraceFeedState.Reconnecting => "Trace connection dropped — reconnecting (resumes after the last event)" + version,
+                TraceFeedState.Snapshot => "Trace snapshot (stream unavailable)" + version,
+                TraceFeedState.Complete => "Trace complete" + version,
+                TraceFeedState.Expired => Message ?? "Trace expired — not retained",
+                TraceFeedState.Unavailable => Message ?? "Trace unavailable",
+                _ => Trace.HasEvents ? "Trace" + version : "No trace yet — run a request",
+            };
+        }
+    }
+}

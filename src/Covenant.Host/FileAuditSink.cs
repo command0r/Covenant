@@ -9,7 +9,7 @@ namespace Covenant.Host;
 /// <summary>Off-hot-path audit sink: hash-chains entries to an append-only file (tamper-evident).
 /// With anchoring configured (ADR-0007), every Nth entry's head hash is appended to a separate anchor
 /// file — its value is placement on an independent storage/attacker domain.</summary>
-public sealed class FileAuditSink(string path, string? anchorPath = null, int anchorEvery = 0) : IAuditSink, IHostedService
+public sealed class FileAuditSink(string path, string? anchorPath = null, int anchorEvery = 0) : IAuditSink, IAuditEventWriter, IHostedService
 {
     private readonly Channel<AuditEntry> _channel =
         Channel.CreateUnbounded<AuditEntry>(new UnboundedChannelOptions { SingleReader = true });
@@ -21,6 +21,10 @@ public sealed class FileAuditSink(string path, string? anchorPath = null, int an
 
     public ValueTask EnqueueAsync(AuditEntry entry, CancellationToken cancellationToken = default)
         => _channel.Writer.WriteAsync(entry, cancellationToken);
+
+    /// <summary>Synchronous hand-off for control-plane events (config.activated): the channel is unbounded, so
+    /// this only fails after shutdown has completed the writer.</summary>
+    public bool TryWrite(AuditEntry entry) => _channel.Writer.TryWrite(entry);
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -120,7 +124,15 @@ public sealed class FileAuditSink(string path, string? anchorPath = null, int an
     }
 }
 
+/// <summary>Control-plane audit events (v3 EventType ≠ request) enter the SAME hash chain as requests.</summary>
+public interface IAuditEventWriter
+{
+    bool TryWrite(AuditEntry entry);
+}
+
 [JsonSourceGenerationOptions(Converters = [typeof(JsonStringEnumConverter<DataClassification>), typeof(JsonStringEnumConverter<PolicyEffect>)])]
 [JsonSerializable(typeof(AuditEntry))]
 [JsonSerializable(typeof(RequestsPage))]
+[JsonSerializable(typeof(List<SegmentView>))]
+[JsonSerializable(typeof(RequestExport))]
 public partial class AuditJsonContext : JsonSerializerContext;

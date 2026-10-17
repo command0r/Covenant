@@ -14,12 +14,14 @@ public sealed record RequestFilterCriteria
     /// <summary>Matches the selected, attempted or served model (exact, case-insensitive).</summary>
     public string? Model { get; init; }
     public string? Team { get; init; }
+    /// <summary>Audit v3 ApplicationId (exact, case-insensitive). Legacy records without it never match a set filter.</summary>
+    public string? Application { get; init; }
     /// <summary>Substring of the request id (== correlation id), case-insensitive.</summary>
     public string? IdSearch { get; init; }
     public TimeWindow Window { get; init; } = TimeWindow.All;
 
     public bool IsActive => Outcome is not null || !string.IsNullOrWhiteSpace(Model) || !string.IsNullOrWhiteSpace(Team)
-                            || !string.IsNullOrWhiteSpace(IdSearch) || Window != TimeWindow.All;
+                            || !string.IsNullOrWhiteSpace(Application) || !string.IsNullOrWhiteSpace(IdSearch) || Window != TimeWindow.All;
 }
 
 public static class RequestFilter
@@ -43,6 +45,8 @@ public static class RequestFilter
         }
 
         if (!string.IsNullOrWhiteSpace(c.Team) && !Same(r.Tags.Team, c.Team.Trim())) return false;
+
+        if (!string.IsNullOrWhiteSpace(c.Application) && !Same(r.ApplicationId, c.Application.Trim())) return false;
 
         if (!string.IsNullOrWhiteSpace(c.IdSearch))
         {
@@ -69,7 +73,7 @@ public static class RequestFilter
         TimeWindow.Last15Minutes => "Last 15 minutes",
         TimeWindow.LastHour => "Last hour",
         TimeWindow.Last24Hours => "Last 24 hours",
-        _ => "Whole snapshot",
+        _ => "All loaded records",
     };
 
     /// <summary>Distinct non-empty model ids (selected/attempted/served) present in the snapshot, sorted.</summary>
@@ -90,6 +94,14 @@ public static class RequestFilter
         var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var r in items)
             if (!string.IsNullOrWhiteSpace(r.Tags.Team)) set.Add(r.Tags.Team);
+        return [.. set];
+    }
+
+    public static IReadOnlyList<string> Applications(IEnumerable<AuditEntryView> items)
+    {
+        var set = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var r in items)
+            if (!string.IsNullOrWhiteSpace(r.ApplicationId)) set.Add(r.ApplicationId);
         return [.. set];
     }
 

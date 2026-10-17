@@ -292,7 +292,7 @@ public sealed class ProviderProbeTests
                 b.UseSetting("Admin:Token", CorrelationTestKit.AdminToken);
                 b.UseSetting("Budget:GlobalCapUsd", "10");
                 b.UseSetting("Auth:AllowAnonymous", "true");
-                b.UseSetting("Audit:Path", audit);
+                CorrelationTestKit.IsolatePaths(b, audit);
                 b.UseSetting("Local:Endpoint", server.V1);
                 b.UseSetting("Local:ModelId", "qwen3:8b");
             });

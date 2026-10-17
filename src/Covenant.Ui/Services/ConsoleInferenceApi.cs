@@ -29,52 +29,46 @@ public sealed class InferenceResult
     public double ClientMs { get; set; }
 
     public OutcomeInput ToOutcomeInput(AuditEntryView? record) => new(
-        HttpStatus, ErrorCode, StreamTerminatedWithError || StreamIncomplete, Cancelled, record);
+        HttpStatus, ErrorCode, StreamTerminatedWithError || StreamIncomplete, Cancelled, record, HasPartialText: Text.Length > 0);
 }
 
-/// <summary>POST /v1/chat/completions through the governed pipeline with an APPLICATION key. Uses its own
-/// HttpClient and never sees the admin token. An empty key sends no Authorization header at all, so the server
-/// answers with its real 401 (and the record says classification was not evaluated). Identity and team are
-/// resolved by the server from the key; the console only sends workflow/use-case labels.</summary>
-public sealed class InferenceApi(HttpClient http, AppState state)
+/// <summary>Console inference (ADR-0012): POST /admin/playground/requests on the ADMIN HttpClient with the admin
+/// token. The Host resolves the selected test application server-side and runs the same governed pipeline as /v1;
+/// the browser never holds an application credential. The response contract is exactly /v1/chat/completions
+/// (buffered JSON or SSE, X-Covenant-Request-Id). A 401 here means the ADMIN token was rejected → the usual
+/// disconnect. 400 = rejected before governance (no audit record); 403 = governed refusal (audited);
+/// 409 = duplicate client_request_id (not run again).</summary>
+public sealed class ConsoleInferenceApi(HttpClient http, AdminApi admin)
 {
+    public const string Path = "/admin/playground/requests";
     public const string RequestIdHeader = "X-Covenant-Request-Id";
 
-    public Task<InferenceResult> SendAsync(RequestSnapshot snapshot, Action<string>? onDelta, CancellationToken ct)
-        => snapshot.Streaming ? StreamAsync(snapshot, onDelta, ct) : BufferedAsync(snapshot, ct);
+    /// <param name="onDelta">Each streamed text delta.</param>
+    /// <param name="onRequestId">Called once, as soon as the request id is known (streaming: at the response
+    /// headers, before any text) so the trace can be followed live.</param>
+    public Task<InferenceResult> SendAsync(RequestSnapshot snapshot, Action<string>? onDelta, Action<string>? onRequestId, CancellationToken ct)
+        => snapshot.Streaming ? StreamAsync(snapshot, onDelta, onRequestId, ct) : BufferedAsync(snapshot, onRequestId, ct);
 
     private HttpRequestMessage Build(RequestSnapshot s, bool stream)
     {
-        var body = new ChatRequestDto
+        var body = new PlaygroundRequestDto
         {
-            Model = s.RequestedModel,
+            ApplicationId = s.ApplicationId ?? "",
+            ProfileId = s.ProfileId,
             Messages = [new ChatMessageDto { Role = "user", Content = s.Prompt }],
-            Stream = stream,
+            Model = s.RequestedModel,
             MaxTokens = s.MaxTokens,
+            Stream = stream,
+            Workflow = s.Workflow,
+            UseCase = s.UseCase,
+            ClientRequestId = s.ClientRequestId,
         };
-        var request = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
-        {
-            Content = JsonContent.Create(body, UiJsonContext.Default.ChatRequestDto),
-        };
-        if (state.ApplicationKey is { Length: > 0 } key)
-            request.Headers.TryAddWithoutValidation("Authorization", "Bearer " + key.Trim());
-        AddLabel(request, "X-Covenant-Workflow", s.Workflow);
-        AddLabel(request, "X-Covenant-UseCase", s.UseCase);
+        var request = admin.NewRequest(HttpMethod.Post, Path);
+        request.Content = JsonContent.Create(body, UiJsonContext.Default.PlaygroundRequestDto);
         return request;
     }
 
-    /// <summary>Labels are plain attribution text; anything outside printable ASCII is dropped so the browser's
-    /// fetch never rejects the header.</summary>
-    private static void AddLabel(HttpRequestMessage request, string header, string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return;
-        var sb = new StringBuilder(value.Length);
-        foreach (var c in value.Trim())
-            if (c >= 0x20 && c < 0x7F) sb.Append(c);
-        if (sb.Length > 0 && sb.Length <= 128) request.Headers.TryAddWithoutValidation(header, sb.ToString());
-    }
-
-    private async Task<InferenceResult> BufferedAsync(RequestSnapshot s, CancellationToken ct)
+    private async Task<InferenceResult> BufferedAsync(RequestSnapshot s, Action<string>? onRequestId, CancellationToken ct)
     {
         var result = new InferenceResult();
         var sw = Stopwatch.StartNew();
@@ -82,12 +76,12 @@ public sealed class InferenceApi(HttpClient http, AppState state)
         {
             using var request = Build(s, stream: false);
             using var response = await http.SendAsync(request, ct);
-            Capture(result, response);
+            Capture(result, response, onRequestId);
             var text = await response.Content.ReadAsStringAsync(ct);
             if (response.IsSuccessStatusCode)
                 ReadChatResponse(result, text);
             else
-                ReadError(result, text);
+                ReadError(result, text, onRequestId);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -110,7 +104,7 @@ public sealed class InferenceApi(HttpClient http, AppState state)
         return result;
     }
 
-    private async Task<InferenceResult> StreamAsync(RequestSnapshot s, Action<string>? onDelta, CancellationToken ct)
+    private async Task<InferenceResult> StreamAsync(RequestSnapshot s, Action<string>? onDelta, Action<string>? onRequestId, CancellationToken ct)
     {
         var result = new InferenceResult();
         var sw = Stopwatch.StartNew();
@@ -122,7 +116,7 @@ public sealed class InferenceApi(HttpClient http, AppState state)
             Microsoft.AspNetCore.Components.WebAssembly.Http.WebAssemblyHttpRequestMessageExtensions
                 .SetBrowserResponseStreamingEnabled(request, true);
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-            Capture(result, response);
+            Capture(result, response, onRequestId);
 
             var mediaType = response.Content.Headers.ContentType?.MediaType;
             if (!response.IsSuccessStatusCode || !string.Equals(mediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase))
@@ -130,7 +124,7 @@ public sealed class InferenceApi(HttpClient http, AppState state)
                 // Refused before the first byte: the same JSON error contract as buffered mode.
                 var body = await response.Content.ReadAsStringAsync(ct);
                 if (response.IsSuccessStatusCode) ReadChatResponse(result, body);
-                else ReadError(result, body);
+                else ReadError(result, body, onRequestId);
                 return result;
             }
 
@@ -156,11 +150,11 @@ public sealed class InferenceApi(HttpClient http, AppState state)
                     result.StreamTerminatedWithError = true;
                     result.ErrorCode = frame.Error;
                     result.ErrorReason = frame.Reason;
-                    result.RequestId ??= frame.RequestId;
+                    SetRequestId(result, frame.RequestId, onRequestId);
                     continue; // [DONE] follows
                 }
 
-                result.RequestId ??= frame.Id;
+                SetRequestId(result, frame.Id, onRequestId);
                 if (frame.Model is { Length: > 0 } m) result.Model = m;
                 if (frame.Choices is { Count: > 0 } choices && choices[0].Delta?.Content is { Length: > 0 } delta)
                 {
@@ -198,12 +192,25 @@ public sealed class InferenceApi(HttpClient http, AppState state)
         return result;
     }
 
-    private static void Capture(InferenceResult result, HttpResponseMessage response)
+    private void Capture(InferenceResult result, HttpResponseMessage response, Action<string>? onRequestId)
     {
         result.HttpStatus = (int)response.StatusCode;
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+        {
+            result.ErrorCode = "admin_token_rejected";
+            admin.ReportUnauthorized();
+            return;
+        }
         if (response.Headers.TryGetValues(RequestIdHeader, out var values))
             foreach (var v in values)
-                if (!string.IsNullOrWhiteSpace(v)) { result.RequestId = v.Trim(); break; }
+                if (!string.IsNullOrWhiteSpace(v)) { SetRequestId(result, v.Trim(), onRequestId); break; }
+    }
+
+    private static void SetRequestId(InferenceResult result, string? id, Action<string>? onRequestId)
+    {
+        if (result.RequestId is not null || string.IsNullOrWhiteSpace(id)) return;
+        result.RequestId = id;
+        onRequestId?.Invoke(id);
     }
 
     private static void ReadChatResponse(InferenceResult result, string body)
@@ -229,20 +236,21 @@ public sealed class InferenceApi(HttpClient http, AppState state)
         return sb.ToString();
     }
 
-    private static void ReadError(InferenceResult result, string body)
+    private static void ReadError(InferenceResult result, string body, Action<string>? onRequestId)
     {
         if (string.IsNullOrWhiteSpace(body)) return;
         try
         {
             var err = JsonSerializer.Deserialize(body, UiJsonContext.Default.ErrorResponse);
             if (err is null) return;
-            result.ErrorCode = err.Error;
+            result.ErrorCode ??= err.Error;
             result.ErrorReason = err.Reason;
-            result.RequestId ??= err.RequestId;
+            // 409 duplicate_submission carries the ORIGINAL request id: evidence and trace follow that one.
+            SetRequestId(result, err.RequestId, onRequestId);
         }
         catch (JsonException)
         {
-            // Not our error contract (e.g. the binder's 400): keep the status, no reason.
+            // Not our error contract (e.g. a framework 400/404 page): keep the status, no reason.
         }
     }
 }

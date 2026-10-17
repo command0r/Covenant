@@ -58,12 +58,13 @@ public sealed class PolicyEngine(PolicyConfig config, RoutingOptions? routing = 
     }
 }
 
-/// <summary>Pipeline stage: evaluates policy and short-circuits the pipeline on a denial.</summary>
+/// <summary>Pipeline stage: evaluates policy and short-circuits the pipeline on a denial. With a bound
+/// configuration the v2 engine evaluates THAT version (ADR-0013); otherwise the injected legacy engine.</summary>
 public sealed class PolicyStage(IPolicyEngine engine) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
-        var outcome = engine.Evaluate(ctx);
+        var outcome = ctx.Configuration is { } cfg ? PolicyEngineV2.Evaluate(cfg, ctx) : engine.Evaluate(ctx);
         ctx.Policy = outcome;
 
         if (outcome.Effect == PolicyEffect.Deny)

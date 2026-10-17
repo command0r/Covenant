@@ -4,7 +4,8 @@ namespace Covenant.Ui.Services;
 
 /// <summary>Typed wrapper over wwwroot/js/interop.js. Everything the console asks the browser for goes through
 /// here, so the storage rules are auditable in one place: sessionStorage for the admin token only,
-/// localStorage for the theme only, nothing else is ever persisted.</summary>
+/// localStorage for the theme and the allow-listed console preferences (interop.js PREF_KEYS) only — never a
+/// credential, prompt, response or server configuration.</summary>
 public sealed class Interop(IJSRuntime js)
 {
     private const string Prefix = "covenantInterop.";
@@ -16,11 +17,23 @@ public sealed class Interop(IJSRuntime js)
     public ValueTask<string> GetThemeAsync() => js.InvokeAsync<string>(Prefix + "getTheme");
     public ValueTask<string> SetThemeAsync(string theme) => js.InvokeAsync<string>(Prefix + "setTheme", theme);
 
+    /// <summary>Browser-local console preference (allow-listed names only, e.g. "stream-default"); null when unset.</summary>
+    public ValueTask<string?> PrefGetAsync(string name) => js.InvokeAsync<string?>(Prefix + "prefGet", name);
+    public ValueTask<bool> PrefSetAsync(string name, string value) => js.InvokeAsync<bool>(Prefix + "prefSet", name, value);
+
     public ValueTask<bool> FocusElementAsync(string id) => js.InvokeAsync<bool>(Prefix + "focusElement", id);
     public ValueTask TrapFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "trapFocus", containerId);
     public ValueTask ReleaseFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "releaseFocus", containerId);
 
-    /// <summary>Copies a non-secret identifier (request id) to the clipboard. Returns false if the browser refused.</summary>
+    /// <summary>Document-level Escape listener (presentation mode): calls <paramref name="method"/> on
+    /// <paramref name="target"/>. Returns a watch id for <see cref="UnwatchEscapeAsync"/>.</summary>
+    public ValueTask<string> WatchEscapeAsync<T>(DotNetObjectReference<T> target, string method) where T : class
+        => js.InvokeAsync<string>(Prefix + "watchEscape", target, method);
+
+    public ValueTask UnwatchEscapeAsync(string watchId) => js.InvokeVoidAsync(Prefix + "unwatchEscape", watchId);
+
+    /// <summary>Copies text the operator explicitly chose to copy (a request id or the response shown on screen —
+    /// never a credential) to the clipboard. Returns false if the browser refused.</summary>
     public ValueTask<bool> CopyTextAsync(string text) => js.InvokeAsync<bool>(Prefix + "copyText", text);
 
     public ValueTask DownloadTextAsync(string fileName, string contentType, string text)

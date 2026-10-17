@@ -27,6 +27,10 @@ public sealed class StatusReport
     [JsonPropertyName("prompt_preview_chars")] public int? PromptPreviewChars { get; init; }
     [JsonPropertyName("anchor")] public AnchorStatus? Anchor { get; init; }
     [JsonPropertyName("version")] public string? Version { get; init; }
+    // v2 (ADR-0011): the active configuration version every new request binds to.
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; init; }
+    // Review round 2 (B11): current runtime health of every configured connection + model, keyed "connection_id:model_id".
+    [JsonPropertyName("connection_health")] public List<ConnectionHealthView>? ConnectionHealth { get; init; }
 }
 
 public sealed class AnchorStatus
@@ -93,6 +97,25 @@ public sealed class FinOpsSummary
     /// <summary>Newest-first metadata for the live feed. Deliberately NO message content — the admin
     /// plane never sees prompts or responses; that is a product guarantee, not an omission.</summary>
     [JsonPropertyName("recent")] public required List<RecentRequest> Recent { get; init; }
+    /// <summary>"Estimated provider charge avoided" (spec §4.5, ADR-0014) — present ONLY when the active configuration names a
+    /// priced savings baseline; null (hidden) otherwise. When null, the legacy estimated_savings_* fields above are 0.</summary>
+    [JsonPropertyName("savings")] public SavingsSummary? Savings { get; init; }
+}
+
+/// <summary>Counterfactual: every allowed request with KNOWN usage (reported / zero-priced / cache no-call) priced on the
+/// configured baseline connection/model. Route-avoided = baseline price − served model price (route selection, incl.
+/// local); cache-avoided = the served model's charge a cache hit did not incur. Records with estimated or unknown cost are
+/// excluded and counted. An estimate of provider charges only — not total business savings, not evidence of equal answer
+/// quality.</summary>
+public sealed class SavingsSummary
+{
+    [JsonPropertyName("label")] public string Label { get; init; } = "Estimated provider charge avoided";
+    /// <summary>"connection/model" of the configured baseline.</summary>
+    [JsonPropertyName("baseline")] public required string Baseline { get; init; }
+    [JsonPropertyName("route_avoided_usd")] public required decimal RouteAvoidedUsd { get; init; }
+    [JsonPropertyName("cache_avoided_usd")] public required decimal CacheAvoidedUsd { get; init; }
+    [JsonPropertyName("total_usd")] public required decimal TotalUsd { get; init; }
+    [JsonPropertyName("excluded_records")] public required int ExcludedRecords { get; init; }
 }
 
 public sealed class ActivityBucket
@@ -164,7 +187,22 @@ public static class FinOps
         string localModelId,
         string strongModelId,
         IReadOnlyDictionary<string, (decimal InPer1K, decimal OutPer1K)> prices)
+        => Build(entries, localModelId, strongModelId, prices, savingsBaseline: null, legacySavings: true);
+
+    /// <summary>v2: savings are reported only against a configured, priced baseline (<paramref name="savingsBaseline"/>
+    /// = "connection/model"); without one every savings figure is 0 and <see cref="FinOpsSummary.Savings"/> is null.
+    /// <paramref name="legacySavings"/> keeps the pre-v2 behaviour (strong model as implicit baseline) for direct callers.</summary>
+    public static FinOpsSummary Build(
+        IReadOnlyList<AuditEntry> entries,
+        string localModelId,
+        string strongModelId,
+        IReadOnlyDictionary<string, (decimal InPer1K, decimal OutPer1K)> prices,
+        string? savingsBaseline,
+        bool legacySavings = false)
     {
+        bool savingsShown = legacySavings || savingsBaseline is not null;
+        // v3: control-plane events (config.activated, …) are not requests — no counts, spend or activity.
+        if (entries.Any(e => !e.IsRequest())) entries = entries.Where(e => e.IsRequest()).ToList();
         var strongPrice = prices.GetValueOrDefault(strongModelId);
         int allowed = 0, denied = 0, localRequests = 0;
         long localTokens = 0;
@@ -193,7 +231,7 @@ public static class FinOps
             // saving are the same error). Legacy records (no CostBasis) keep their old treatment.
             bool usageKnown = e.CostBasis is null or "reported" or "zero_priced" or "no_call";
             if (e.CostBasis is "unpriced" or "unknown_failed_call") unknownCost++;
-            if (e.CostBasis is "estimated_from_text" or "estimated_failed_call") estimatedCost++;
+            if (e.CostBasis is "estimated_from_text" or "estimated_failed_call" or "mixed") estimatedCost++;   // "mixed": the total contains an estimate
 
             if (e.Effect == PolicyEffect.Allow && !usageKnown)
             {
@@ -238,8 +276,18 @@ public static class FinOps
             }
         }
 
+        int excluded = entries.Count(e => e.Effect == PolicyEffect.Allow && !(e.CostBasis is null or "reported" or "zero_priced" or "no_call"));
+        if (!savingsShown) savingsLocal = savingsRouter = savingsCache = 0m;
         return new FinOpsSummary
         {
+            Savings = savingsBaseline is null ? null : new SavingsSummary
+            {
+                Baseline = savingsBaseline,
+                RouteAvoidedUsd = savingsLocal + savingsRouter,
+                CacheAvoidedUsd = savingsCache,
+                TotalUsd = savingsLocal + savingsRouter + savingsCache,
+                ExcludedRecords = excluded,
+            },
             Requests = entries.Count,
             Allowed = allowed,
             Denied = denied,

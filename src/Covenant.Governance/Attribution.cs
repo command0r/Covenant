@@ -20,10 +20,15 @@ public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
 {
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
-        if (ctx.Response is { } resp && ctx.Policy?.Route is { } route)
+        // The SERVED target (primary or an approved fallback, ADR-0013) is what gets priced and attributed.
+        if (ctx.Response is { } resp && (ctx.ServedTarget ?? ctx.Policy?.Route) is { } route)
         {
             decimal cost;
-            if (!priceBook.TryGetPrice(route.ModelId, out var p))
+            (decimal InputPer1K, decimal OutputPer1K) p;
+            bool hasPrice = ctx.Configuration is { } cfg
+                ? ConfigPrices.TryGet(cfg, route.AdapterKey, route.ModelId, out p)   // connection-scoped (ADR-0011)
+                : priceBook.TryGetPrice(route.ModelId, out p);
+            if (!hasPrice)
             {
                 cost = 0m;
                 ctx.CostBasis = "unpriced";               // unknown, flagged — never a real $0
@@ -32,6 +37,13 @@ public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
             {
                 cost = (resp.Usage.InputTokens / 1000m * p.InputPer1K) + (resp.Usage.OutputTokens / 1000m * p.OutputPer1K);
                 ctx.CostBasis = p.InputPer1K == 0m && p.OutputPer1K == 0m ? "zero_priced" : "reported";
+            }
+            else if (ctx.Configuration is not null && ctx.AttemptGate is not null && ctx.ActiveReservationUsd is { } bound)
+            {
+                // ADR-0014: usage unreported under a v2 reservation → settle the conservative reservation bound (enforced
+                // input + output bounds at this target's prices). Labelled an estimate; token counts stay unreported.
+                cost = bound;
+                ctx.CostBasis = p.InputPer1K == 0m && p.OutputPer1K == 0m ? "zero_priced" : "estimated_from_text";
             }
             else
             {

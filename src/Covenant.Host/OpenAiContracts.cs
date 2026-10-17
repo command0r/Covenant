@@ -224,4 +224,8 @@ public sealed class ResetResponse
 [JsonSerializable(typeof(AnthropicMessagesRequest))]
 [JsonSerializable(typeof(AnthropicMessageResponse))]
 [JsonSerializable(typeof(AnthropicErrorResponse))]
+// Console v2 (T04/T05): console inference body, budget views.
+[JsonSerializable(typeof(PlaygroundRequest))]
+[JsonSerializable(typeof(List<BudgetStateView>))]
+[JsonSerializable(typeof(BudgetRequestsView))]
 public partial class CovenantJsonContext : JsonSerializerContext;

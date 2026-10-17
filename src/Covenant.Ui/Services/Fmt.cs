@@ -2,16 +2,16 @@ using System.Globalization;
 
 namespace Covenant.Ui.Services;
 
-/// <summary>Invariant-culture formatting (the bundle ships no globalization data). Money is shown to four
-/// decimals because per-request provider charges are fractions of a cent; totals use two.</summary>
+/// <summary>Invariant-culture formatting (the bundle ships no globalization data). Money goes through Logic/Money:
+/// significant digits for sub-cent charges (never "$0.00" for a non-zero amount), two decimals for caps.</summary>
 public static class Fmt
 {
     private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
-    public static string Usd(decimal value, int decimals = 4)
-        => "$" + value.ToString("F" + decimals.ToString(Inv), Inv);
+    public static string Usd(decimal value) => Covenant.Ui.Logic.Money.Usd(value);
 
-    public static string UsdTotal(decimal value) => Usd(value, value == decimal.Truncate(value) ? 2 : 4);
+    /// <summary>Caps and totals: two decimals ("$250.00"); a tiny non-zero cap keeps its significant digits.</summary>
+    public static string UsdTotal(decimal value) => Covenant.Ui.Logic.Money.Cap(value);
 
     public static string Int(long value) => value.ToString("N0", Inv);
 

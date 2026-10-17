@@ -1,11 +1,8 @@
-using System.Text;
-using Covenant.Ui.Models;
-
 namespace Covenant.Ui.Logic;
 
-/// <summary>Pure helpers for the Ollama connection wizard: endpoint validation/normalisation (mirrors the Host's
-/// ProviderProbe.Validate and catalog formatting), the read-back check, and the configuration guidance text.
-/// Nothing here applies configuration — runtime apply is not available in this version.</summary>
+/// <summary>Pure endpoint helpers for Models &amp; connections: validation/normalisation (mirrors the Host's
+/// ProviderProbe.Validate and catalog formatting) and the governed-test prompt. Configuration is edited through the
+/// versioned draft (ConnectionDrafts / ConfigDraft) — there is no "edit a file and restart" path any more.</summary>
 public static class ConnectionLogic
 {
     /// <summary>Synthetic prompt for the governed test. It contains the published sample SSN so that in cloud
@@ -50,46 +47,5 @@ public static class ConnectionLogic
         var na = Normalize(a);
         var nb = Normalize(b);
         return na is not null && nb is not null && string.Equals(na, nb, StringComparison.Ordinal);
-    }
-
-    /// <summary>Step 6 gate: the running instance loaded exactly this endpoint and tag, and registered it.</summary>
-    public static (bool Pass, string Message) CheckApplied(CatalogResponse? catalog, string draftEndpoint, string tag)
-    {
-        if (catalog is null) return (false, "The catalog could not be read, so the applied configuration is unknown.");
-        var local = catalog.Local;
-        if (local is null || !local.Configured)
-            return (false, "The running instance has no local route configured (Local:Endpoint / Local:ModelId not loaded). Apply the configuration and restart Covenant.");
-        if (!SameEndpoint(local.Endpoint, draftEndpoint))
-            return (false, $"The running endpoint is {local.Endpoint ?? "not reported"}, not {Normalize(draftEndpoint)}. Apply the configuration and restart Covenant.");
-        if (!string.Equals(local.ModelId, tag, StringComparison.Ordinal))
-            return (false, $"The running model id is {local.ModelId ?? "not reported"}, not {tag}. The tag must match exactly.");
-        if (!local.Registered)
-            return (false, "The endpoint and tag are loaded but the server reports the local model as NOT registered.");
-        return (true, "The running instance loaded this endpoint and tag, and the server reports the local model as registered.");
-    }
-
-    public static string RouteReview(string? mode, string tag)
-        => string.Equals(mode, "local-only", StringComparison.OrdinalIgnoreCase)
-            ? $"Local-only mode: every classification (Public, Internal, PII, PHI) routes to local:{tag}. No cloud provider is registered, and Covenant refuses to start if a cloud key is configured."
-            : $"Cloud mode: PII and PHI requests route to local:{tag}. Public and Internal stay on their cloud routes. If the local model fails, protected requests are refused — there is no cloud fallback.";
-
-    /// <summary>Configuration guidance: names and values only, never a secret.</summary>
-    public static string ConfigBlock(string draftEndpoint, string tag, bool localOnly)
-    {
-        var endpoint = draftEndpoint.Trim();
-        var sb = new StringBuilder();
-        sb.AppendLine("# Environment variables (names and values; no secrets)");
-        if (localOnly) sb.AppendLine("Providers__Mode=local-only");
-        else sb.AppendLine("# Providers__Mode=local-only   (optional: route everything locally; requires NO cloud key)");
-        sb.AppendLine("Local__Endpoint=" + endpoint);
-        sb.AppendLine("Local__ModelId=" + tag);
-        sb.AppendLine();
-        sb.AppendLine("# Equivalent dotnet user-secrets (run in src/Covenant.Host)");
-        if (localOnly) sb.AppendLine("dotnet user-secrets set \"Providers:Mode\" \"local-only\"");
-        sb.AppendLine("dotnet user-secrets set \"Local:Endpoint\" \"" + endpoint + "\"");
-        sb.AppendLine("dotnet user-secrets set \"Local:ModelId\" \"" + tag + "\"");
-        sb.AppendLine();
-        sb.Append("# Local__ApiKey only if Ollama sits behind an authenticating proxy — set it in your vault, never here.");
-        return sb.ToString();
     }
 }

@@ -59,3 +59,252 @@ aggregates must count it as unknown, never as $0 saving. `no_call`: refusal/cach
 `/admin/status` gains `environment`, `mode`, `audit_path`, `cache_ttl_seconds`, `prompt_preview_chars`,
 `anchor:{configured, every, anchors_written, last_anchor_utc}`, `version`. `/admin/evidence` gains
 `anchor_configured`, `anchor_count`, `last_anchor_utc`. Nothing in status is a secret.
+
+---
+
+# v2 additions (2026-10-16) — `docs/CONSOLE-V2-IMPLEMENTATION-SPEC.md`, ADR-0011..0014
+
+v2 supersedes the read-only parts above. Everything above stays valid unless restated here. Admin endpoints take
+`X-Covenant-Admin-Token`; JSON is snake_case except audit records (PascalCase, unchanged).
+
+## Configuration (ADR-0011)
+| Method | Path | Behaviour |
+|---|---|---|
+| GET | `/admin/config` | `{ "version", "etag":"\"vN\"", "config": CovenantConfig (secrets as refs), "secrets": {ref: {"available":bool}}, "allow_list": [...] }`; `ETag` header |
+| POST | `/admin/config/validate` | body `{ "base_version", "config" }` → 200 `{ "valid", "errors":[{"path","code","message"}], "warnings":[…], "impact": Impact }`; never mutates |
+| PUT | `/admin/config` | header `If-Match: "vN"` (required; 428 if absent), body `{ "config", "change_summary" }` → 200 `{ "version", "etag" }`; 412 stale; 422 `{errors, warnings}` (active version unchanged) |
+| GET | `/admin/config/versions?limit=50` | `[{ "version","created_utc","origin","base_version","rolled_back_from","change_summary","active" }]` newest first |
+| GET | `/admin/config/versions/{n}` | snapshot n |
+| POST | `/admin/config/rollback` | `{ "target_version", "expected_active_version" }` → new version (412 if active moved) |
+
+`Impact` = `{ "classifications": [{ "classification","profile","before":"<route summary>|refused","after":… }],
+"applications_affected":[…], "unavailable_destinations":[…], "pricing_gaps":[…], "newly_refused":[…] }`.
+Validation codes include: `duplicate_id`, `unknown_connection` (always an error, every mode), `unknown_model`,
+`endpoint_not_allow_listed`, `secret_unavailable`, `cloud_in_local_only`, `sensitive_cloud_target` (error — there is no
+`allow_sensitive_cloud` field), `boundary_not_approved` (a `Local` connection whose endpoint authority is not on the
+startup `Providers:LocalEndpoints` / `Local:Endpoint` list, or an `OpenAi`/`Anthropic` connection not `Cloud`),
+`client_unbuildable` (an enabled connection referenced by an enabled policy for which no provider client could be
+built), `ambiguous_policy_overlap`, `no_route_for_classification` (warning), `unpriced_paid_target_under_hard_budget`,
+`invalid_budget_scope`, `profile_not_found`, `default_profile_not_granted`.
+
+**Validation is total.** Structural errors — `required` (a required object, list, list element or id is `null`) and
+`invalid_enum` (a numeric enum value that is not a defined member, e.g. `"mode": 999`) — carry the field path
+(`settings`, `connections[0].kind`, `policies[0].targets[2]`, …). `POST /admin/config/validate` answers **200**
+`{ "valid": false, "errors": [...], "impact": null }` for them (no impact preview of a candidate that cannot be
+compiled); `PUT /admin/config` answers **422**. Never a 500. Malformed JSON / a missing required property is 400.
+
+**History is the activation journal** (`<Config:Path>/activations.jsonl`, ADR-0011). `GET /admin/config/versions`
+lists activated versions only; `GET /admin/config/versions/{n}` and `POST /admin/config/rollback` with a version that
+was written but never activated (an orphan of an interrupted apply) answer **404**, exactly like an unknown number;
+orphan numbers are never reused. `change_summary` is redacted (no secret values) and bounded to ≤ 500 characters in
+history, journal and the `config.activated` audit event.
+
+**Model override** (`model` on `/v1`, the simulator and console inference): `connection/model` names exactly one
+target; a bare model id is accepted only when exactly one ELIGIBLE target of the matching policy carries it —
+otherwise refused: `model id 'X' is ambiguous across connections a, b — use connection/model`.
+
+### Wire spellings (stable contract, `ConfigJsonContext`)
+Properties are snake_case. Enum values are always written as:
+
+| Field | Type | Values |
+|---|---|---|
+| `mode` | ProviderMode | `"local-only"`, `"hybrid"`, `"legacy-cloud"` |
+| `strategy` | RoutingStrategy | `"fixed"`, `"length-heuristic"` |
+| `period` | BudgetPeriod | `"none"`, `"daily"`, `"monthly"` |
+| `enforcement` | BudgetEnforcement | `"hard"`, `"warn-only"` |
+| `kind` | ProviderKind | `"Ollama"`, `"OpenAiCompatible"`, `"OpenAi"`, `"Anthropic"` (C# names) |
+| `boundary` | Boundary | `"Local"`, `"Cloud"` (C# names) |
+| `classifications[]`, `baseline` | DataClassification | `"Public"`, `"Internal"`, `"Pii"`, `"Phi"` (C# names) |
+
+Prices: `"price": { "input_per_1m", "output_per_1m", "basis", "effective_date" }` (never `input_per1_m`). On read a
+JSON number is tolerated for an enum only so that an undefined value reaches the validator (`invalid_enum`); clients
+must send the names above. `/admin/status.mode` uses the same `mode` spellings.
+
+## Console inference (ADR-0012)
+`POST /admin/playground/requests` body `{ "application_id", "profile_id"?, "messages":[{role,content}], "model"?,
+"max_tokens"?, "stream":bool, "workflow"?, "use_case"?, "client_request_id"? }` → exactly the `/v1/chat/completions`
+response contract (buffered JSON or SSE; `X-Covenant-Request-Id`). 400 `{error:"invalid_request"}` = rejected
+before governance (no audit). 409 `{error:"duplicate_submission","request_id"}` for a repeated `client_request_id`.
+Governed refusals (application disabled / not console-testable / profile not granted) are 403 with an audit record.
+`GET /admin/applications` → `[{ "id","team","enabled","console_testing","granted_profiles","default_profile" }]`
+(no credentials).
+
+Implementation details (T05, binding):
+- Admin token required (401 `{error:"unauthorized"}` otherwise). Every answer — including 400 — carries
+  `X-Covenant-Request-Id`; for 400 the id names nothing (no audit record, no trace). On 409 the header and `request_id`
+  are the ORIGINAL request's id (the duplicate is not run; window 10 min, claimed atomically before the pipeline runs).
+- 400 rules: malformed JSON; `application_id` missing/blank or > 64 chars; `profile_id` > 64; `messages` missing/empty
+  or > 200; a null message; `role` not `system|user|assistant`; `content` not a string; total content > 200 000 chars;
+  `max_tokens` < 1; `model` > 200 chars; `client_request_id` **missing** or not 1–64 chars of `[A-Za-z0-9_-]`
+  (review round 2: REQUIRED). Body:
+  `{ "error":"invalid_request", "reason":"… — rejected before governance; no evidence record" }`.
+- An unknown `application_id` is a governed 403 at `auth` ("application 'x' is not configured"), audited.
+- Audit: `EntryPoint="console"`, `OperatorRef="shared-admin-token"`, `ApplicationId`, `Tags.Team` = the application's
+  team, `Principal="console:<application id>"`, `Tags.Workflow`/`UseCase` from the body (default `console`/`playground`,
+  bounded to 64 chars).
+- Cancellation (client disconnect) propagates to the provider call (`RequestAborted`); the record is `Cancelled`.
+- **Early request id (review round 2, B7, binding).** `client_request_id` is required. Before the pipeline starts the Host
+  registers `client_request_id → request_id` (kept for the trace TTL). The console may poll
+  `GET /admin/playground/submissions/{client_request_id}` (admin token; 401 otherwise) right after submitting:
+  - 200 `{ "client_request_id": "...", "request_id": "req_<32 hex>", "state": "running" | "completed" }`
+  - 404 `{ "error": "not_found", "reason": "..." }` — unknown, never registered, past the trace TTL, or malformed id.
+  With the `request_id` it subscribes to `/admin/requests/{id}/trace/stream` while the provider is still waiting (no
+  faked timings). `/v1` is unchanged.
+- **Stream completion (review round 2, B1).** A stream is served ONLY when the provider sent a terminal completion (a
+  finish reason) and no error occurred. Otherwise (stream just ended, SDK swallowed the SSE error, error mid-stream,
+  deadline hit) the SSE ends with the existing `data: {"error":"upstream_error","reason":…,"request_id":…}` event and
+  `data: [DONE]` — **no** chunk with `finish_reason:"stop"`; the record is `Effect=Deny`, `DenialKind=UpstreamFailure`,
+  `ErrorClass` `incomplete_stream` (or the failure class), `PartialOutputChars` set, never cached, never continued by a
+  fallback, the attempt charged its estimate. A completed stream's last chunk carries the provider's own finish reason
+  (`"stop"`, or `"length"` when truncated at the output bound).
+- **Deadline (review round 2, B3; supersedes the earlier "the deadline stops applying once content flows").** The
+  policy `retry.deadline_ms` is ONE finite deadline for the whole execution (all attempts, before AND after the first
+  streamed content). If it fires after content was emitted: partial output kept and recorded, terminal failure with
+  `ErrorClass`/`reason_code` `timeout`, SSE ends with `upstream_error`, no fallback.
+
+## Trace (ADR-0013)
+`GET /admin/requests/{id}/trace` → `{ "request_id","config_version","complete":bool,"events":[TraceEvent] }`;
+404 unknown/expired. `GET /admin/requests/{id}/trace/stream` → SSE `id: <seq>` + `data: TraceEvent`, replay then
+live, honours `Last-Event-ID`; ends with `event: end`. `TraceEvent` = `{ "seq","stage","attempt_id"?,"state",
+"ts_utc","duration_ms"?,"reason_code"?,"target"? }`. Stages: `auth, shape, classify, policy, cache, rate_limit,
+pause, budget, provider, attribution`. States: `pending, running, passed, refused, failed, cancelled, skipped`.
+
+Implementation details (T05, binding — supersedes "404 unknown/expired" above):
+- Both endpoints: admin token (401); id must be ≤ 64 chars of `[A-Za-z0-9_-]` (400 `invalid_id`); **404**
+  `{error:"not_found"}` = never traced by this process; **410** `{error:"expired"}` = traced but past retention (or evicted).
+- Every request is traced — `/v1/chat/completions`, `/v1/messages` and console inference — in a buffer created BEFORE the
+  pipeline starts; `seq` is monotonic from 1. Each event also carries `request_id` and `config_version`. Null fields are
+  omitted. Snapshot adds `"truncated":bool` (more than 64 events were emitted; later ones dropped).
+- Stage events: `running` on entry; `passed` (with `duration_ms`, Stopwatch-measured) when the stage hands over to the next
+  one — or returns without denying (a cache hit: `reason_code:"cache_hit"`); `refused` / `failed` (upstream) / `cancelled`
+  on a short-circuit with a bounded `reason_code`; after the run, every stage never entered is `skipped` with
+  `not_reached` or `cache_hit`. Provider attempts emit `provider` events with `attempt_id` (`att_1`, `att_2`, …) and
+  `target` (`connection/model`); a fallback's pause and budget re-checks emit `pause`/`budget` events with its `attempt_id`.
+  The audit stage itself is not traced.
+- `reason_code` vocabulary (bounded, never provider text or content): `cache_hit`, `not_reached`, `paused`,
+  `budget_exceeded`, `governance_denied`, `unauthenticated`, `rate_limited`, `unsupported`, `upstream_failure`,
+  `client_cancelled`, `client_disconnected`, `no_client`, `error`, and the failure classes `connect`, `timeout`, `429`,
+  `5xx`, `non_retryable`, `incomplete_stream` (review round 2: stream ended without a terminal completion).
+- Provider attempt events (`attempt_id` set) additionally carry `requested_max_output_tokens` (the request's own
+  `max_tokens`; omitted when the caller sent none) and `effective_max_output_tokens` (the bound actually sent to the
+  provider for that attempt = min(request, application, model)) — review round 2, B12.
+- Stream: replay of `seq > Last-Event-ID`, then live; `: keep-alive` comment every 15 s while idle; `event: end` +
+  `data: {}` once complete. Clients de-duplicate by `seq`.
+- Bounds: ≤ 64 events/request, ≤ 2 000 requests (oldest completed evicted first), retention = the request's configuration
+  `trace_retention_minutes` (default 10) after completion. In memory only; the audit record keeps the compact summary.
+
+## Policy simulator
+`POST /admin/policies/simulate` `{ "application_id","profile_id"?,"prompt","model"?,"config"? }` → dry-run
+`{ "classification","baseline","detected_signal","policy_id","eligible":[{target, "excluded_reason"?}],
+"decision":"route|refuse","primary","fallbacks":[…],"reason" }`. Uses the real engine; never calls a provider,
+never records spend or audit. Labelled "Dry run" in the UI.
+
+## Budgets (ADR-0014)
+`GET /admin/budgets` → `[{ "id","scope","period","period_id","cap_usd","spent_usd","reserved_usd","remaining_usd",
+"warn_at","warning":"none|warn|critical|exceeded","enforcement" }]`; caps are edited through `/admin/config`.
+`GET /admin/budgets/{id}/requests?limit=` → contributing settled request ids and amounts.
+
+Implementation details (T04, binding):
+- `period` = `none|daily|monthly`; `period_id` = `all` / `yyyy-MM-dd` / `yyyy-MM` (UTC); additive `period_start_utc`,
+  `period_end_utc` (null for `none`). `spent_usd` = settled charges of the budget's SCOPE inside its current window (the
+  ledger records scopes, never budget ids — renaming a budget or changing its period/cap never resets accrual).
+  `reserved_usd` = open reservations of that scope (in-flight attempts). `remaining_usd = max(0, cap − spent − reserved)`.
+  `enforcement` = `hard|warn-only`.
+- `warning`: `exceeded` when spent ≥ cap (cap 0: only when something was spent); `critical` at ≥ the highest `warn_at`
+  fraction; `warn` at ≥ the lowest; else `none`. Status only — warnings never block; warn-only budgets never block.
+- `/admin/budgets/{id}/requests?limit=` (default 100, max 1000) → `{ "budget_id","scope","period_id","items":[{ "request_id",
+  "attempt_id","kind":"settle|settle-recovered|legacy-import","amount_usd","ts_utc","overrun" }] }` newest first;
+  404 for an id not in the active configuration.
+- Ledger: `Budget:LedgerPath` (startup-only; default `<Audit:Path>.ledger.jsonl`). `POST /admin/reset` archives the audit
+  log only — it never reopens a budget. `/admin/status.budget` reads the same ledger (global budget's period; team spend
+  over that period).
+- A hard-budget refusal is a governed 403 at stage `budget` (reason names the budget, scope, period, spent, reserved, the
+  attempt's bound and the cap). Reservation bound per attempt = (UTF-8 bytes of all message contents + 16 per message) ×
+  input price + min(request `max_tokens`, application `max_output_tokens` (default 1024), model `max_output_tokens`) ×
+  output price; that output bound is sent to the provider. Explicit $0 (local) prices reserve nothing.
+
+## Requests archive (spec §5)
+`GET /admin/requests?limit=&cursor=&segment=` — `cursor` is an opaque newest-first position; `segment` is an id
+from `GET /admin/audit/segments` (`[{ "id","label","entries","first_utc","last_utc","chain_valid" }]`, the current
+segment plus `*.archived` siblings of the audit file — ids only, never caller-supplied paths).
+`GET /admin/requests/{id}/export` → `{ request record, attempts, trace summary, config_version, integrity }` with no
+prompt/response content.
+
+Implementation details (T06, binding):
+- Segment ids: `current`, or `a-<16 hex>` (SHA-256 of the archive's file name) for `<audit file>.yyyyMMdd-HHmmss.archived`
+  siblings, newest first. Segment view adds `current`:bool, `events` (control-plane events, not counted in `entries`),
+  `archived_utc`. No paths. Archived chains are verified with their archived anchor file when one exists.
+- `GET /admin/requests`: `segment` default `current`; an id outside the enumerated set (path, `..`, unknown) → **400**
+  `{error:"unknown_segment"}`. `limit` 1–1000 (default 200). Response = the existing `RequestsPage` plus
+  `segment.id`, `segment.label`, **`segment.is_current`** (always present — never infer the segment from the first row)
+  and `next_cursor` (null on the last page). A cursor encodes its segment; `cursor` alone is enough for the next page.
+- **Stable paging (review round 2, B8, binding).** `next_cursor` is opaque base64url of {segment id, segment generation,
+  absolute index counted from the OLDEST request record of the segment (exclusive upper bound)}. Pages are newest-first by
+  absolute index, so records appended between pages never shift a page: no duplicates, no gaps (new records appear on a
+  fresh first page). Errors: malformed cursor or one for another `segment` → **400** `{error:"invalid_cursor"}`; the
+  segment was rotated/replaced since the cursor was issued (generation mismatch, segment gone, or a pre-round-2 cursor) →
+  **410** `{error:"cursor_expired"}` — the client reloads the first page; a cursor is never silently redirected to another
+  segment.
+- `GET /admin/requests/{id}/export?segment=` (default: search current, then archived newest first) → `{ "exported_utc",
+  "request_id", "segment": SegmentView, "config_version", "record": AuditEntry (PascalCase, `PromptPreview` removed),
+  "attempts", "trace", "integrity": { "segment_id","chain_valid","chain_failure","line","previous_hash","entry_hash",
+  "anchor_configured","status":"verified|unverified" }, "content_included": false }`; 404 not found; 400 bad id/segment.
+  The prompt SHA-256 fingerprint stays (it proves which prompt, not what).
+
+## Audit record v3 (additive)
+`EventType` (null/"request" | "config.activated" | "budget.recovered"), `ConfigVersion`, `EntryPoint`
+("v1" | "console"), `OperatorRef`, `ApplicationId`, `ProfileId`, `BaselineClassification`, `Attempts[]`
+(`{AttemptId, ConnectionId, ModelId, Outcome, ErrorClass, DurationMs, CostUsd, CostBasis}`), `Trace[]`
+(`{Stage, State, DurationMs}`), `ReservedUsd`, `SettledUsd`. Legacy lines verify unchanged; absent = Not recorded.
+Event entries (`EventType` ≠ request) are excluded from request counts, spend and FinOps.
+
+Implementation details (T04–T06, binding):
+- `Attempts[]` items also carry `ReservedUsd` and `Overrun` (bool, reported charge above the reservation — settled in
+  full). `Outcome` ∈ `served|failed|cancelled`; `ErrorClass` ∈ `connect|timeout|429|5xx|non_retryable|client_cancelled|
+  client_disconnected`. Only STARTED attempts appear (a fallback refused at pause/budget never started; see `Trace`).
+- `Trace[]` items: `{Stage, State, DurationMs, AttemptId?, ReasonCode?}` — terminal states only; one `provider` step per
+  attempt; attempt-level `pause`/`budget` steps only when they refused; skipped stages included.
+- `Attempts`, `Trace`, `ReservedUsd`, `SettledUsd` are written only when a configuration version is bound (always on the
+  Host); `[]`/null on a cache hit or a refusal before any attempt.
+- `Usage.CostUsd` of a record = **everything settled for the request** (`SettledUsd`: a failed attempt's estimate plus the
+  served fallback's charge), so FinOps totals include possibly-billed failed attempts. `Usage` tokens are the served
+  attempt's.
+- `SelectedModel` = the policy's primary; `AttemptedModel` = the last attempt started; `ServedByModel` = the attempt that
+  produced the response (a fallback when one served). `CostBasis` (v2 meaning): `estimated_from_text` = served, usage not
+  reported, charged the reservation bound; `estimated_failed_call` = failed/cancelled attempt charged its reservation
+  bound; `no_call`, `reported`, `zero_priced`, `unpriced`, `unknown_failed_call` unchanged.
+- **Request-level `CostBasis` (review round 2, B2):** describes the TOTAL (`Usage.CostUsd` = `SettledUsd`) over the
+  charged attempts (cost > 0): `reported` only if every charged attempt is `reported`; if all charged attempts share one
+  basis (e.g. all `estimated_failed_call`) that basis; if they differ → **`mixed`** (new value: e.g. a failed attempt's
+  estimate plus a reported fallback). With no positive charge the served/last attempt's basis stands. FinOps counts
+  `mixed` as an estimated-cost request and excludes it from savings claims; the UI labels it "Mixed (includes estimates)".
+- **Additive v3 fields (review round 2, nullable, absent on older lines ⇒ Not recorded):**
+  `RequestedMaxOutputTokens` (the request's own max_tokens, null when none was sent), `EffectiveMaxOutputTokens` (the
+  bound sent to the provider for the SERVED attempt; null when nothing served), `PartialOutputChars` (characters already
+  emitted to the client before a stream failed; only on non-served records), `ServedConnectionId` (connection of the
+  attempt that served — a fallback when one served; on a cache hit the connection that produced the cached entry, so
+  `ServedConnectionId`/`ServedByModel` of a hit are the ACTUAL served provenance, not the policy primary).
+  `Attempts[]` items add `EffectiveMaxOutputTokens` (bound sent for that attempt) and `Truncated` (true when the provider
+  finished with `length`). `ErrorClass` vocabulary adds `incomplete_stream`. Label requested vs effective explicitly
+  (e.g. "Requested 256 · enforced 64").
+- `budget.recovered` events record reservations a crash left open, settled at boot at their reserved amount.
+
+## Header local health (review round 2, B11, binding)
+- `/admin/catalog.local` adds `connection_id` (the local-boundary connection it describes) and `health`
+  (`{state, last_success_utc, last_failure_utc, last_error}` — CURRENT runtime health of exactly
+  `connection_id:model_id`, from real governed attempts). Selection: the enabled local connection/model most recently
+  observed by a real attempt or probe; else the first one routed by an enabled, unpaused policy target; else a connection
+  named `local`; else the first enabled local one. A stale legacy `local` connection never shadows the one that served.
+  The header uses `local.health` (fall back to `local.endpoint_health` only when `health.state` is `unknown`); it must not
+  match on an adapter literally named `local`.
+- `/admin/status` adds `connection_health: [{ "key":"connection_id:model_id", "connection_id", "model_id", "boundary",
+  "enabled", "health": {…} }]` for every configured connection model.
+
+## Status FinOps savings (T06)
+`/admin/status.finops.savings` = `{ "label":"Estimated provider charge avoided", "baseline":"connection/model",
+"route_avoided_usd","cache_avoided_usd","total_usd","excluded_records" }` **only** when the active configuration's
+`savings_baseline` names a PRICED connection/model; otherwise `null` and the legacy `estimated_savings_usd`,
+`savings_local_usd`, `savings_router_usd`, `savings_cache_usd` are 0. Counterfactual: each allowed request with known usage
+(`reported`/`zero_priced`/cache `no_call`) priced on the baseline; route-avoided = baseline − served model price (route
+selection, incl. local); cache-avoided = the served model's charge a hit did not incur. Estimated/unknown-cost records are
+excluded (`excluded_records`). Not total business savings; not evidence of equal answer quality.
