@@ -103,11 +103,21 @@ public sealed class ConnectionForm
     /// OpenAI-compatible keeps the operator's choice (Local needs a startup-approved endpoint).</summary>
     public void SetKind(string kind)
     {
+        var previousDefault = DefaultSecretRef(Kind);
+        if (string.IsNullOrWhiteSpace(SecretRef) || string.Equals(SecretRef, previousDefault, StringComparison.Ordinal))
+            SecretRef = DefaultSecretRef(kind);
         Kind = kind;
         if (kind is "OpenAi" or "Anthropic") Boundary = "Cloud";
         else if (kind == "Ollama") Boundary = "Local";
         else if (Boundary is not ("Local" or "Cloud")) Boundary = "Cloud";
     }
+
+    private static string? DefaultSecretRef(string? kind) => kind switch
+    {
+        "OpenAi" => "OpenAI:ApiKey",
+        "Anthropic" => "Anthropic:ApiKey",
+        _ => null,
+    };
 
     /// <summary>Merges probe results: configured rows are marked reported/not reported; NEW tags are added
     /// UNSELECTED with an explicit zero-marginal-local price for a local connection (editable, never hidden).</summary>
@@ -335,7 +345,9 @@ public static class ConnectionRules
 
     /// <summary>Secret references the Host reported (names only, never values) with their availability.</summary>
     public static IReadOnlyList<(string Ref, bool Available)> SecretChoices(IReadOnlyDictionary<string, SecretAvailabilityDto>? secrets)
-        => secrets is null ? [] : secrets.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => (kv.Key, kv.Value.Available)).ToList();
+        => LegacySecretRefs.Concat(secrets?.Keys ?? Enumerable.Empty<string>()).Distinct(StringComparer.Ordinal)
+            .OrderBy(x => x, StringComparer.Ordinal)
+            .Select(x => (x, secrets is not null && secrets.TryGetValue(x, out var value) && value.Available)).ToList();
 }
 
 /// <summary>A connection's observed health, one summary line plus supporting timestamps (spec §5): the last

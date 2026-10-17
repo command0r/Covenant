@@ -1793,7 +1793,7 @@ public sealed class ConnectionFormTests
 
         var problems = f.Problems([], Secrets);
         Assert.Contains(problems, p => p.Contains("never treated as $0", StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.StartsWith("Choose the server-side secret", StringComparison.Ordinal));
+        Assert.Equal("OpenAI:ApiKey", f.SecretRef); // standard provider reference is discoverable without manual typing
 
         m.Priced = true;
         Assert.Contains(f.Problems([], Secrets), p => p.Contains("enter both input and output prices", StringComparison.Ordinal));

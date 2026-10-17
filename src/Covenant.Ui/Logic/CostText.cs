@@ -18,8 +18,9 @@ public static class CostText
 
     public const string MixedLabel = "Mixed (includes estimates)";
 
-    public static string Cost(AuditEntryView r) => r.CostBasis switch
+    public static string Cost(AuditEntryView r) => ToolOnly(r) ? "≈ " + Usd(r.Usage.CostUsd) + " web-search charge (no provider call)" : r.CostBasis switch
     {
+        "estimated_unreported" => "≈ " + Usd(r.Usage.CostUsd) + " (includes an estimated web-search charge)",
         "reported" => Usd(r.Usage.CostUsd) + " (estimated provider charge)",
         "mixed" => "≈ " + Usd(r.Usage.CostUsd) + " · " + MixedLabel,
         "zero_priced" => "$0.00 configured provider charge · infrastructure excluded",
@@ -38,12 +39,29 @@ public static class CostText
         "estimated_from_text" or "estimated_failed_call" => "≈ " + Usd(cost) + " estimated",
         "mixed" => "≈ " + Usd(cost) + " " + MixedLabel,
         "no_call" => "$0.00 — no provider call",
+        "estimated_unreported" => "≈ " + Usd(cost) + " estimated",
         _ => NotReported,
     };
 
-    /// <summary>Short form for table cells (same rules, fewer words).</summary>
-    public static string CostShort(AuditEntryView r) => r.CostBasis switch
+    /// <summary>ADR-0015: cost text for one tool call (web search), by its recorded basis. A search charge is
+    /// credits × the configured price, or the reservation when usage was not reported — never "estimated from text".</summary>
+    public static string ToolCost(AuditToolCallView t) => t.CostBasis switch
     {
+        "reported" => Usd(t.CostUsd ?? 0m) + (t.Credits is { } c ? " (" + c.ToString(Inv) + (c == 1 ? " credit" : " credits") + " × configured price)" : " reported usage"),
+        "estimated_failed_call" => "≈ " + Usd(t.CostUsd ?? 0m) + " reserved charge (the search was sent and failed; it may be billed)",
+        "estimated_unreported" => "≈ " + Usd(t.CostUsd ?? 0m) + " reserved charge (no usage reported)",
+        "no_call" => "$0.00 — nothing was sent",
+        _ => NotReported,
+    };
+
+    /// <summary>True when the request's only charge is a tool call (e.g. a failed search before any provider call).</summary>
+    public static bool ToolOnly(AuditEntryView r)
+        => r.ToolCalls is { Count: > 0 } && (r.Attempts is null || r.Attempts.Count == 0) && r.CostBasis is not "no_call";
+
+    /// <summary>Short form for table cells (same rules, fewer words).</summary>
+    public static string CostShort(AuditEntryView r) => ToolOnly(r) ? "≈ " + Usd(r.Usage.CostUsd) + " search" : r.CostBasis switch
+    {
+        "estimated_unreported" => "≈ " + Usd(r.Usage.CostUsd),
         "reported" => Usd(r.Usage.CostUsd),
         "mixed" => "≈ " + Usd(r.Usage.CostUsd) + " mixed",
         "zero_priced" => "$0.00 configured",
@@ -80,6 +98,7 @@ public static class CostText
         "unpriced" => "Model has no configured price — cost unknown, not zero",
         "mixed" => "Total of attempts with different cost bases (e.g. a failed attempt's estimate plus a reported fallback) — includes estimates, so it is not a reported figure",
         "no_call" => "No provider call was made",
+        "estimated_unreported" => "A web search was charged at its reservation because the provider reported no usage",
         null => "Not recorded (legacy record)",
         _ => "Unrecognised basis: " + basis,
     };

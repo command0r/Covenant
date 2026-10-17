@@ -36,6 +36,7 @@
         <dt>Requested max output tokens</dt><dd class="mono">@(Run.Evidence.Record is { } rr ? RecordFacts.RequestedMaxOutputTokens(rr) : Run.Snapshot.MaxTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "None requested — the application/model bound applies")</dd>
         <dt>Effective (enforced) max output tokens</dt><dd class="mono">@(Run.Evidence.Record is { } er2 ? RecordFacts.EffectiveMaxOutputTokens(er2) : "Known once the audit record is found")</dd>
         <dt>Labels</dt><dd class="mono">@(Run.Snapshot.Workflow ?? "—") · @(Run.Snapshot.UseCase ?? "—")</dd>
+        <dt>Web sources</dt><dd>@(WebSourcesText.Label(Run.Snapshot.WebSources) + (Run.Snapshot.Location is { } loc ? " · location " + loc : ""))</dd>
         <dt>Submitted</dt><dd>@Fmt.Utc(Run.Snapshot.SubmittedUtc)</dd>
         <dt>Client request id</dt><dd class="mono wrap-any">@Run.Snapshot.ClientRequestId</dd>
     </dl>
@@ -93,6 +94,8 @@
             <span class="note">@(ModelFacts.IsV2(rec) && rec.Attempts is null ? "Attempts not recorded on this record." : "No provider attempt was made.")</span>
         }
     </section>
+
+    <SearchEvidence Record="rec" Status="@Run.WebSourcesStatus" />
 
     <section class="drawer-section" aria-label="Usage and cost">
         <h3>Usage and cost</h3>

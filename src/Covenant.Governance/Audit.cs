@@ -34,11 +34,11 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
             var usage = ctx.Response?.Usage ?? ctx.FailedCallUsage ?? Usage.Empty;
             // ADR-0014: the request's charge is everything settled across its attempts (a failed primary plus the served
             // fallback), not only the served attempt; Attempts[] carries the breakdown.
-            if (ctx.SettledUsd is { } settled && ctx.Attempts.Count > 0) usage = usage with { CostUsd = settled };
+            if (ctx.SettledUsd is { } settled && (ctx.Attempts.Count > 0 || ctx.ToolCalls.Count > 0)) usage = usage with { CostUsd = settled };
             bool v3 = ctx.Configuration is not null;
             // Review round 2 (B2): the request-level basis describes the TOTAL — "reported" only when every charged
             // attempt is reported; one shared estimated basis stays that basis; differing bases are "mixed".
-            if (ctx.Attempts.Count > 0) ctx.CostBasis = CostBases.Aggregate(ctx.Attempts, ctx.CostBasis);
+            if (ctx.Attempts.Count > 0 || ctx.ToolCalls.Count > 0) ctx.CostBasis = CostBases.Aggregate(ctx.Attempts, ctx.ToolCalls, ctx.CostBasis);
             var servedAttempt = ctx.ServedTarget is { } st
                 ? ctx.Attempts.LastOrDefault(a => a.Outcome == "served" && a.ConnectionId == st.AdapterKey && a.ModelId == st.ModelId)
                 : null;
@@ -90,7 +90,10 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 RequestedMaxOutputTokens: v3 ? ctx.Request.MaxOutputTokens : null,
                 EffectiveMaxOutputTokens: v3 ? servedAttempt?.EffectiveMaxOutputTokens : null,
                 PartialOutputChars: v3 && !served && ctx.PartialOutputChars > 0 ? ctx.PartialOutputChars : null,
-                ServedConnectionId: v3 && served ? ctx.ServedTarget?.AdapterKey : null);
+                ServedConnectionId: v3 && served ? ctx.ServedTarget?.AdapterKey : null,
+                // ADR-0015: bounded search metadata (no query, location or snippets) and the separate tool-call charges.
+                WebSearch: v3 ? ctx.WebSearch?.ToAudit() : null,
+                ToolCalls: v3 && ctx.ToolCalls.Count > 0 ? ctx.ToolCalls.Select(t => t.ToAudit()).ToList() : null);
 
             // CancellationToken.None: a cancelled request must still produce its audit record.
             await sink.EnqueueAsync(entry, CancellationToken.None);

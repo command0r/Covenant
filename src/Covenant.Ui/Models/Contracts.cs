@@ -279,6 +279,39 @@ public sealed class AuditEntryView
     /// <summary>Connection of the attempt that served (a fallback when one served; on a cache hit the connection that
     /// produced the cached entry).</summary>
     [JsonPropertyName("ServedConnectionId")] public string? ServedConnectionId { get; set; }
+    /// <summary>ADR-0015: bounded web-search metadata (never the query, location or snippets).</summary>
+    [JsonPropertyName("WebSearch")] public AuditWebSearchView? WebSearch { get; set; }
+    /// <summary>ADR-0015: non-inference tool calls with their own charges, separate from provider Attempts.</summary>
+    [JsonPropertyName("ToolCalls")] public List<AuditToolCallView>? ToolCalls { get; set; }
+}
+
+/// <summary>Core AuditWebSearch.</summary>
+public sealed class AuditWebSearchView
+{
+    [JsonPropertyName("Mode")] public string Mode { get; set; } = "";
+    [JsonPropertyName("Triggered")] public bool Triggered { get; set; }
+    [JsonPropertyName("Cue")] public string? Cue { get; set; }
+    [JsonPropertyName("Outcome")] public string Outcome { get; set; } = "";
+    [JsonPropertyName("ReasonCode")] public string? ReasonCode { get; set; }
+    [JsonPropertyName("SourceCount")] public int? SourceCount { get; set; }
+    [JsonPropertyName("SourceHosts")] public List<string>? SourceHosts { get; set; }
+    [JsonPropertyName("DurationMs")] public double? DurationMs { get; set; }
+}
+
+/// <summary>Core AuditToolCall. Outcome ∈ succeeded | failed | cancelled; CostBasis ∈ reported | estimated_failed_call |
+/// estimated_unreported | no_call.</summary>
+public sealed class AuditToolCallView
+{
+    [JsonPropertyName("ToolCallId")] public string ToolCallId { get; set; } = "";
+    [JsonPropertyName("Tool")] public string Tool { get; set; } = "";
+    [JsonPropertyName("Provider")] public string Provider { get; set; } = "";
+    [JsonPropertyName("Outcome")] public string Outcome { get; set; } = "";
+    [JsonPropertyName("ErrorClass")] public string? ErrorClass { get; set; }
+    [JsonPropertyName("DurationMs")] public double DurationMs { get; set; }
+    [JsonPropertyName("CostUsd")] public decimal? CostUsd { get; set; }
+    [JsonPropertyName("CostBasis")] public string? CostBasis { get; set; }
+    [JsonPropertyName("ReservedUsd")] public decimal? ReservedUsd { get; set; }
+    [JsonPropertyName("Credits")] public int? Credits { get; set; }
 }
 
 /// <summary>One step of the compact persisted trace (Core AuditTraceStep).</summary>
@@ -522,4 +555,6 @@ public sealed class StreamFrameDto
 [JsonSerializable(typeof(BudgetRequestsDto))]
 [JsonSerializable(typeof(RequestExportDto))]
 [JsonSerializable(typeof(PlaygroundSubmissionDto))]
+[JsonSerializable(typeof(WebSearchStatusDto))]
+[JsonSerializable(typeof(RequestSearchDto))]
 public partial class UiJsonContext : JsonSerializerContext;

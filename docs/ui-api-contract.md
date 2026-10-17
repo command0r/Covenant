@@ -167,7 +167,7 @@ Implementation details (T05, binding):
 404 unknown/expired. `GET /admin/requests/{id}/trace/stream` → SSE `id: <seq>` + `data: TraceEvent`, replay then
 live, honours `Last-Event-ID`; ends with `event: end`. `TraceEvent` = `{ "seq","stage","attempt_id"?,"state",
 "ts_utc","duration_ms"?,"reason_code"?,"target"? }`. Stages: `auth, shape, classify, policy, cache, rate_limit,
-pause, budget, provider, attribution`. States: `pending, running, passed, refused, failed, cancelled, skipped`.
+pause, budget, search, provider, attribution` (`search`: ADR-0015, see "Governed web search"). States: `pending, running, passed, refused, failed, cancelled, skipped`.
 
 Implementation details (T05, binding — supersedes "404 unknown/expired" above):
 - Both endpoints: admin token (401); id must be ≤ 64 chars of `[A-Za-z0-9_-]` (400 `invalid_id`); **404**
@@ -308,3 +308,54 @@ Implementation details (T04–T06, binding):
 (`reported`/`zero_priced`/cache `no_call`) priced on the baseline; route-avoided = baseline − served model price (route
 selection, incl. local); cache-avoided = the served model's charge a hit did not incur. Estimated/unknown-cost records are
 excluded (`excluded_records`). Not total business savings; not evidence of equal answer quality.
+
+# Governed web search (ADR-0015, 2026-10-17)
+
+One bounded Tavily search performed by Covenant as pipeline stage `search` (after `budget`, before `provider`); never a
+model-invoked tool. `/v1` is unchanged (always `web_search` off).
+
+## Configuration (versioned, ADR-0011)
+- `config.web_search` (nullable; null = disabled): `{ "enabled":bool (default false), "max_results":1–3 (default 3),
+  "timeout_seconds":1–30 (default 10), "price_per_credit_usd":decimal|null, "price_basis"?:string ≤ 200,
+  "price_effective_date"?:"yyyy-MM-dd" }`. The console must round-trip it on every save.
+- `profiles[].web_search_allowed`: bool, default false. Only a **Public**-baseline profile may carry it.
+- Validation codes: `search_profile_not_public` (`profiles[i].web_search_allowed`), `invalid_setting`
+  (`web_search.max_results|timeout_seconds|price_per_credit_usd|price_basis`); when enabled: `search_requires_hybrid`,
+  `search_unpriced` (unknown price is not $0), `secret_unavailable` (`Tavily:ApiKey` not set),
+  `search_egress_not_approved` (`api.tavily.com:443` not on `Providers:ProbeAllowList`); warning `search_no_profile`.
+- The API key `Tavily:ApiKey` is a server-side startup secret: never in configuration, never returned, never logged
+  (redacted), never imported from other tools (e.g. Open WebUI).
+
+## Console inference body
+`POST /admin/playground/requests` adds `"web_search"?: "off"|"auto"|"required"` (absent = off; anything else → 400
+`invalid_request`) and `"location"?: string ≤ 100` (an explicit place; never inferred, no IP geolocation).
+
+## Endpoints (admin token; `Cache-Control: no-store`)
+- `GET /admin/web-search` → `{ "provider":"tavily", "endpoint":"https://api.tavily.com/search", "key_configured",
+  "egress_approved", "mode", "mode_allows_search", "enabled", "price_configured", "price_per_credit_usd"?,
+  "profiles_allowed":[…], "config_version", "ready", "setup":[string] }` — readiness of the APPLIED configuration plus
+  operator setup steps. Never the key.
+- `GET /admin/requests/{id}/search` → `{ "request_id", "mode", "triggered", "cue"?, "outcome", "reason_code"?,
+  "retrieved_utc"?, "duration_ms"?, "sources":[{ "title","url","retrieved_utc" }] }` — what was ACTUALLY retrieved
+  (validated absolute http(s) URLs, no userinfo). Transient (trace store, same retention); 404 when the request did not
+  ask for web sources; 400/404/410 as the trace endpoints. Snippets are never returned. The console shows these sources
+  separately from any `[n]` citations in the answer and renders a link only for a safe http(s) URL.
+
+## Outcomes
+- Trace `search`: `skipped` (`search_off`, `search_not_triggered`, `not_reached`), `passed`, `refused`
+  (`location_required`, `search_not_permitted`, `search_sensitive`, `budget_exceeded`), `failed` (`search_failed`,
+  `search_timeout`, `search_rate_limited`, `search_empty`), `cancelled`. Cache stage: `skipped` with
+  `web_search_bypass` for a triggered request (no lookup, no store).
+- HTTP: `location_required` → 400 `unsupported` (audited; nothing sent externally); permission/sensitivity/budget
+  refusals → 403 `denied`; search failure/timeout/429/empty → 502 `upstream_error` (no model call, no answer without
+  sources); cancellation → 499.
+
+## Audit record (additive, nullable)
+- `WebSearch`: `{ Mode, Triggered, Cue?, Outcome, ReasonCode?, SourceCount?, SourceHosts?[≤3], DurationMs? }` — never the
+  query, location or snippets.
+- `ToolCalls[]`: `{ ToolCallId:"tool_1", Tool:"web_search", Provider:"tavily", Outcome:"succeeded|failed|cancelled",
+  ErrorClass?, DurationMs, CostUsd, CostBasis, ReservedUsd, Credits? }` — separate from `Attempts[]`.
+- Tool `CostBasis`: `reported` (credits × configured price), `estimated_failed_call` (sent and failed/cancelled: the
+  reservation), `estimated_unreported` (succeeded without usage: the reservation), `no_call` (never sent: $0, released).
+  `Usage.CostUsd`/`SettledUsd` include tool charges; the request-level `CostBasis` aggregates attempts and tool calls
+  (`mixed` when they differ).

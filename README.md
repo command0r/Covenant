@@ -4,6 +4,8 @@ An in-perimeter **AI inference governance and FinOps control plane** for regulat
 
 Research artifact: can inference governance be an architecturally separable control layer — enforceably, evidentially, and at acceptable cost?
 
+**Start here:** [Console usage guide](docs/console-quickstart.md) · [Tavily setup](docs/web-search.md)
+
 ## At a glance
 
 ![Covenant overview](docs/diagrams/covenant-overview.svg)
@@ -21,7 +23,7 @@ Editable sources: [`docs/diagrams/*.drawio`](docs/diagrams/) (open in [diagrams.
 1. **Fail-closed.** No policy match → deny. Unclassified defaults to the most restrictive class. Misconfiguration → the appliance refuses to start. PII/PHI never reaches a public provider because no public route exists for those classifications.
 2. **Governance is the pipeline, not a bolt-on.** Every capability — classification, policy, budgets, attribution, audit — is an ordered stage in one middleware chain. Nothing bypasses it.
 3. **Everything is evidence.** Each request, allowed or denied, appends exactly one hash-chained audit entry. Altering any past entry breaks every hash after it.
-4. **The perimeter is sacred.** Deployed inside the customer boundary; egress only to the approved model allow-list; no phone-home.
+4. **The perimeter is sacred.** Deployed inside the customer boundary; egress only to approved model endpoints and explicitly enabled Public web search (ADR-0015); no phone-home.
 
 ## Where the detail lives
 

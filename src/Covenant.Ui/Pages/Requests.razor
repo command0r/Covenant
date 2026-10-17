@@ -151,13 +151,13 @@
                 <div class="table-scroll">
                     <table class="req-table">
                         <colgroup>
-                            <col style="width:140px" />
-                            <col style="width:200px" />
-                            <col style="width:180px" />
-                            <col style="width:270px" />
-                            <col style="width:90px" />
-                            <col style="width:130px" />
-                            <col style="width:180px" />
+                            <col style="width:12%" />
+                            <col style="width:16%" />
+                            <col style="width:17%" />
+                            <col style="width:21%" />
+                            <col style="width:10%" />
+                            <col style="width:12%" />
+                            <col style="width:12%" />
                         </colgroup>
                         <thead>
                             <tr>
@@ -167,7 +167,7 @@
                                 <th scope="col">Selected → served</th>
                                 <th scope="col" class="num">Duration</th>
                                 <th scope="col">Cost</th>
-                                <th scope="col">Request id</th>
+                                <th scope="col">Details</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -177,16 +177,16 @@
                                 var o = OutcomeModel.FromRecord(r);
                                 var model = ModelFacts.SelectedToServed(r);
                                 <tr class="clickable @(r.Id == View.SelectedId ? "selected" : "")" @onclick="() => Open(r)">
-                                    <td class="mono"><span class="cell" title="@Fmt.Utc(r.TimestampUtc)">@(r.TimestampUtc.UtcDateTime.ToString("MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))</span></td>
-                                    <td><span class="cell" title="@(Who(r))">@(r.ApplicationId ?? r.Principal) <span class="subtle">/ @r.Tags.Team</span>@(r.EntryPoint == "console" ? " · console" : "")</span></td>
+                                    <td class="mono"><span class="cell" title="@Fmt.Utc(r.TimestampUtc)">@(r.TimestampUtc.UtcDateTime.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))</span><span class="cell subtle">@(r.TimestampUtc.UtcDateTime.ToString("MM-dd", System.Globalization.CultureInfo.InvariantCulture))</span></td>
+                                    <td><span class="cell" title="@(Who(r))">@(r.ApplicationId ?? r.Principal)</span><span class="cell subtle" title="@r.Tags.Team">@r.Tags.Team</span></td>
                                     <td><span class="cell" title="@o.Title"><StatusPill Kind="@o.PillKind" Text="@OutcomeModel.Label(o.Outcome)" /></span></td>
                                     <td class="mono"><span class="cell" title="@model">@model@(r.Attempts is { Count: > 1 } at ? " (" + at.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + " attempts)" : "")</span></td>
                                     <td class="num mono">@Fmt.Ms(r.DurationMs)</td>
-                                    <td class="mono"><span class="cell" title="@CostText.Cost(r)">@CostText.CostShort(r)</span></td>
+                                    <td class="mono"><span class="cell cost-cell" title="@CostText.Cost(r)">@CostText.CostShort(r)</span></td>
                                     <td>
                                         <button type="button" id="@RowId(r.Id)" class="btn ghost sm mono cell" style="max-width:100%" title="@r.Id"
                                                 aria-label="@("Open details for request " + r.Id)" @onclick="() => Open(r)" @onclick:stopPropagation="true">
-                                            @Truncate(r.Id)
+                                            View
                                         </button>
                                     </td>
                                 </tr>
@@ -361,6 +361,8 @@
                         <span class="note">No trace summary on this record (older record, or the stage list was not persisted).</span>
                     }
                 </section>
+
+                <SearchEvidence Record="rec" />
 
                 <section class="drawer-section" aria-label="Usage and cost">
                     <h3>Usage and cost</h3>

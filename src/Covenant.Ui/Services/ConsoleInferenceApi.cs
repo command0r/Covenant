@@ -62,6 +62,8 @@ public sealed class ConsoleInferenceApi(HttpClient http, AdminApi admin)
             Workflow = s.Workflow,
             UseCase = s.UseCase,
             ClientRequestId = s.ClientRequestId,
+            WebSearch = WebSourcesText.Wire(s.WebSources),
+            Location = s.WebSources == WebSourcesMode.Off ? null : s.Location,
         };
         var request = admin.NewRequest(HttpMethod.Post, Path);
         request.Content = JsonContent.Create(body, UiJsonContext.Default.PlaygroundRequestDto);

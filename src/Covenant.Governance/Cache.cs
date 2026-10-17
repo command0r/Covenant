@@ -124,6 +124,15 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
             return;
         }
 
+        // ADR-0015: a request that asks for web sources and triggers a search is never answered from (nor stored in) the
+        // exact cache — "current" answers must come from a fresh, governed search, not a replay.
+        if (WebSearchPlanner.Evaluate(ctx.Request).Triggered)
+        {
+            ctx.MarkCurrentStageSkipped(TraceReasons.WebSearchBypass);
+            await next(ctx, ct);
+            return;
+        }
+
         var key = KeyFor(ctx, route);
         if (cache.TryGet(key, out var hit, out var servedTarget))
         {

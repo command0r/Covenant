@@ -45,7 +45,7 @@ public static class TraceModel
 {
     /// <summary>Canonical stage order (ADR-0013). Unknown stages from a newer Host are appended in seq order.</summary>
     public static readonly IReadOnlyList<string> Stages =
-        ["auth", "shape", "classify", "policy", "cache", "rate_limit", "pause", "budget", "provider", "attribution"];
+        ["auth", "shape", "classify", "policy", "cache", "rate_limit", "pause", "budget", "search", "provider", "attribution"];
 
     public static string Label(string stage) => stage switch
     {
@@ -57,6 +57,7 @@ public static class TraceModel
         "rate_limit" => "Rate limit",
         "pause" => "Pause",
         "budget" => "Budget",
+        "search" => "Web search",
         "provider" => "Provider",
         "attribution" => "Attribution",
         _ => stage,

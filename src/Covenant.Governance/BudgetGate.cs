@@ -32,7 +32,8 @@ public static class ReservationEstimate
     public static (decimal AmountUsd, bool Priced) For(InferenceContext ctx, IRequestConfiguration cfg, RouteTarget target)
     {
         if (!ConfigPrices.TryGet(cfg, target.AdapterKey, target.ModelId, out var p)) return (0m, false);
-        long input = RequestBounds.InputTokenBound(ctx.Request.Messages);
+        // The grounded prompt (ADR-0015) is what the model receives; before the search runs, reserve its upper bound.
+        long input = RequestBounds.InputTokenBound(ctx.MessagesForModel) + WebSearchGrounding.PendingBytes(ctx);
         long output = RequestBounds.OutputTokenBound(ctx, target) ?? RequestBounds.DefaultOutputTokens;
         return (input / 1000m * p.InputPer1K + output / 1000m * p.OutputPer1K, true);
     }
@@ -44,7 +45,7 @@ public static class ReservationEstimate
 /// attempt (the gate and the ledger are both idempotent); zero-bound attempts (explicit $0 local price) write nothing.
 /// Charged scopes are captured when the gate is created — an attempt settles against the scopes that applied when it was
 /// reserved, even across a configuration activation.</summary>
-public sealed class BudgetAttemptGate : IAttemptGate
+public sealed class BudgetAttemptGate : IAttemptGate, IToolCallGate
 {
     private sealed class Slot
     {
@@ -123,6 +124,29 @@ public sealed class BudgetAttemptGate : IAttemptGate
         ctx.ReservedUsd = (ctx.ReservedUsd ?? 0m) + amount;
         return AttemptAdmission.Ok(amount);
     }
+
+    // ---- Tool calls (ADR-0015): same ledger, same scopes, same exactly-once slots; ids never collide with attempts. ----
+
+    public AttemptAdmission ReserveTool(InferenceContext ctx, string toolCallId, decimal amountUsd)
+    {
+        if (amountUsd < 0m) return AttemptAdmission.Refused("negative tool price", "budget", TraceReasons.BudgetExceeded);
+        lock (_gate)
+            if (_slots.ContainsKey(toolCallId)) return AttemptAdmission.Refused("tool call already reserved", "budget", TraceReasons.BudgetExceeded);
+        if (amountUsd > 0m)
+        {
+            var result = _ledger.TryReserve(_requestId, toolCallId, _scopes, amountUsd, _checks);
+            if (!result.Reserved)
+                return AttemptAdmission.Refused(result.Reason ?? "budget refused", "budget", TraceReasons.BudgetExceeded);
+        }
+        lock (_gate)
+            _slots[toolCallId] = new Slot { Target = new RouteTarget("tool", toolCallId), Reserved = amountUsd, Priced = true };
+        ctx.ReservedUsd = (ctx.ReservedUsd ?? 0m) + amountUsd;
+        return AttemptAdmission.Ok(amountUsd);
+    }
+
+    public AttemptCharge SettleTool(InferenceContext ctx, string toolCallId, decimal? costUsd) => Settle(ctx, toolCallId, costUsd);
+
+    public void ReleaseTool(InferenceContext ctx, string toolCallId) => Release(ctx, toolCallId);
 
     /// <summary>Settles a started attempt exactly once. The slot is marked closed only AFTER the durable ledger write
     /// succeeded (review round 2, B4): a failed write leaves the slot — and the ledger reservation — open, so a later call
@@ -206,6 +230,18 @@ public sealed class BudgetAttemptGate : IAttemptGate
         {
             try
             {
+                // A tool call that was sent but never settled (an exception escaped) is charged at its reservation —
+                // never released for free.
+                if (ctx.ToolCalls.FirstOrDefault(t => t.ToolCallId == id) is { } tool)
+                {
+                    var toolCharge = Settle(ctx, id, null);
+                    if (toolCharge.Settled)
+                    {
+                        tool.CostUsd ??= toolCharge.CostUsd;
+                        tool.CostBasis ??= "estimated_failed_call";
+                    }
+                    continue;
+                }
                 var started = ctx.Attempts.FirstOrDefault(a => a.AttemptId == id);
                 if (started is null) { Release(ctx, id); continue; }
                 var charge = Settle(ctx, id, null);

@@ -71,6 +71,14 @@ public sealed class TraceBuffer
 
     public string RequestId { get; }
     public int? ConfigVersion { get; }
+
+    /// <summary>ADR-0015: the actually retrieved web sources of this request (console only; transient, same TTL).</summary>
+    public RequestSearchView? Search { get; private set; }
+
+    public void AttachSearch(RequestSearchView view)
+    {
+        lock (_gate) Search ??= view;
+    }
     public TimeSpan Ttl { get; }
     public DateTimeOffset CreatedUtc { get; }
     public DateTimeOffset? CompletedUtc { get; private set; }
@@ -281,6 +289,19 @@ public static class TraceApi
             var lookup = hub.TryGet(id, out var buffer);
             if (Missing(lookup, id) is { } missing) return missing;
             return Results.Json(buffer!.Snapshot(), TraceJsonContext.Default.TraceSnapshotView);
+        });
+
+        app.MapGet("/admin/requests/{id}/search", (HttpContext http, string id) =>
+        {
+            if (!authorized(http)) return Error("unauthorized", "invalid admin token", StatusCodes.Status401Unauthorized);
+            http.Response.Headers.CacheControl = "no-store";
+            if (!RequestCorrelation.IsWellFormed(id))
+                return Error("invalid_id", "request id must be ≤64 chars of [A-Za-z0-9_-]", StatusCodes.Status400BadRequest);
+            var lookup = hub.TryGet(id, out var buffer);
+            if (Missing(lookup, id) is { } missing) return missing;
+            if (buffer!.Search is not { } search)
+                return Error("not_found", "this request did not ask for web sources (or has not finished its search stage)", StatusCodes.Status404NotFound, id);
+            return Results.Json(search, WebSearchJsonContext.Default.RequestSearchView);
         });
 
         app.MapGet("/admin/requests/{id}/trace/stream", async Task<IResult> (HttpContext http, string id, CancellationToken ct) =>

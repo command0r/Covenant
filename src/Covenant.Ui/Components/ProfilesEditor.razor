@@ -108,6 +108,10 @@
                         <span> · named by policy @string.Join(", ", usage.ScopedPolicies)</span>
                     }
                 </span>
+                @if (!Editing && prof.WebSearchAllowed)
+                {
+                    <span class="secondary">Web search allowed (Public requests only, when enabled in Settings)</span>
+                }
                 @if (Editing && _removeAsk == prof.Id)
                 {
                     var blockers = ProfileEditing.RemovalBlockers(Cfg, prof.Id);
@@ -156,6 +160,15 @@
                             <label for="@("pd-" + prof.Id)">Description</label>
                             <input id="@("pd-" + prof.Id)" class="input" value="@prof.Description" @onchange="@(e => SetDescription(prof, e))" />
                         </div>
+                    </div>
+                    <div class="btn-row">
+                        @{ var publicBaseline = string.Equals(prof.Baseline, "Public", StringComparison.Ordinal); }
+                        <label class="switch" title="@(publicBaseline || prof.WebSearchAllowed ? null : "Only a Public-baseline profile may use web search")">
+                            <input type="checkbox" checked="@prof.WebSearchAllowed" disabled="@(!publicBaseline && !prof.WebSearchAllowed)"
+                                   aria-describedby="@("pwh-" + prof.Id)" @onchange="@(e => SetWebSearch(prof, e))" />
+                            Allow web search
+                        </label>
+                        <span id="@("pwh-" + prof.Id)" class="help">@(publicBaseline ? ProfileEditing.WebSearchExplained : "Available only for a Public baseline.")</span>
                     </div>
                 }
                 @if (_errors.TryGetValue(key, out var perr))
@@ -307,6 +320,8 @@
         ProfileEditing.SetDescription(p, e.Value?.ToString());
         Result("p:" + p.Id, null);
     }
+
+    private void SetWebSearch(WorkloadProfileDto p, ChangeEventArgs e) => Result("p:" + p.Id, ProfileEditing.SetWebSearch(p, e.Value is bool b && b));
 
     private void SetTeam(ApplicationDto a, ChangeEventArgs e) => Result("a:" + a.Id, ProfileEditing.SetTeam(a, e.Value?.ToString()));
 

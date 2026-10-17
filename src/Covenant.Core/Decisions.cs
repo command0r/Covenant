@@ -84,7 +84,11 @@ public sealed record AuditEntry(
     int? RequestedMaxOutputTokens = null,
     int? EffectiveMaxOutputTokens = null,
     int? PartialOutputChars = null,
-    string? ServedConnectionId = null);
+    string? ServedConnectionId = null,
+    // ---- v3 continued (ADR-0015, additive, nullable): governed web search metadata (no query/snippets) and
+    // non-inference tool calls with their own charges, separate from provider Attempts.
+    AuditWebSearch? WebSearch = null,
+    IReadOnlyList<AuditToolCall>? ToolCalls = null);
 
 /// <summary>One provider attempt in an audit v3 record (ADR-0013): which connection/model was called, how it ended,
 /// the bounded error class, its measured duration and its charge (ADR-0014). Outcome ∈ served | failed | cancelled.
