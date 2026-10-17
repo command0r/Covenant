@@ -141,6 +141,10 @@ public sealed class ApplicationView
     public required bool ConsoleTesting { get; init; }
     public required List<string> GrantedProfiles { get; init; }
     public string? DefaultProfile { get; init; }
+    public string? DisplayName { get; init; }
+    public string? Description { get; init; }
+    /// <summary>Budgets that apply to this application's requests (global, its team, the application) — ids only.</summary>
+    public List<string> Budgets { get; init; } = [];
 }
 
 public sealed class SimulateRequest

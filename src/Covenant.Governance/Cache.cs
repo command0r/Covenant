@@ -120,6 +120,18 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
         int maxEntries = ctx.Configuration?.Config.Settings.CacheMaxEntries ?? config.MaxEntries;
         if (ttl <= 0 || ctx.Policy?.Route is not { } route)
         {
+            ctx.CacheOutcome = CacheOutcomes.Disabled;
+            if (ttl <= 0) ctx.MarkCurrentStageSkipped(TraceReasons.CacheDisabled);
+            await next(ctx, ct);
+            return;
+        }
+
+        // ADR-0015: a request that asks for web sources and triggers a search is never answered from (nor stored in) the
+        // exact cache — "current" answers must come from a fresh, governed search, not a replay.
+        if (WebSearchPlanner.Evaluate(ctx.Request).Triggered)
+        {
+            ctx.MarkCurrentStageSkipped(TraceReasons.WebSearchBypass);
+            ctx.CacheOutcome = CacheOutcomes.BypassWebSearch;
             await next(ctx, ct);
             return;
         }
@@ -128,6 +140,7 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
         if (cache.TryGet(key, out var hit, out var servedTarget))
         {
             ctx.ServedFromCache = true;
+            ctx.CacheOutcome = CacheOutcomes.Hit;
             ctx.CostBasis = "no_call";
             ctx.ServedTarget = servedTarget;   // provenance: the attempt that produced the entry (maybe a fallback)
             ctx.Response = hit with { Usage = hit.Usage with { CostUsd = 0m } };
@@ -136,6 +149,8 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
             return; // budget, provider, attribution all skipped — nothing spent, nothing to price
         }
 
+        ctx.CacheOutcome = CacheOutcomes.Miss;
+        ctx.MarkCurrentStagePassed(TraceReasons.CacheMiss);
         await next(ctx, ct);
 
         if (!ctx.IsDenied && ctx.Response is { } fresh && !ctx.ServedFromCache)

@@ -5,11 +5,11 @@ namespace Covenant.Ui.Logic;
 /// versioned draft (ConnectionDrafts / ConfigDraft) — there is no "edit a file and restart" path any more.</summary>
 public static class ConnectionLogic
 {
-    /// <summary>Synthetic prompt for the governed test. It contains the published sample SSN so that in cloud
+    /// <summary>Synthetic prompt for the governed test. It contains a synthetic, explicitly invalid SSN-shaped marker (000-12-3456) so that in cloud
     /// mode the PII rule routes it to the local model (PII/PHI → local); in local-only mode every class routes
     /// there anyway.</summary>
     public const string GovernedTestPromptBase =
-        "Synthetic connection test record: SSN 078-05-1120 (the published sample number). Reply with the single word OK.";
+        "Synthetic connection test record: SSN 000-12-3456 (synthetic, invalid area number). Reply with the single word OK.";
 
     /// <summary>Fresh per run (nonce) so a governed test can never be answered from the response cache —
     /// a cached reply would prove nothing about the provider being reachable now.</summary>

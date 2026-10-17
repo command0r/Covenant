@@ -190,7 +190,7 @@
                                         <label for="@(P + "-basis-" + idx)">Price basis</label>
                                         <select id="@(P + "-basis-" + idx)" class="input" value="@row.Basis" @onchange="@(e => SetBasis(row, e))">
                                             <option value="">Choose…</option>
-                                            <option value="@ConnectionForm.BasisLocal">Zero marginal (local; infrastructure excluded)</option>
+                                            <option value="@ConnectionForm.BasisLocal">Local — no per-call charge</option>
                                             <option value="@ConnectionForm.BasisList">Provider list price</option>
                                             <option value="@ConnectionForm.BasisContract">Contract price</option>
                                             @if (row.Basis.Length > 0 && row.Basis is not (ConnectionForm.BasisLocal or ConnectionForm.BasisList or ConnectionForm.BasisContract))
@@ -198,6 +198,10 @@
                                                 <option value="@row.Basis">@row.Basis</option>
                                             }
                                         </select>
+                                        @if (row.Basis == ConnectionForm.BasisLocal)
+                                        {
+                                            <span class="help">Infrastructure costs are excluded.</span>
+                                        }
                                     </div>
                                     <div class="field">
                                         <label for="@(P + "-date-" + idx)">Effective date</label>
@@ -239,7 +243,7 @@
                     <option value="">@(Form.IsOllama ? "None (no credential)" : "Choose…")</option>
                     @foreach (var (r, available) in ConnectionRules.SecretChoices(Envelope?.Secrets))
                     {
-                        <option value="@r">@(r + (available ? " · available" : " · NOT SET on the server"))</option>
+                        <option value="@r">@(r + (available ? " · ready" : Envelope?.Secrets?.ContainsKey(r) == true ? " · missing" : " · check on preview"))</option>
                     }
                     <option value="@OtherValue">Other reference…</option>
                 </select>
@@ -251,6 +255,10 @@
                     <input id="@(P + "-sec-o")" class="input mono" type="text" spellcheck="false" placeholder="Secrets:openai" @bind="Form.SecretRef" @bind:event="oninput" @bind:after="Changed" />
                     <span class="help">Secrets:&lt;name&gt; (or a legacy key: OpenAI:ApiKey, Anthropic:ApiKey, Local:ApiKey). Availability is checked by the Host when you preview.</span>
                 </div>
+            }
+            @if (Form.SecretRef is { Length: > 0 } selectedRef && SecretAvailability is null)
+            {
+                <span class="help">The Host checks this credential on preview. Set <code>@ConnectionRules.EnvVarFor(selectedRef)</code> in the server environment and restart if it is missing. Do not paste an API key into this form.</span>
             }
             @if (SecretAvailability is false && Form.SecretRef is { } sr)
             {
@@ -353,20 +361,28 @@
         {
             if (_otherSecret) return OtherValue;
             if (string.IsNullOrWhiteSpace(Form.SecretRef)) return "";
-            return Envelope?.Secrets?.ContainsKey(Form.SecretRef.Trim()) == true ? Form.SecretRef.Trim() : OtherValue;
+            return IsKnownSecret(Form.SecretRef.Trim()) ? Form.SecretRef.Trim() : OtherValue;
         }
     }
 
     protected override void OnParametersSet()
     {
-        if (!string.IsNullOrWhiteSpace(Form.SecretRef) && Envelope?.Secrets?.ContainsKey(Form.SecretRef.Trim()) != true) _otherSecret = true;
+        if (!string.IsNullOrWhiteSpace(Form.SecretRef) && !IsKnownSecret(Form.SecretRef.Trim())) _otherSecret = true;
     }
+
+    private bool IsKnownSecret(string reference) => ConnectionRules.LegacySecretRefs.Contains(reference, StringComparer.Ordinal)
+        || Envelope?.Secrets?.ContainsKey(reference) == true;
 
     private Task Changed() => OnChanged.InvokeAsync();
 
     private Task OnKind(ChangeEventArgs e)
     {
+        var oldKind = Form.Kind;
+        var generatedId = ConnectionRules.UniqueId(oldKind.ToLowerInvariant(), OtherIds);
         Form.SetKind(e.Value?.ToString() ?? "OpenAi");
+        if (Form.IsNew && Form.DisplayName == ConnectionRules.KindLabel(oldKind)) Form.DisplayName = ConnectionRules.KindLabel(Form.Kind);
+        if (Form.IsNew && Form.Id == generatedId) Form.Id = ConnectionRules.UniqueId(Form.Kind.ToLowerInvariant(), OtherIds);
+        _otherSecret = !string.IsNullOrWhiteSpace(Form.SecretRef) && !IsKnownSecret(Form.SecretRef);
         return Changed();
     }
 

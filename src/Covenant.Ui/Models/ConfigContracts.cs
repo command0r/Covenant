@@ -45,6 +45,24 @@ public sealed class CovenantConfigDto
     [JsonPropertyName("budgets")] public List<BudgetConfigDto> Budgets { get; set; } = [];
     [JsonPropertyName("settings")] public OperationalSettingsDto? Settings { get; set; }
     [JsonPropertyName("savings_baseline")] public ModelRefDto? SavingsBaseline { get; set; }
+    /// <summary>ADR-0015. Null = web search disabled (the default). Must round-trip: a console save never drops it.</summary>
+    [JsonPropertyName("web_search")] public WebSearchSettingsDto? WebSearch { get; set; }
+}
+
+/// <summary>Governed web search settings (ADR-0015). The API key is NOT here — it is a server-side secret
+/// (Tavily:ApiKey), reported only as configured/missing by GET /admin/web-search.</summary>
+public sealed class WebSearchSettingsDto
+{
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    /// <summary>1–3 (validated by the Host).</summary>
+    [JsonPropertyName("max_results")] public int MaxResults { get; set; } = 3;
+    /// <summary>1–30 seconds.</summary>
+    [JsonPropertyName("timeout_seconds")] public int TimeoutSeconds { get; set; } = 10;
+    /// <summary>Null = unknown price (never $0) — search is refused until it is set.</summary>
+    [JsonPropertyName("price_per_credit_usd")] public decimal? PricePerCreditUsd { get; set; }
+    [JsonPropertyName("price_basis")] public string? PriceBasis { get; set; }
+    /// <summary>yyyy-MM-dd</summary>
+    [JsonPropertyName("price_effective_date")] public string? PriceEffectiveDate { get; set; }
 }
 
 public sealed class ModelRefDto
@@ -95,6 +113,9 @@ public sealed class ApplicationDto
     [JsonPropertyName("granted_profiles")] public List<string> GrantedProfiles { get; set; } = [];
     [JsonPropertyName("default_profile")] public string? DefaultProfile { get; set; }
     [JsonPropertyName("max_output_tokens")] public int? MaxOutputTokens { get; set; }
+    /// <summary>Human name of the calling system (optional, display only; null ⇒ show the id).</summary>
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("description")] public string? Description { get; set; }
 }
 
 public sealed class WorkloadProfileDto
@@ -104,6 +125,8 @@ public sealed class WorkloadProfileDto
     /// <summary>Trusted baseline classification: Public | Internal | Pii | Phi.</summary>
     [JsonPropertyName("baseline")] public string? Baseline { get; set; }
     [JsonPropertyName("description")] public string? Description { get; set; }
+    /// <summary>ADR-0015: this profile may use web search. Only a Public-baseline profile may carry it.</summary>
+    [JsonPropertyName("web_search_allowed")] public bool WebSearchAllowed { get; set; }
 }
 
 public sealed class PolicyDto
@@ -250,6 +273,10 @@ public sealed class ApplicationSummaryDto
     [JsonPropertyName("console_testing")] public bool ConsoleTesting { get; set; }
     [JsonPropertyName("granted_profiles")] public List<string> GrantedProfiles { get; set; } = [];
     [JsonPropertyName("default_profile")] public string? DefaultProfile { get; set; }
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    /// <summary>Budget ids that apply to this application's requests (global, team, application).</summary>
+    [JsonPropertyName("budgets")] public List<string> Budgets { get; set; } = [];
 }
 
 /// <summary>POST /admin/playground/requests body (admin token; same response contract as /v1/chat/completions).</summary>
@@ -264,6 +291,53 @@ public sealed class PlaygroundRequestDto
     [JsonPropertyName("workflow")] public string? Workflow { get; set; }
     [JsonPropertyName("use_case")] public string? UseCase { get; set; }
     [JsonPropertyName("client_request_id")] public string? ClientRequestId { get; set; }
+    /// <summary>ADR-0015: off | auto | required. Null = off.</summary>
+    [JsonPropertyName("web_search")] public string? WebSearch { get; set; }
+    /// <summary>ADR-0015: explicit place for weather-type questions (≤100 chars). Never inferred.</summary>
+    [JsonPropertyName("location")] public string? Location { get; set; }
+}
+
+// ---- Governed web search (ADR-0015) ----
+
+/// <summary>GET /admin/web-search: readiness and setup steps. Never carries the key.</summary>
+public sealed class WebSearchStatusDto
+{
+    [JsonPropertyName("provider")] public string? Provider { get; set; }
+    [JsonPropertyName("endpoint")] public string? Endpoint { get; set; }
+    [JsonPropertyName("key_configured")] public bool KeyConfigured { get; set; }
+    [JsonPropertyName("egress_approved")] public bool EgressApproved { get; set; }
+    [JsonPropertyName("mode")] public string? Mode { get; set; }
+    [JsonPropertyName("mode_allows_search")] public bool ModeAllowsSearch { get; set; }
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    [JsonPropertyName("price_configured")] public bool PriceConfigured { get; set; }
+    [JsonPropertyName("price_per_credit_usd")] public decimal? PricePerCreditUsd { get; set; }
+    [JsonPropertyName("profiles_allowed")] public List<string> ProfilesAllowed { get; set; } = [];
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
+    [JsonPropertyName("ready")] public bool Ready { get; set; }
+    [JsonPropertyName("setup")] public List<string> Setup { get; set; } = [];
+}
+
+/// <summary>GET /admin/requests/{id}/search: what was ACTUALLY retrieved (transient, same TTL as traces). Shown
+/// separately from any citations the model wrote.</summary>
+public sealed class RequestSearchDto
+{
+    [JsonPropertyName("request_id")] public string RequestId { get; set; } = "";
+    [JsonPropertyName("mode")] public string? Mode { get; set; }
+    [JsonPropertyName("triggered")] public bool Triggered { get; set; }
+    [JsonPropertyName("cue")] public string? Cue { get; set; }
+    /// <summary>passed | refused | failed | skipped | cancelled</summary>
+    [JsonPropertyName("outcome")] public string? Outcome { get; set; }
+    [JsonPropertyName("reason_code")] public string? ReasonCode { get; set; }
+    [JsonPropertyName("retrieved_utc")] public DateTimeOffset? RetrievedUtc { get; set; }
+    [JsonPropertyName("duration_ms")] public double? DurationMs { get; set; }
+    [JsonPropertyName("sources")] public List<RequestSearchSourceDto> Sources { get; set; } = [];
+}
+
+public sealed class RequestSearchSourceDto
+{
+    [JsonPropertyName("title")] public string? Title { get; set; }
+    [JsonPropertyName("url")] public string? Url { get; set; }
+    [JsonPropertyName("retrieved_utc")] public DateTimeOffset? RetrievedUtc { get; set; }
 }
 
 // ---- Trace (ADR-0013) ----
@@ -273,7 +347,7 @@ public sealed class TraceEventDto
     [JsonPropertyName("seq")] public long Seq { get; set; }
     [JsonPropertyName("request_id")] public string? RequestId { get; set; }
     [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
-    /// <summary>auth | shape | classify | policy | cache | rate_limit | pause | budget | provider | attribution</summary>
+    /// <summary>auth | shape | classify | policy | cache | rate_limit | pause | budget | search | provider | attribution</summary>
     [JsonPropertyName("stage")] public string Stage { get; set; } = "";
     [JsonPropertyName("attempt_id")] public string? AttemptId { get; set; }
     /// <summary>pending | running | passed | refused | failed | cancelled | skipped</summary>

@@ -15,13 +15,21 @@ public sealed class Interop(IJSRuntime js)
     public ValueTask SessionRemoveAsync(string key) => js.InvokeVoidAsync(Prefix + "sessionRemove", key);
 
     public ValueTask<string> GetThemeAsync() => js.InvokeAsync<string>(Prefix + "getTheme");
-    public ValueTask<string> SetThemeAsync(string theme) => js.InvokeAsync<string>(Prefix + "setTheme", theme);
+    public event Action<string>? ThemeChanged;
+
+    public async ValueTask<string> SetThemeAsync(string theme)
+    {
+        var applied = await js.InvokeAsync<string>(Prefix + "setTheme", theme);
+        ThemeChanged?.Invoke(applied);
+        return applied;
+    }
 
     /// <summary>Browser-local console preference (allow-listed names only, e.g. "stream-default"); null when unset.</summary>
     public ValueTask<string?> PrefGetAsync(string name) => js.InvokeAsync<string?>(Prefix + "prefGet", name);
     public ValueTask<bool> PrefSetAsync(string name, string value) => js.InvokeAsync<bool>(Prefix + "prefSet", name, value);
 
     public ValueTask<bool> FocusElementAsync(string id) => js.InvokeAsync<bool>(Prefix + "focusElement", id);
+    public ValueTask ResetPageScrollAsync(string fragment) => js.InvokeVoidAsync(Prefix + "resetPageScroll", fragment);
     public ValueTask TrapFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "trapFocus", containerId);
     public ValueTask ReleaseFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "releaseFocus", containerId);
 

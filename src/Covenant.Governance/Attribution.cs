@@ -49,7 +49,7 @@ public sealed class AttributionStage(IPriceBook priceBook) : IPipelineStage
             {
                 // ADR-0009: billable call, provider reported no usage → estimate from text and CHARGE it,
                 // so unknown usage cannot escape the budget. Token counts stay unreported.
-                long inTok = TokenEstimate.FromChars(ctx.Request.Messages.Sum(m => m.Content.Length));
+                long inTok = TokenEstimate.FromChars(ctx.MessagesForModel.Sum(m => m.Content.Length));
                 long outTok = TokenEstimate.FromChars(resp.Message.Content.Length);
                 cost = inTok / 1000m * p.InputPer1K + outTok / 1000m * p.OutputPer1K;
                 ctx.CostBasis = p.InputPer1K == 0m && p.OutputPer1K == 0m ? "zero_priced" : "estimated_from_text";

@@ -131,7 +131,7 @@ public sealed class ProviderCallStage(
             ? snapshotClients
             : registry;
         var plan = PlanFor(ctx, route);
-        var messages = ctx.Request.Messages.Select(ToMeai).ToList();
+        var messages = ctx.MessagesForModel.Select(ToMeai).ToList();   // grounded by web search when it ran (ADR-0015)
 
         using var deadline = plan.DeadlineMs is not null ? CancellationTokenSource.CreateLinkedTokenSource(ct) : null;
         if (deadline is not null) deadline.CancelAfter(plan.DeadlineMs!.Value);

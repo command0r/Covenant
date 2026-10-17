@@ -68,7 +68,7 @@ and **Evidence recorded** → *Open in Requests* for the exact record.
 |---|---|---|---|
 | **A** Public → cloud (Hybrid) | Preset A, profile Public demo | classify passed (Public, no escalation); policy → openai primary; provider passed | reported usage × configured price ("estimated provider charge"); team `platform`, app `demo-app` |
 | **A′** same in Local-only | Preset A | Public → ollama | $0 configured provider charge — infrastructure excluded |
-| **B** Sensitive → local | Preset B (synthetic SSN 078-05-1120), profile Public demo | classify: **PII (baseline Public, escalated: US SSN pattern)**; policy → ollama only | zero-priced local; evidence shows the signal, never the prompt |
+| **B** Sensitive → local | Preset B (synthetic SSN 000-12-3456), profile Public demo | classify: **PII (baseline Public, escalated: US SSN pattern)**; policy → ollama only | zero-priced local; evidence shows the signal, never the prompt |
 | **B′** cloud override refused | B with Advanced → model `openai/<model>` | policy refused: target not eligible for PII; provider **skipped** | no provider call, $0, audited refusal |
 | **C** missing local | Models & connections → disable the Ollama connection → Preview → Save (new version) → run B | policy refused: no eligible destination; provider skipped; **no cloud call** | re-enable afterwards (another new version) |
 | **D** transient-failure fallback | Use an isolated approved failing provider fixture plus a healthy fallback; run A | first attempted provider fails transiently, then the approved fallback serves | two actual attempts in the drawer; failed attempt charged an estimate, plus the fallback charge |

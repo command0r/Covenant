@@ -600,9 +600,9 @@ public sealed class SnapshotAndPresetTests
         Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.Find('B')!.Prompt));
         Assert.Equal(DataClassification.Pii, Classify(ScenarioPresets.Find('C')!.Prompt));
         Assert.Equal(DataClassification.Pii, Classify(ConnectionLogic.GovernedTestPrompt()));
-        // The synthetic marker is the published sample SSN, and B/C are the same request (C differs only in the
+        // The synthetic marker is the explicitly invalid SSN-shaped 000-12-3456, and B/C are the same request (C differs only in the
         // operator's route state), so both escalate their Public baseline the same way.
-        Assert.Contains("078-05-1120", ScenarioPresets.SensitiveTicketPrompt, StringComparison.Ordinal);
+        Assert.Contains("000-12-3456", ScenarioPresets.SensitiveTicketPrompt, StringComparison.Ordinal);
         Assert.Equal(ScenarioPresets.Find('B')!.Prompt, ScenarioPresets.Find('C')!.Prompt);
         Assert.Equal("US SSN pattern", Detect(ScenarioPresets.SensitiveTicketPrompt).Signal);
         Assert.Equal("Public", ScenarioPresets.Find('B')!.PreferredBaseline);
@@ -1793,7 +1793,7 @@ public sealed class ConnectionFormTests
 
         var problems = f.Problems([], Secrets);
         Assert.Contains(problems, p => p.Contains("never treated as $0", StringComparison.Ordinal));
-        Assert.Contains(problems, p => p.StartsWith("Choose the server-side secret", StringComparison.Ordinal));
+        Assert.Equal("OpenAI:ApiKey", f.SecretRef); // standard provider reference is discoverable without manual typing
 
         m.Priced = true;
         Assert.Contains(f.Problems([], Secrets), p => p.Contains("enter both input and output prices", StringComparison.Ordinal));

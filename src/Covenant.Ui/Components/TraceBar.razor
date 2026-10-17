@@ -4,9 +4,10 @@
    (dashed, "Skipped"). Clicking a chip opens a small popover with state, reason code, duration and attempts;
    Escape closes it (and does not bubble, so presentation mode stays open). Review round 3: two rows of five stages up to
    1440 px (one row of ten only when wide — CSS container query); state and duration on separate lines so neither clips;
-   the chip's title carries the full text. *@
+   the chip's title carries the full text. Animation (§7): each state has its own keyframes, so a REAL state change (a new
+   event) swaps the animation and plays it once; a running stage pulses. prefers-reduced-motion disables all of it. *@
 
-<div class="trace @(Compact ? "compact" : "")" role="group" aria-label="Request trace">
+<div class="trace @(Compact ? "compact" : "") @(Replaying ? "replaying" : "")" role="group" aria-label="@(Replaying ? "Request trace replay" : "Request trace")">
     <ol class="trace-steps">
         @foreach (var step in Trace.Steps)
         {
@@ -18,7 +19,7 @@
                         title="@ChipTitle(s)" @onclick="() => Toggle(s.Stage)">
                     <Icon Name="@IconFor(s.State)" Size="16" />
                     <span class="trace-name">@Name(s)</span>
-                    <span class="trace-meta">@TraceModel.StateText(s.State)</span>
+                    <span class="trace-meta">@TraceModel.OutcomeText(s)</span>
                     @if (Duration(s) is { } dur)
                     {
                         <span class="trace-dur">@dur</span>
@@ -35,8 +36,10 @@
                 <strong>@sel.Label</strong>
                 <button type="button" class="btn ghost sm" @onclick="Close">Close</button>
             </div>
+            <span class="secondary">@TraceModel.Explain(sel.Stage)</span>
+            @if (TraceModel.OutcomeNote(sel) is { } note) { <span class="secondary">@note</span> }
             <dl class="facts">
-                <dt>State</dt><dd>@TraceModel.StateText(sel.State)</dd>
+                <dt>State</dt><dd>@TraceModel.OutcomeText(sel)</dd>
                 <dt>Reason code</dt><dd class="mono wrap-any">@(sel.ReasonCode ?? "None reported")</dd>
                 <dt>Duration</dt><dd>@(sel.DurationMs is { } d ? Fmt.Ms(d) + " (server-measured)" : "Not reported")</dd>
                 @if (sel.Target is { Length: > 0 } t && sel.Attempts.Count == 0)
@@ -77,6 +80,8 @@
     [Parameter] public TraceFeedState FeedState { get; set; }
     [Parameter] public string? Message { get; set; }
     [Parameter] public bool Compact { get; set; }
+    /// <summary>The view is a labelled replay of recorded events (TraceWithReplay), not a live request.</summary>
+    [Parameter] public bool Replaying { get; set; }
 
     private readonly string _id = "trace-" + Guid.NewGuid().ToString("n")[..8];
     private string? _open;
@@ -116,12 +121,12 @@
 
     /// <summary>Server-measured duration, only for a stage that actually ran.</summary>
     private static string? Duration(TraceStepView s)
-        => s.DurationMs is { } d && s.State is not (TraceStepState.Pending or TraceStepState.Skipped or TraceStepState.NotReported)
-            ? Fmt.Ms(d)
+        => s.State is not (TraceStepState.Pending or TraceStepState.Skipped or TraceStepState.NotReported)
+            ? TraceModel.DurationText(s.DurationMs)
             : null;
 
     private static string ChipTitle(TraceStepView s)
-        => Name(s) + " · " + TraceModel.StateText(s.State) + (Duration(s) is { } d ? " · " + d : "");
+        => Name(s) + " · " + TraceModel.OutcomeText(s) + (Duration(s) is { } d ? " · " + d : "");
 
     private string SourceText
     {

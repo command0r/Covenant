@@ -70,11 +70,16 @@ string configDir = StartupValidation.Trimmed(builder.Configuration["Config:Path"
 var egressAllowList = StartupEgress.BuildAllowList(builder.Configuration);
 var localEndpoints = StartupEgress.LocalEndpoints(builder.Configuration);   // ADR-0011 boundary binding (startup-only)
 var secretAvailable = StartupEgress.SecretAvailability(builder.Configuration);
+// ADR-0015: the Tavily key is a server-side secret (never a connection ref, never returned); search egress must already
+// be on the STARTUP allow-list — enabling search in the console never widens egress.
+bool searchKeyConfigured = !string.IsNullOrWhiteSpace(builder.Configuration[WebSearchEgress.SecretKey]);
+bool searchEgressApproved = egressAllowList.Contains(WebSearchEgress.Authority);
 ConfigValidationResult ValidateConfig(CovenantConfig c) => ConfigValidator.Validate(c, new ValidationEnvironment
 {
     EgressAllowList = egressAllowList,
     SecretAvailable = secretAvailable,
     LocalEndpoints = localEndpoints,
+    SearchKeyAvailable = searchKeyConfigured,
 });
 void AddValidationErrors(CovenantConfig c, ConfigValidationResult v)
 {
@@ -271,6 +276,8 @@ var rateCounterTeams = new RateCounter();
 var classifier = new RegexDataClassifier();
 var denyAllPolicy = new PolicyConfig { AllowedRoutes = new Dictionary<DataClassification, IReadOnlyList<RouteTarget>>() };
 var noPrices = new PriceBook(new Dictionary<string, (decimal, decimal)>());
+// ADR-0015: one bounded Tavily client (tests replace IWebSearchClient via DI). The key stays in this closure only.
+builder.Services.AddSingleton<IWebSearchClient>(_ => new TavilySearchClient(builder.Configuration[WebSearchEgress.SecretKey], searchEgressApproved));
 builder.Services.AddSingleton(sp =>
 {
     var liveRegistry = sp.GetRequiredService<IChatClientRegistry>();
@@ -285,6 +292,7 @@ builder.Services.AddSingleton(sp =>
         new RateLimitStage(rateCounterGlobal, rateCounterTeams, new RateLimitConfig()), // rate half of budget/rate; cache hits bypass (free)
         new PauseStage(killSwitch),                      // global provider-call pause (after cache: a hit is served during a pause)
         new BudgetStage(killSwitch, budgetLedger),       // ADR-0014: scopes + atomic reservation of attempt 1; gate for fallbacks
+        new WebSearchStage(sp.GetService<IWebSearchClient>(), classifier), // ADR-0015: governed, bounded web search (after auth/policy/pause/rate/budget)
         new ProviderCallStage(liveRegistry, providerHealth,
             preferRequestClients: liveRegistry is SnapshotChatClientRegistry,
             classifier: SdkProviderFailureClassifier.Shared), // approved fallback over the request's snapshot clients (ADR-0013)
@@ -876,6 +884,14 @@ app.MapConfigAdmin(new ConfigAdminServices
 
 app.MapPlayground(runtime, traceHub, consoleSubmissions, Authorized);    // ADR-0012 console inference
 app.MapTrace(traceHub, Authorized);                                       // ADR-0013 request trace
+app.MapGet("/admin/web-search", (HttpContext http) =>      // ADR-0015 status + setup (no secrets)
+{
+    if (!Authorized(http)) return Unauthorized();
+    var searchClient = http.RequestServices.GetRequiredService<IWebSearchClient>();
+    http.Response.Headers.CacheControl = "no-store";
+    return Results.Json(WebSearchApi.Status(runtime.Current, searchClient, searchKeyConfigured, searchEgressApproved),
+        WebSearchJsonContext.Default.WebSearchStatusView);
+});
 app.MapBudgets(runtime, budgetLedger, Authorized);                        // ADR-0014 budget state
 app.MapArchive(new AuditSegments(auditPath, anchorPath), Authorized, anchorPath);   // spec §5 archive + export
 

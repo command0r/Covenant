@@ -209,6 +209,11 @@ public static class ConfigAdminApi
                 ConsoleTesting = a.ConsoleTesting,
                 GrantedProfiles = a.GrantedProfiles.ToList(),
                 DefaultProfile = a.DefaultProfile,
+                DisplayName = a.DisplayName,
+                Description = a.Description,
+                Budgets = s.Runtime.Current.Config.Budgets
+                    .Where(b => b.Scope == "global" || b.Scope == "team:" + a.Team || b.Scope == "application:" + a.Id)
+                    .Select(b => b.Id).ToList(),
             }).ToList();
             return Json(list, ConfigJsonContext.Default.ListApplicationView);
         });

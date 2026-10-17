@@ -21,7 +21,8 @@ public sealed record ScenarioPreset(
         => form.Scenario == Letter
            && string.Equals(form.Prompt, Prompt, StringComparison.Ordinal)
            && form.Mode == RouteMode.Policy
-           && form.FreshNonce == FreshNonce;
+           && form.FreshNonce == FreshNonce
+           && form.WebSources == WebSourcesMode.Off;
 }
 
 /// <summary>What applying a preset did. <see cref="Note"/> explains anything the operator still has to choose.</summary>
@@ -34,12 +35,13 @@ public static class ScenarioPresets
         "Extract the priority from this ticket and answer only JSON {\"priority\":\"low|medium|high\"}: " +
         "'Printer on floor 3 is jammed again, not urgent.'";
 
-    /// <summary>The same ticket with a synthetic sensitive marker. 078-05-1120 is the published sample SSN (never
-    /// issued to a person); it matches RegexDataClassifier's US SSN rule, so detection escalates the Public
-    /// baseline to Pii — the request must then stay local, or be refused when no local destination is eligible.</summary>
+    /// <summary>The same ticket with a synthetic sensitive marker. 000-12-3456 is structurally invalid as an SSN (area
+    /// number 000 is never assigned), so it identifies no one; it still matches RegexDataClassifier's US SSN pattern, so
+    /// detection escalates the Public baseline to Pii — the request must then stay local, or be refused when no local
+    /// destination is eligible.</summary>
     public const string SensitiveTicketPrompt =
         "Extract the priority from this ticket and answer only JSON {\"priority\":\"low|medium|high\"}: " +
-        "'Printer on floor 3 is jammed again, not urgent. Reporter SSN 078-05-1120 (synthetic test marker).'";
+        "'Printer on floor 3 is jammed again, not urgent. Reporter SSN 000-12-3456 (synthetic test marker).'";
 
     public const string ExpectedLow = "{\"priority\":\"low\"}";
 
@@ -86,6 +88,8 @@ public static class ScenarioPresets
         form.Prompt = preset.Prompt;
         form.Mode = RouteMode.Policy;
         form.FreshNonce = preset.FreshNonce;
+        form.WebSources = WebSourcesMode.Off;
+        form.Location = "";
 
         if (apps is null) return new PresetApplyResult(null);
 

@@ -266,7 +266,13 @@ public sealed class AggregateCostBasisTests
     }
 }
 
+// This regression exercises a real cancellation timer. Keep it out of the concurrent
+// integration workload so shared CI runner starvation cannot consume its safety timeout.
+[CollectionDefinition("Deadline timing", DisableParallelization = true)]
+public sealed class DeadlineTimingCollection { }
+
 /// <summary>B3 — one finite deadline for the whole execution, also after content.</summary>
+[Collection("Deadline timing")]
 public sealed class DeadlineAfterContentTests
 {
     [Fact]
@@ -280,7 +286,7 @@ public sealed class DeadlineAfterContentTests
             [$"openai:{V2.CloudModel}"] = mini,
             ["openai:gpt-4o"] = strong,
         });
-        using var safety = new CancellationTokenSource(TimeSpan.FromSeconds(5));   // pre-fix: the stream hangs until this fires
+        using var safety = new CancellationTokenSource(TimeSpan.FromSeconds(30));  // safety only; policy deadline remains 300 ms
         var (ctx, e) = await rig.RunAsync(V2Rig.PublicPrompt, profile: "public-demo", stream: true, ct: safety.Token);
 
         Assert.False(safety.IsCancellationRequested);
