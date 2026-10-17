@@ -1,23 +1,30 @@
-# Covenant console — demo runbook
+# Covenant console v2 — demo runbook
 
-The demo runs entirely in the browser after startup. `demo.sh` stays an optional smoke/diagnostic tool.
+Everything after startup is done in the browser. `demo.sh` remains an optional `/v1` smoke tool. Scenario letters
+follow `docs/CONSOLE-V2-IMPLEMENTATION-SPEC.md` §8. Expected behaviour below describes the implementation; it is
+not a record of a run — see `docs/console-v2-acceptance.md` for what has actually been executed.
 
-## 1. Configuration (names only — values live in user-secrets / env / vault)
+## 1. Start an isolated demo profile
 
-Required in every mode: `Admin:Token`, `Budget:GlobalCapUsd`, `Auth:Keys:0:Key`, `Auth:Keys:0:Principal`,
-`Auth:Keys:0:Team` (the application key used by Playground is one of these keys — never the admin token).
+```
+scripts/run-local-demo.sh                    # Local-only: Ollama only, no cloud credential, port 5210
+PROFILE=hybrid OPENAI_API_KEY=… CLOUD_PRICE_IN_1M=… CLOUD_PRICE_OUT_1M=… scripts/run-local-demo.sh
+```
+The launcher checks Ollama and the model tag, publishes the self-contained binary, starts it on its own port with
+its own state directory (`/tmp/covenant-v2-demo-<profile>/`: audit log, configuration repository, budget ledger),
+and opens the console already connected (admin token in the URL fragment, read once, never sent to the server).
+It never touches another instance (e.g. :5100, :5201). State persists per profile; `FRESH=1` moves it aside
+(renamed, not deleted).
 
-| Mode | Settings |
-|---|---|
-| Cloud + local PII route (default) | `OpenAI:ApiKey`, optional `Local:Endpoint` + `Local:ModelId` |
-| Local-only (no cloud credential) | `Providers:Mode=local-only`, `Local:Endpoint`, `Local:ModelId`; **no** `OpenAI:ApiKey` / `Anthropic:ApiKey` |
-
-Optional: `Covenant:Environment` (header label, e.g. `vslive-demo`), `Providers:ProbeAllowList`
-(host:port list the wizard may probe; the applied Local:Endpoint is always allowed), `Cache:TtlSeconds`,
-`Audit:PromptPreviewChars` (0 = no prompt text in evidence), `Audit:AnchorPath` + `Audit:AnchorEvery`.
-
-`Local:Endpoint` is as seen **from the Covenant host** (`http://localhost:11434/v1` only if Ollama runs on the
-same machine/container as Covenant). `Local:ModelId` is the exact installed tag (`ollama list`) — nothing guesses it.
+**Seeds** (`Config:Seed`, first start only; afterwards the configuration repository wins — ADR-0011):
+- Workload profiles: `public-demo` (trusted baseline **Public**, synthetic public content only) and
+  `internal-default` (baseline **Internal**). Detection can only escalate a baseline (US-SSN pattern → PII;
+  MRN/diagnosis/patient-id keywords → PHI). It is a demonstration detector, not DLP.
+- Application `demo-app` (team `platform`, console testing allowed, granted both profiles).
+- Policies — Local-only: everything → `ollama/<tag>`. Hybrid: Public → `openai/<model>` with approved fallback
+  `ollama/<tag>`; Internal → local; PII & PHI → local only (cloud targets are never eligible for PII/PHI).
+- Budget: global, monthly, cap `CAP` (default $5). Hybrid cloud prices come only from the operator
+  (`CLOUD_PRICE_IN_1M`/`OUT_1M`, current provider list price); the seed refuses to start without them.
 
 ## 1a. Supported artifact (2026-10-17)
 
@@ -33,45 +40,54 @@ suppressed and the build is not claimed AOT-verified. Unblocking needs an AOT-cl
 replacing the Anthropic connector with an AOT-clean `IChatClient`, and moving the optional Neo4j projector out of the
 appliance image), then a clean `PublishAot=true` run. See ADR-0001 "Status update 2026-10-17".
 
-## 2. Startup and preflight (before the audience arrives)
+## 2. Preflight (before the audience arrives)
 
-```
-dotnet run --project src/Covenant.Host -c Release        # or the published binary
-```
-1. Open `http://localhost:5100/ui/` → Connect with the admin token (held in this tab only).
-2. Overview: no red alerts. Header shows the environment, "Console connected", fresh "Updated n s ago".
-3. Models & connections: applied local endpoint/model shown, **Registered: yes**. Run *Test connection*, then
-   the governed test with the application key → Served by `local:<tag>`. This also **warms the model**
-   (first Ollama load can take 10–60 s; do it before the talk).
-4. Evidence: chain "Internal consistency verified". If anchoring is configured, anchors written > 0.
-5. Settings → note prompt retention (`prompt_preview_chars`). Do **not** use Maintenance → Archive & reset as
-   a demo step; it archives evidence (budgets are NOT reopened — the ledger is independent of audit segments).
+1. Header shows the environment (`demo-local-only` / `demo-hybrid`), the **mode badge** (Local-only / Hybrid),
+   **Live**, and "New provider calls: running". No red alerts on Overview.
+2. **Models & connections**: the Ollama connection shows the selected tag; Test succeeds. Run one request from
+   the Playground to **warm the model** (first Ollama load can take 10–60 s) — the header local health turns ok.
+3. **Policies**: route view reads e.g. "Public → openai/gpt-4o-mini · fallback: ollama/qwen2.5-coder:7b";
+   "Internal → ollama/…"; "PII & PHI → ollama/… (local only)".
+4. **Budgets**: global budget, period id, spent/reserved/remaining, warning none.
+5. **Audit & evidence**: "Audit integrity verified" (internal consistency of the hash chain; not answer quality).
+6. Settings: prompt preview retention 0 (no prompt text in evidence) unless you deliberately change it.
 
-## 3. The A / B / C / D sequence (Playground, optionally Presentation mode)
+## 3. Walkthrough (Playground; Presentation mode for the projector)
 
-Paste the application key once (memory only). Presets only fill the form; Run sends a real request.
+"Run as" **demo-app**; pick the profile; presets only fill the form — Run sends a real governed request. Each run
+shows the live trace (auth → shape → classify → policy → cache → rate limit → pause → budget → provider (per
+attempt) → attribution), the outcome, destination (Local/Cloud tag), final classification, tokens, cost basis,
+and **Evidence recorded** → *Open in Requests* for the exact record.
 
-| Run | Expected outcome | Evidence to show |
-|---|---|---|
-| **A** normal request | Served (cloud mode: cheapest permitted cloud model; local-only: `local:<tag>`) | Selected = attempted = served; cost basis |
-| **B** unapproved model | HTTP 403 Policy denied; provider attempted: **None** | Stopped at `policy`; classification evaluated |
-| **C** synthetic PII | Served by `local:<tag>`; without a local route: 403 at `provider`, attempted None | Signal "US SSN pattern"; never a cloud model |
-| **D** pause → run → resume → run | 403 Paused (stopped at `pause`), then Served | Fresh nonce each run, so never a cache hit |
+| | Do | Expected decision / trace | Cost & evidence |
+|---|---|---|---|
+| **A** Public → cloud (Hybrid) | Preset A, profile Public demo | classify passed (Public, no escalation); policy → openai primary; provider passed | reported usage × configured price ("estimated provider charge"); team `platform`, app `demo-app` |
+| **A′** same in Local-only | Preset A | Public → ollama | $0 configured provider charge — infrastructure excluded |
+| **B** Sensitive → local | Preset B (synthetic SSN 078-05-1120), profile Public demo | classify: **PII (baseline Public, escalated: US SSN pattern)**; policy → ollama only | zero-priced local; evidence shows the signal, never the prompt |
+| **B′** cloud override refused | B with Advanced → model `openai/<model>` | policy refused: target not eligible for PII; provider **skipped** | no provider call, $0, audited refusal |
+| **C** missing local | Models & connections → disable the Ollama connection → Preview → Save (new version) → run B | policy refused: no eligible destination; provider skipped; **no cloud call** | re-enable afterwards (another new version) |
+| **D** approved fallback | (fixture) Policies → pause the primary route **or** stop the primary provider → run A | provider attempt 1 failed/paused-skipped → attempt 2 on the approved fallback | both attempts in the drawer; failed attempt charged its estimate, never $0 |
+| **F** budget | Budgets → lower the cap below spend → Preview → Save → run A | budget refused ("would exceed cap") | spend preserved across the edit; raise the cap again (audited new version) |
+| **G** exact cache | Settings → cache TTL 60 → Save; run the same request twice | 2nd run: cache passed, rate limit/pause/budget/provider **skipped (cache_hit)** | $0 no provider call; drawer names the original served connection/model; any config change invalidates |
+| **H** policy editing | Policies → pause the primary route → Save; run A; pause the whole policy → Save; run A; resume → Save | route paused → fallback serves; policy paused → refused; resumed → primary again | each change is a new version (history + rollback available) |
+| **Pause** | Header → Pause new provider calls → run D (fresh nonce) → Resume → run D | pause stage refused → then served | cache hits are not stopped by the pause (documented) |
+| **Auth** | Applications & workload profiles → disable console testing for demo-app → Save → Run | auth refused (governed 403, audited) | re-enable afterwards |
 
-Auth failure demo: clear the key and Run → 401, classification **Not evaluated — stopped at auth**.
-Every result has *View request evidence* → *Open in Requests*: the exact record by request id.
+Stage timings are measured by the server; skipped stages are shown as skipped, never animated as if they ran.
 
 ## 4. Recovery
 
 | Symptom | Action |
 |---|---|
-| Header "Stale" / "Connection lost — retrying" | Covenant process down or network: check terminal; console reconnects by itself |
-| Local route **degraded** (last success kept) | Ollama stopped/unreachable: restart Ollama, re-run the governed test; protected requests are refused meanwhile (no cloud fallback) |
-| C refused at `provider` | Local route not registered: Models & connections shows why (not configured / wrong tag) |
-| Everything 403 Paused | Header Resume (pause is global and persists across pages) |
-| Budget exhausted | Raise `Budget:GlobalCapUsd` and restart — not Archive & reset |
-| Token rejected | Re-enter the admin token (sessionStorage is per tab) |
+| Header **Stale** / connection lost | Covenant stopped? Check the launcher terminal / `$STATE/server.log`; the console reconnects by itself |
+| Local health **degraded** | Ollama down/unreachable: restart Ollama; protected requests are refused meanwhile (no cloud fallback for Internal/PII/PHI) |
+| Save shows "Configuration changed since you started editing" | Another tab/operator applied a version: Reload, re-apply your change |
+| Save refused with field errors | Fix the highlighted fields; the active version is unchanged |
+| Everything refused at **pause** | Header → Resume |
+| Budget exhausted | Raise the cap (Budgets → Save). Archive/reset does **not** reopen budgets (ADR-0014) |
+| Startup refused | The launcher prints Covenant's reason (e.g. missing hybrid prices, corrupt journal — never auto-repaired silently) |
 
 ## 5. Optional: Open WebUI as a client
-Base URL `http://<covenant-host>:5100/v1`, API key = a Covenant **application** key. Text chat only; streaming
-supported. Pointing Open WebUI at Ollama directly bypasses Covenant.
+Base URL `http://localhost:<PORT>/v1`, API key = the launcher's **/v1 app key** (never the admin token); optional
+header `X-Covenant-Profile` selects a granted profile. Text chat only; streaming supported. Pointing Open WebUI at
+Ollama directly bypasses Covenant.

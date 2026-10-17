@@ -229,7 +229,8 @@ public sealed class LegacyImportTests
     [Fact]
     public void Demo_seeds_use_the_restrictive_defaults()
     {
-        var cfg = Config(("OpenAI:ApiKey", "sk"), ("Local:Endpoint", "http://localhost:11434/v1"), ("Local:ModelId", "qwen3:8b"), ("Budget:GlobalCapUsd", "3"));
+        var cfg = Config(("OpenAI:ApiKey", "sk"), ("Local:Endpoint", "http://localhost:11434/v1"), ("Local:ModelId", "qwen3:8b"), ("Budget:GlobalCapUsd", "3"),
+            ("Pricing:gpt-4o-mini:InPer1M", "0.15"), ("Pricing:gpt-4o-mini:OutPer1M", "0.60"));
         var errors = new List<string>();
         var hybrid = DemoSeeds.Build(DemoSeeds.Hybrid, cfg, DateTimeOffset.UtcNow, errors);
         var local = DemoSeeds.Build(DemoSeeds.LocalOnly, cfg, DateTimeOffset.UtcNow, errors);
@@ -249,5 +250,47 @@ public sealed class LegacyImportTests
         Assert.Equal("ollama/qwen3:8b", PolicyEngineV2.Summary(new RuntimeSnapshot(local), DataClassification.Public, "public-demo"));
         Assert.Equal(BudgetPeriod.Monthly, hybrid.Budgets.Single().Period);
         Assert.Equal(3m, hybrid.Budgets.Single().CapUsd);
+    }
+
+    // Reviewer finding (T09): the hybrid seed accepted any OpenAI:ModelId but always seeded gpt-4o-mini's 0.15/0.60
+    // "provider-list" rates — a custom model silently inherited another model's price, corrupting budget claims.
+    [Fact]
+    public void Hybrid_seed_refuses_a_cloud_model_without_explicit_model_bound_prices()
+    {
+        var cfg = Config(("OpenAI:ApiKey", "sk"), ("OpenAI:ModelId", "my-custom-model"), ("Local:Endpoint", "http://localhost:11434/v1"),
+            ("Local:ModelId", "qwen3:8b"), ("Budget:GlobalCapUsd", "3"));
+        var errors = new List<string>();
+        var seeded = DemoSeeds.Build(DemoSeeds.Hybrid, cfg, DateTimeOffset.UtcNow, errors);
+
+        Assert.Contains(errors, e => e.StartsWith("Pricing:my-custom-model:InPer1M", StringComparison.Ordinal));
+        var model = seeded.Connections.Single(c => c.Id == "openai").Models.Single();
+        Assert.Null(model.Price);                                                    // never 0.15/0.60 inherited
+    }
+
+    [Fact]
+    public void Hybrid_seed_retains_supplied_prices_basis_and_date_for_a_custom_model()
+    {
+        var cfg = Config(("OpenAI:ApiKey", "sk"), ("OpenAI:ModelId", "my-custom-model"), ("Local:Endpoint", "http://localhost:11434/v1"),
+            ("Local:ModelId", "qwen3:8b"), ("Budget:GlobalCapUsd", "3"),
+            ("Pricing:my-custom-model:InPer1M", "1.25"), ("Pricing:my-custom-model:OutPer1M", "5.5"),
+            ("Pricing:my-custom-model:Basis", "provider list price"), ("Pricing:my-custom-model:EffectiveDate", "2026-10-01"));
+        var errors = new List<string>();
+        var seeded = DemoSeeds.Build(DemoSeeds.Hybrid, cfg, DateTimeOffset.UtcNow, errors);
+
+        Assert.Empty(errors);
+        var price = seeded.Connections.Single(c => c.Id == "openai").Models.Single().Price!;
+        Assert.Equal(1.25m, price.InputPer1M);
+        Assert.Equal(5.5m, price.OutputPer1M);
+        Assert.Equal("provider list price", price.Basis);
+        Assert.Equal(new DateOnly(2026, 10, 1), price.EffectiveDate);
+    }
+
+    [Fact]
+    public void Local_only_seed_needs_no_cloud_price()
+    {
+        var cfg = Config(("Local:Endpoint", "http://localhost:11434/v1"), ("Local:ModelId", "qwen3:8b"), ("Budget:GlobalCapUsd", "3"));
+        var errors = new List<string>();
+        DemoSeeds.Build(DemoSeeds.LocalOnly, cfg, DateTimeOffset.UtcNow, errors);
+        Assert.Empty(errors);
     }
 }

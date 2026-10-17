@@ -257,6 +257,8 @@ public sealed class RestartableHybridFactory(string auditPath, bool cleanup = tr
     {
         builder.UseEnvironment("Production");
         builder.UseSetting("Config:Seed", "demo-hybrid");
+        builder.UseSetting($"Pricing:{V2.CloudModel}:InPer1M", "0.15");    // explicit, model-bound (seed never assumes)
+        builder.UseSetting($"Pricing:{V2.CloudModel}:OutPer1M", "0.60");
         builder.UseSetting("OpenAI:ApiKey", HybridSeedFactory.Secret);
         builder.UseSetting("Anthropic:ApiKey", "");
         builder.UseSetting("Local:Endpoint", "http://127.0.0.1:11434/v1");

@@ -300,6 +300,34 @@ public static class DemoSeeds
 
     public static bool IsKnown(string? seed) => seed is LocalOnly or Hybrid;
 
+    /// <summary>Explicit model-bound price for the hybrid seed's cloud model: Pricing:&lt;model&gt;:InPer1M and :OutPer1M
+    /// (USD per million tokens, required), :Basis (default "operator-supplied") and :EffectiveDate (yyyy-MM-dd, optional).
+    /// Missing or invalid ⇒ a startup error; never a default.</summary>
+    internal static PriceConfig? SeedCloudPrice(IConfiguration config, string model, string seed, List<string> errors)
+    {
+        var section = config.GetSection($"Pricing:{model}");
+        bool okIn = decimal.TryParse(section["InPer1M"], System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var inPer1M) && inPer1M >= 0m;
+        bool okOut = decimal.TryParse(section["OutPer1M"], System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out var outPer1M) && outPer1M >= 0m;
+        if (!okIn || !okOut)
+        {
+            errors.Add($"Pricing:{model}:InPer1M / OutPer1M — required by Config:Seed={seed} for the cloud model '{model}' " +
+                       "(USD per 1M tokens from the provider's current price list; no default price is assumed)");
+            return null;
+        }
+        DateOnly? effective = null;
+        if (section["EffectiveDate"] is { Length: > 0 } d)
+        {
+            if (DateOnly.TryParseExact(d, "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var parsed)) effective = parsed;
+            else errors.Add($"Pricing:{model}:EffectiveDate — expected yyyy-MM-dd, got '{d}'");
+        }
+        return new PriceConfig
+        {
+            InputPer1M = inPer1M, OutputPer1M = outPer1M,
+            Basis = section["Basis"] is { Length: > 0 } b ? b.Trim() : "operator-supplied",
+            EffectiveDate = effective,
+        };
+    }
+
     public static CovenantConfig Build(string seed, IConfiguration config, DateTimeOffset now, List<string> errors)
     {
         bool hybrid = seed == Hybrid;
@@ -309,6 +337,10 @@ public static class DemoSeeds
         if (localModel is not { Length: > 0 }) errors.Add($"Local:ModelId       — required by Config:Seed={seed} (the exact installed model tag)");
         localModel ??= "local-model";
         string cloudModel = config["OpenAI:ModelId"] ?? "gpt-4o-mini";
+        // Hybrid seeds never assume a cloud price (prices change and differ per model): the operator supplies the
+        // model-bound rates explicitly, with their basis/date, or the seed refuses to start. No default-model price
+        // is ever inherited by another model, so demo budget claims rest on stated numbers only.
+        PriceConfig? cloudPrice = hybrid ? SeedCloudPrice(config, cloudModel, seed, errors) : null;
 
         var connections = new List<ConnectionConfig>
         {
@@ -328,7 +360,7 @@ public static class DemoSeeds
             {
                 Id = "openai", DisplayName = "OpenAI", Kind = ProviderKind.OpenAi, Boundary = Boundary.Cloud,
                 Endpoint = StartupValidation.Trimmed(config["OpenAI:Endpoint"]), Enabled = true, SecretRef = "OpenAI:ApiKey",
-                Models = [new ModelConfig { ModelId = cloudModel, Price = new PriceConfig { InputPer1M = 0.15m, OutputPer1M = 0.60m, Basis = "provider-list" } }],
+                Models = [new ModelConfig { ModelId = cloudModel, Price = cloudPrice }],
             });
             publicTargets.Add(new PolicyTarget { ConnectionId = "openai", ModelId = cloudModel });
         }
