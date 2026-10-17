@@ -129,8 +129,9 @@ public sealed class EvidenceReport
     [JsonPropertyName("last_anchor_utc")] public DateTimeOffset? LastAnchorUtc { get; init; }
 }
 
-/// <summary>Durable budgets without new infrastructure: the audit log is the event store, the ledger its
-/// projection rebuilt by replay at boot. Outgrowing replay is the trigger for the audit-store ADR — not before.</summary>
+/// <summary>Pre-v2 projection of audit spend into an in-memory ledger (legacy compositions and tests). Since ADR-0014
+/// the Host no longer rebuilds budgets from the audit log: the persistent budget ledger is the source of accrued spend
+/// (the current audit segment is imported into it once, when no ledger exists).</summary>
 public static class LedgerReplay
 {
     public static void Rebuild(IReadOnlyList<AuditEntry> entries, Covenant.Governance.ISpendLedger ledger)

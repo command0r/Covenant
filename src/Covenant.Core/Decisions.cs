@@ -72,13 +72,45 @@ public sealed record AuditEntry(
     string? OperatorRef = null,
     string? ApplicationId = null,
     string? ProfileId = null,
-    DataClassification? BaselineClassification = null);
+    DataClassification? BaselineClassification = null,
+    // ---- v3 continued (ADR-0013/0014): provider attempts, compact trace, budget reservation/settlement.
+    // Null on legacy compositions (no bound configuration) and on every pre-T04 line → "Not recorded".
+    IReadOnlyList<AuditAttempt>? Attempts = null,
+    IReadOnlyList<AuditTraceStep>? Trace = null,
+    decimal? ReservedUsd = null,
+    decimal? SettledUsd = null);
+
+/// <summary>One provider attempt in an audit v3 record (ADR-0013): which connection/model was called, how it ended,
+/// the bounded error class, its measured duration and its charge (ADR-0014). Outcome ∈ served | failed | cancelled.
+/// ErrorClass ∈ connect | timeout | 429 | 5xx | non_retryable | client_cancelled | client_disconnected (bounded codes,
+/// never provider free text). Overrun = the reported charge exceeded the attempt's reservation (settled in full).</summary>
+public sealed record AuditAttempt(
+    string AttemptId,
+    string ConnectionId,
+    string ModelId,
+    string Outcome,
+    string? ErrorClass,
+    double DurationMs,
+    decimal? CostUsd,
+    string? CostBasis,
+    decimal? ReservedUsd = null,
+    bool? Overrun = null);
+
+/// <summary>Compact persisted trace step (ADR-0013): stage, terminal state and measured duration. Provider steps are
+/// per attempt (AttemptId). No content, no credentials, no provider free text — ReasonCode is a bounded code.</summary>
+public sealed record AuditTraceStep(
+    string Stage,
+    string State,
+    double? DurationMs = null,
+    string? AttemptId = null,
+    string? ReasonCode = null);
 
 /// <summary>Not a property on AuditEntry: a computed property would be serialized into every audit line.</summary>
 public static class AuditEntryKinds
 {
     public const string Request = "request";
     public const string ConfigActivated = "config.activated";
+    public const string BudgetRecovered = "budget.recovered";
 
     /// <summary>True for inference records (legacy lines have no EventType ⇒ request).</summary>
     public static bool IsRequest(this AuditEntry entry) => entry.EventType is null or Request;

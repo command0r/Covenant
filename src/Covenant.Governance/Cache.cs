@@ -66,10 +66,15 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
             return;
         }
 
+        // v2 key (ADR-0013): SHA-256 over application, team, profile, FINAL classification, configuration version, the
+        // ordered approved candidates (connection id + model id), the enforced output bound sent to the provider and the
+        // message content — so a new activation, another identity or another eligible route set never reuses an entry.
+        IReadOnlyList<RouteTarget> candidates = ctx.Policy!.Candidates.Count > 0 ? ctx.Policy.Candidates : new[] { route };
         var key = ctx.Configuration is { } cfg
-            ? Key(string.Join('\u001e', "v2", cfg.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    ctx.ApplicationId ?? "", ctx.ProfileId ?? "", ctx.Classification.ToString(), route.AdapterKey, ctx.Identity.Tags.Team),
-                route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens)
+            ? Key(string.Join('\u001e', "v3", cfg.Version.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ctx.ApplicationId ?? "", ctx.ProfileId ?? "", ctx.Classification.ToString(), ctx.Identity.Tags.Team,
+                    string.Join('\u001d', candidates.Select(c => c.AdapterKey + "/" + c.ModelId))),
+                route.ModelId, ctx.Request.Messages, RequestBounds.OutputTokenBound(ctx, route))
             : Key(ctx.Identity.Tags.Team, route.ModelId, ctx.Request.Messages, ctx.Request.MaxOutputTokens);
         if (cache.TryGet(key, out var hit))
         {

@@ -28,9 +28,14 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
             // Final outcome, not any single stage's opinion: only a request that produced a response
             // was allowed. Denied anywhere, or errored with no response → recorded as a denial.
             bool served = !ctx.IsDenied && ctx.Response is not null;
+            ctx.CompleteTrace();   // stages never entered → skipped (not_reached | cache_hit) before evidence is written
             int previewChars = ctx.Configuration?.Config.Settings.PromptPreviewChars ?? promptPreviewChars;
             var id = ctx.Request.RequestId ?? $"req_{Guid.NewGuid():n}";
             var usage = ctx.Response?.Usage ?? ctx.FailedCallUsage ?? Usage.Empty;
+            // ADR-0014: the request's charge is everything settled across its attempts (a failed primary plus the served
+            // fallback), not only the served attempt; Attempts[] carries the breakdown.
+            if (ctx.SettledUsd is { } settled && ctx.Attempts.Count > 0) usage = usage with { CostUsd = settled };
+            bool v3 = ctx.Configuration is not null;
             var entry = new AuditEntry(
                 Id: id,
                 TimestampUtc: _clock.GetUtcNow(),
@@ -71,7 +76,11 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 OperatorRef: ctx.OperatorRef,
                 ApplicationId: ctx.ApplicationId,
                 ProfileId: ctx.ProfileId,
-                BaselineClassification: ctx.BaselineClassification);
+                BaselineClassification: ctx.BaselineClassification,
+                Attempts: v3 ? ctx.Attempts.Select(a => a.ToAudit()).ToList() : null,
+                Trace: v3 ? ctx.CompactTrace() : null,
+                ReservedUsd: v3 ? ctx.ReservedUsd : null,
+                SettledUsd: v3 ? ctx.SettledUsd : null);
 
             // CancellationToken.None: a cancelled request must still produce its audit record.
             await sink.EnqueueAsync(entry, CancellationToken.None);

@@ -260,6 +260,8 @@ public sealed class RequestsPage
 {
     [JsonPropertyName("segment")] public required SegmentInfo Segment { get; init; }
     [JsonPropertyName("items")] public required List<AuditEntry> Items { get; init; }
+    /// <summary>Opaque newest-first position of the next page of the SAME segment; null on the last page.</summary>
+    [JsonPropertyName("next_cursor")] public string? NextCursor { get; init; }
 }
 
 public sealed class SegmentInfo
@@ -271,6 +273,9 @@ public sealed class SegmentInfo
     [JsonPropertyName("last_utc")] public DateTimeOffset? LastUtc { get; init; }
     /// <summary>Control-plane events in this segment (config.activated, …), excluded from Entries/items (v3).</summary>
     [JsonPropertyName("events")] public int Events { get; init; }
+    /// <summary>Opaque segment id (GET /admin/audit/segments): "current" or an archived segment's id.</summary>
+    [JsonPropertyName("id")] public string? Id { get; init; }
+    [JsonPropertyName("label")] public string? Label { get; init; }
 }
 
 public sealed class CatalogReport

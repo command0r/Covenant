@@ -129,12 +129,47 @@ Governed refusals (application disabled / not console-testable / profile not gra
 `GET /admin/applications` → `[{ "id","team","enabled","console_testing","granted_profiles","default_profile" }]`
 (no credentials).
 
+Implementation details (T05, binding):
+- Admin token required (401 `{error:"unauthorized"}` otherwise). Every answer — including 400 — carries
+  `X-Covenant-Request-Id`; for 400 the id names nothing (no audit record, no trace). On 409 the header and `request_id`
+  are the ORIGINAL request's id (the duplicate is not run; window 10 min, claimed atomically before the pipeline runs).
+- 400 rules: malformed JSON; `application_id` missing/blank or > 64 chars; `profile_id` > 64; `messages` missing/empty
+  or > 200; a null message; `role` not `system|user|assistant`; `content` not a string; total content > 200 000 chars;
+  `max_tokens` < 1; `model` > 200 chars; `client_request_id` not 1–128 chars of `[A-Za-z0-9-_.:]`. Body:
+  `{ "error":"invalid_request", "reason":"… — rejected before governance; no evidence record" }`.
+- An unknown `application_id` is a governed 403 at `auth` ("application 'x' is not configured"), audited.
+- Audit: `EntryPoint="console"`, `OperatorRef="shared-admin-token"`, `ApplicationId`, `Tags.Team` = the application's
+  team, `Principal="console:<application id>"`, `Tags.Workflow`/`UseCase` from the body (default `console`/`playground`,
+  bounded to 64 chars).
+- Cancellation (client disconnect) propagates to the provider call (`RequestAborted`); the record is `Cancelled`.
+
 ## Trace (ADR-0013)
 `GET /admin/requests/{id}/trace` → `{ "request_id","config_version","complete":bool,"events":[TraceEvent] }`;
 404 unknown/expired. `GET /admin/requests/{id}/trace/stream` → SSE `id: <seq>` + `data: TraceEvent`, replay then
 live, honours `Last-Event-ID`; ends with `event: end`. `TraceEvent` = `{ "seq","stage","attempt_id"?,"state",
 "ts_utc","duration_ms"?,"reason_code"?,"target"? }`. Stages: `auth, shape, classify, policy, cache, rate_limit,
 pause, budget, provider, attribution`. States: `pending, running, passed, refused, failed, cancelled, skipped`.
+
+Implementation details (T05, binding — supersedes "404 unknown/expired" above):
+- Both endpoints: admin token (401); id must be ≤ 64 chars of `[A-Za-z0-9_-]` (400 `invalid_id`); **404**
+  `{error:"not_found"}` = never traced by this process; **410** `{error:"expired"}` = traced but past retention (or evicted).
+- Every request is traced — `/v1/chat/completions`, `/v1/messages` and console inference — in a buffer created BEFORE the
+  pipeline starts; `seq` is monotonic from 1. Each event also carries `request_id` and `config_version`. Null fields are
+  omitted. Snapshot adds `"truncated":bool` (more than 64 events were emitted; later ones dropped).
+- Stage events: `running` on entry; `passed` (with `duration_ms`, Stopwatch-measured) when the stage hands over to the next
+  one — or returns without denying (a cache hit: `reason_code:"cache_hit"`); `refused` / `failed` (upstream) / `cancelled`
+  on a short-circuit with a bounded `reason_code`; after the run, every stage never entered is `skipped` with
+  `not_reached` or `cache_hit`. Provider attempts emit `provider` events with `attempt_id` (`att_1`, `att_2`, …) and
+  `target` (`connection/model`); a fallback's pause and budget re-checks emit `pause`/`budget` events with its `attempt_id`.
+  The audit stage itself is not traced.
+- `reason_code` vocabulary (bounded, never provider text or content): `cache_hit`, `not_reached`, `paused`,
+  `budget_exceeded`, `governance_denied`, `unauthenticated`, `rate_limited`, `unsupported`, `upstream_failure`,
+  `client_cancelled`, `client_disconnected`, `no_client`, `error`, and the failure classes `connect`, `timeout`, `429`,
+  `5xx`, `non_retryable`.
+- Stream: replay of `seq > Last-Event-ID`, then live; `: keep-alive` comment every 15 s while idle; `event: end` +
+  `data: {}` once complete. Clients de-duplicate by `seq`.
+- Bounds: ≤ 64 events/request, ≤ 2 000 requests (oldest completed evicted first), retention = the request's configuration
+  `trace_retention_minutes` (default 10) after completion. In memory only; the audit record keeps the compact summary.
 
 ## Policy simulator
 `POST /admin/policies/simulate` `{ "application_id","profile_id"?,"prompt","model"?,"config"? }` → dry-run
@@ -147,6 +182,25 @@ never records spend or audit. Labelled "Dry run" in the UI.
 "warn_at","warning":"none|warn|critical|exceeded","enforcement" }]`; caps are edited through `/admin/config`.
 `GET /admin/budgets/{id}/requests?limit=` → contributing settled request ids and amounts.
 
+Implementation details (T04, binding):
+- `period` = `none|daily|monthly`; `period_id` = `all` / `yyyy-MM-dd` / `yyyy-MM` (UTC); additive `period_start_utc`,
+  `period_end_utc` (null for `none`). `spent_usd` = settled charges of the budget's SCOPE inside its current window (the
+  ledger records scopes, never budget ids — renaming a budget or changing its period/cap never resets accrual).
+  `reserved_usd` = open reservations of that scope (in-flight attempts). `remaining_usd = max(0, cap − spent − reserved)`.
+  `enforcement` = `hard|warn-only`.
+- `warning`: `exceeded` when spent ≥ cap (cap 0: only when something was spent); `critical` at ≥ the highest `warn_at`
+  fraction; `warn` at ≥ the lowest; else `none`. Status only — warnings never block; warn-only budgets never block.
+- `/admin/budgets/{id}/requests?limit=` (default 100, max 1000) → `{ "budget_id","scope","period_id","items":[{ "request_id",
+  "attempt_id","kind":"settle|settle-recovered|legacy-import","amount_usd","ts_utc","overrun" }] }` newest first;
+  404 for an id not in the active configuration.
+- Ledger: `Budget:LedgerPath` (startup-only; default `<Audit:Path>.ledger.jsonl`). `POST /admin/reset` archives the audit
+  log only — it never reopens a budget. `/admin/status.budget` reads the same ledger (global budget's period; team spend
+  over that period).
+- A hard-budget refusal is a governed 403 at stage `budget` (reason names the budget, scope, period, spent, reserved, the
+  attempt's bound and the cap). Reservation bound per attempt = (UTF-8 bytes of all message contents + 16 per message) ×
+  input price + min(request `max_tokens`, application `max_output_tokens` (default 1024), model `max_output_tokens`) ×
+  output price; that output bound is sent to the provider. Explicit $0 (local) prices reserve nothing.
+
 ## Requests archive (spec §5)
 `GET /admin/requests?limit=&cursor=&segment=` — `cursor` is an opaque newest-first position; `segment` is an id
 from `GET /admin/audit/segments` (`[{ "id","label","entries","first_utc","last_utc","chain_valid" }]`, the current
@@ -154,9 +208,49 @@ segment plus `*.archived` siblings of the audit file — ids only, never caller-
 `GET /admin/requests/{id}/export` → `{ request record, attempts, trace summary, config_version, integrity }` with no
 prompt/response content.
 
+Implementation details (T06, binding):
+- Segment ids: `current`, or `a-<16 hex>` (SHA-256 of the archive's file name) for `<audit file>.yyyyMMdd-HHmmss.archived`
+  siblings, newest first. Segment view adds `current`:bool, `events` (control-plane events, not counted in `entries`),
+  `archived_utc`. No paths. Archived chains are verified with their archived anchor file when one exists.
+- `GET /admin/requests`: `segment` default `current`; an id outside the enumerated set (path, `..`, unknown) → **400**
+  `{error:"unknown_segment"}`. `limit` 1–1000 (default 200). Response = the existing `RequestsPage` plus
+  `segment.id`, `segment.label` and `next_cursor` (null on the last page). A cursor encodes its segment; `cursor` alone is
+  enough for the next page; a malformed cursor or one for another segment → **400** `{error:"invalid_cursor"}`.
+- `GET /admin/requests/{id}/export?segment=` (default: search current, then archived newest first) → `{ "exported_utc",
+  "request_id", "segment": SegmentView, "config_version", "record": AuditEntry (PascalCase, `PromptPreview` removed),
+  "attempts", "trace", "integrity": { "segment_id","chain_valid","chain_failure","line","previous_hash","entry_hash",
+  "anchor_configured","status":"verified|unverified" }, "content_included": false }`; 404 not found; 400 bad id/segment.
+  The prompt SHA-256 fingerprint stays (it proves which prompt, not what).
+
 ## Audit record v3 (additive)
 `EventType` (null/"request" | "config.activated" | "budget.recovered"), `ConfigVersion`, `EntryPoint`
 ("v1" | "console"), `OperatorRef`, `ApplicationId`, `ProfileId`, `BaselineClassification`, `Attempts[]`
 (`{AttemptId, ConnectionId, ModelId, Outcome, ErrorClass, DurationMs, CostUsd, CostBasis}`), `Trace[]`
 (`{Stage, State, DurationMs}`), `ReservedUsd`, `SettledUsd`. Legacy lines verify unchanged; absent = Not recorded.
 Event entries (`EventType` ≠ request) are excluded from request counts, spend and FinOps.
+
+Implementation details (T04–T06, binding):
+- `Attempts[]` items also carry `ReservedUsd` and `Overrun` (bool, reported charge above the reservation — settled in
+  full). `Outcome` ∈ `served|failed|cancelled`; `ErrorClass` ∈ `connect|timeout|429|5xx|non_retryable|client_cancelled|
+  client_disconnected`. Only STARTED attempts appear (a fallback refused at pause/budget never started; see `Trace`).
+- `Trace[]` items: `{Stage, State, DurationMs, AttemptId?, ReasonCode?}` — terminal states only; one `provider` step per
+  attempt; attempt-level `pause`/`budget` steps only when they refused; skipped stages included.
+- `Attempts`, `Trace`, `ReservedUsd`, `SettledUsd` are written only when a configuration version is bound (always on the
+  Host); `[]`/null on a cache hit or a refusal before any attempt.
+- `Usage.CostUsd` of a record = **everything settled for the request** (`SettledUsd`: a failed attempt's estimate plus the
+  served fallback's charge), so FinOps totals include possibly-billed failed attempts. `Usage` tokens are the served
+  attempt's.
+- `SelectedModel` = the policy's primary; `AttemptedModel` = the last attempt started; `ServedByModel` = the attempt that
+  produced the response (a fallback when one served). `CostBasis` (v2 meaning): `estimated_from_text` = served, usage not
+  reported, charged the reservation bound; `estimated_failed_call` = failed/cancelled attempt charged its reservation
+  bound; `no_call`, `reported`, `zero_priced`, `unpriced`, `unknown_failed_call` unchanged.
+- `budget.recovered` events record reservations a crash left open, settled at boot at their reserved amount.
+
+## Status FinOps savings (T06)
+`/admin/status.finops.savings` = `{ "label":"Estimated provider charge avoided", "baseline":"connection/model",
+"route_avoided_usd","cache_avoided_usd","total_usd","excluded_records" }` **only** when the active configuration's
+`savings_baseline` names a PRICED connection/model; otherwise `null` and the legacy `estimated_savings_usd`,
+`savings_local_usd`, `savings_router_usd`, `savings_cache_usd` are 0. Counterfactual: each allowed request with known usage
+(`reported`/`zero_priced`/cache `no_call`) priced on the baseline; route-avoided = baseline − served model price (route
+selection, incl. local); cache-avoided = the served model's charge a hit did not incur. Estimated/unknown-cost records are
+excluded (`excluded_records`). Not total business savings; not evidence of equal answer quality.

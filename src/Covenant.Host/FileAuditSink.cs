@@ -133,4 +133,6 @@ public interface IAuditEventWriter
 [JsonSourceGenerationOptions(Converters = [typeof(JsonStringEnumConverter<DataClassification>), typeof(JsonStringEnumConverter<PolicyEffect>)])]
 [JsonSerializable(typeof(AuditEntry))]
 [JsonSerializable(typeof(RequestsPage))]
+[JsonSerializable(typeof(List<SegmentView>))]
+[JsonSerializable(typeof(RequestExport))]
 public partial class AuditJsonContext : JsonSerializerContext;

@@ -111,13 +111,100 @@ public sealed class InferenceContext(InferenceRequest request)
     /// (failure/cancellation): estimated, never a silent zero.</summary>
     public Usage? FailedCallUsage { get; set; }
 
+    /// <summary>Bounded reason code of the denial for trace/evidence (e.g. "paused", "budget_exceeded", "5xx"); null ⇒
+    /// derived from <see cref="DenialKind"/> (<see cref="TraceReasons.ForDenial"/>).</summary>
+    public string? DenialCode { get; private set; }
+
     /// <summary>Refuse the request. First reason wins; later calls are ignored. The stopping stage is
     /// the one executing, unless the caller names a finer one (e.g. "pause" inside the budget stage).</summary>
-    public void Deny(string reason, DenialKind kind = DenialKind.Governance, string? stage = null)
+    public void Deny(string reason, DenialKind kind = DenialKind.Governance, string? stage = null, string? code = null)
     {
         if (DenialReason is not null) return;
         DenialReason = reason;
         DenialKind = kind;
         StoppedAtStage = stage ?? CurrentStage;
+        DenialCode = code;
+    }
+
+    // ---- Provider attempts and budget reservation (ADR-0013/0014). Additive; empty/null on legacy compositions. ----
+
+    /// <summary>Installed by the budget stage on configured requests: pause re-check + reservation before each attempt,
+    /// exactly-once settlement. Null ⇒ no per-attempt budget accounting (pure pipeline compositions).</summary>
+    public IAttemptGate? AttemptGate { get; set; }
+
+    /// <summary>Every provider attempt that was actually started, in order.</summary>
+    public List<AttemptRecord> Attempts { get; } = [];
+
+    /// <summary>The target whose attempt produced <see cref="Response"/> (primary or an approved fallback).</summary>
+    public RouteTarget? ServedTarget { get; set; }
+
+    /// <summary>Reservation of the attempt currently running (USD) — the conservative bound used when usage is unreported.</summary>
+    public decimal? ActiveReservationUsd { get; set; }
+
+    /// <summary>Total reserved across this request's attempts (USD); null when no reservation was made.</summary>
+    public decimal? ReservedUsd { get; set; }
+
+    /// <summary>Total settled (charged) across this request's attempts (USD); null when nothing was settled.</summary>
+    public decimal? SettledUsd { get; set; }
+
+    // ---- Real request trace (ADR-0013). The pipeline emits; the Host's trace hub (TraceSink) sequences and serves. ----
+
+    public const int MaxTraceEvents = 64;
+    private readonly List<PipelineTraceEvent> _trace = [];
+    private readonly HashSet<string> _enteredStages = new(StringComparer.Ordinal);
+    private bool _traceCompleted;
+
+    /// <summary>Installed by the Host BEFORE the pipeline starts (so the earliest events are retained). Must not throw;
+    /// an exception from it is swallowed — diagnostics never break governance.</summary>
+    public Action<PipelineTraceEvent>? TraceSink { get; set; }
+
+    /// <summary>Events emitted so far (bounded to <see cref="MaxTraceEvents"/>), in emission order.</summary>
+    public IReadOnlyList<PipelineTraceEvent> TraceEvents => _trace;
+
+    /// <summary>Traced stage names in pipeline order (set by the pipeline at start); stages never entered are reported as skipped.</summary>
+    public IReadOnlyList<string> StageOrder { get; set; } = [];
+
+    public void MarkStageEntered(string stage) => _enteredStages.Add(stage);
+
+    /// <summary>Emits one trace event (server UTC time). Bounded: events beyond <see cref="MaxTraceEvents"/> are dropped.</summary>
+    public void Trace(string stage, string state, double? durationMs = null, string? reasonCode = null, string? attemptId = null, string? target = null)
+    {
+        if (_trace.Count >= MaxTraceEvents) return;
+        var ev = new PipelineTraceEvent(stage, state, DateTimeOffset.UtcNow, durationMs, reasonCode, attemptId, target);
+        _trace.Add(ev);
+        if (TraceSink is { } sink)
+        {
+            try { sink(ev); }
+            catch (Exception) { /* diagnostics must never break the governed request */ }
+        }
+    }
+
+    /// <summary>Marks every stage of <see cref="StageOrder"/> that was never entered as skipped (reason cache_hit after a
+    /// cache hit, else not_reached). Idempotent; called by the audit stage before it writes evidence and by the pipeline
+    /// when it finishes.</summary>
+    public void CompleteTrace()
+    {
+        if (_traceCompleted) return;
+        _traceCompleted = true;
+        foreach (var stage in StageOrder)
+            if (!_enteredStages.Contains(stage))
+                Trace(stage, TraceStates.Skipped, reasonCode: ServedFromCache ? TraceReasons.CacheHit : TraceReasons.NotReached);
+    }
+
+    /// <summary>Compact durable summary for the audit record: terminal states only. Stage-level steps for every stage,
+    /// one provider step per attempt (the stage-level provider step is dropped when attempt steps exist), and
+    /// attempt-level pause/budget re-checks only when they refused.</summary>
+    public IReadOnlyList<AuditTraceStep> CompactTrace()
+    {
+        bool providerAttempts = _trace.Any(e => e.Stage == "provider" && e.AttemptId is not null);
+        var steps = new List<AuditTraceStep>();
+        foreach (var e in _trace)
+        {
+            if (!TraceStates.IsTerminal(e.State)) continue;
+            if (e.AttemptId is not null && e.Stage != "provider" && e.State != TraceStates.Refused) continue;
+            if (e.Stage == "provider" && e.AttemptId is null && providerAttempts) continue;
+            steps.Add(new AuditTraceStep(e.Stage, e.State, e.DurationMs is { } d ? Math.Round(d, 3) : null, e.AttemptId, e.ReasonCode));
+        }
+        return steps;
     }
 }

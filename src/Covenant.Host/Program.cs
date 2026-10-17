@@ -194,9 +194,7 @@ FailIfConfigErrors();
 
 var auditSink = new FileAuditSink(auditPath, anchorPath, anchorEvery);
 var killSwitch = new KillSwitch();
-var spendLedger = new InMemorySpendLedger();
 
-// Budgets survive restarts: replay the audit log (event store) into the ledger (projection).
 // A tampered chain at boot is fail-closed — never serve on top of corrupted evidence.
 var (chainAtBoot, priorEntries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
 if (!chainAtBoot.Valid)
@@ -208,7 +206,47 @@ if (!chainAtBoot.Valid)
         "Point Audit:Path at a fresh file to resume serving.");
     Environment.Exit(1);
 }
-LedgerReplay.Rebuild(priorEntries, spendLedger);   // control-plane events are skipped
+// --- Budget ledger (ADR-0014): an append-only journal independent of audit segments (Budget:LedgerPath, default
+//     "<Audit:Path>.ledger.jsonl"). Replayed at boot; it — not the audit log — is the source of accrued spend, so an
+//     audit archive never reopens a budget and a configuration apply never resets one. No journal yet ⇒ the current
+//     audit segment's recorded spend is imported ONCE (legacy-import) into the global + team scopes. Reservations left
+//     open by a crash are settled at their reserved amount (settle-recovered) — never free capacity. ---
+string ledgerPath = StartupValidation.Trimmed(builder.Configuration["Budget:LedgerPath"]) is { Length: > 0 } lp ? lp : auditPath + ".ledger.jsonl";
+var ledgerStore = new FileLedgerStore(ledgerPath);
+var ledgerOpened = ledgerStore.Open();
+configErrors.AddRange(ledgerOpened.Errors);
+FailIfConfigErrors();
+foreach (var w in ledgerOpened.Warnings) Console.Error.WriteLine($"covenant: warning — {w}");
+var budgetLedger = new BudgetLedger(ledgerStore, ledgerOpened.Records);
+if (!ledgerOpened.Existed)
+{
+    var legacySpend = priorEntries
+        .Where(e => e.IsRequest() && e.Usage.CostUsd > 0m)   // control-plane events never carry spend
+        .GroupBy(e => e.Tags.Team, StringComparer.OrdinalIgnoreCase)
+        .Select(g => (Team: g.Key, AmountUsd: g.Sum(e => e.Usage.CostUsd)))
+        .ToList();
+    ledgerStore.EnsureCreated();
+    budgetLedger.ImportLegacy(legacySpend);
+}
+var recoveredReservations = budgetLedger.RecoverUnsettled();
+if (recoveredReservations.Count > 0)
+    auditSink.TryWrite(new AuditEntry(
+        Id: $"bud_{Guid.NewGuid():n}",
+        TimestampUtc: DateTimeOffset.UtcNow,
+        Principal: "covenant-boot",
+        Tags: new AttributionTags("covenant", "budget", "recovery"),
+        Classification: DataClassification.Internal,
+        Effect: PolicyEffect.Allow,
+        Reason: $"budget.recovered: {recoveredReservations.Count} reservation(s) left open by an interrupted run settled at their reserved amount "
+            + $"({recoveredReservations.Sum(r => r.AmountUsd).ToString(System.Globalization.CultureInfo.InvariantCulture)} USD)",
+        ServedByModel: null,
+        Usage: Usage.Empty,
+        SchemaVersion: 2,
+        CostBasis: "no_call",
+        EventType: AuditEntryKinds.BudgetRecovered,
+        ConfigVersion: activeConfig.Version,
+        EntryPoint: "boot",
+        OperatorRef: "covenant-boot"));
 
 // ADR-0011: the active version's activation is evidenced in the chain. A fresh bootstrap records it; a crash
 // between pointer rename and audit append (no event for the active version) is recovered here, marked as such.
@@ -222,6 +260,10 @@ if (bootstrapped || !priorEntries.Any(e => e.EventType == AuditEntryKinds.Config
 //     (ctx.Configuration); the constructor arguments below are only the fail-closed fallback for a context
 //     without one (deny-all policy, zero budget), which the Host never produces. ---
 builder.Services.AddSingleton<IRuntimeConfig>(runtime);
+var traceHub = new TraceHub();                     // ADR-0013: in-memory, bounded request traces
+var consoleSubmissions = new ConsoleSubmissions(); // ADR-0012: client_request_id de-duplication (10 min)
+builder.Services.AddSingleton(traceHub);
+builder.Services.AddSingleton(budgetLedger);
 builder.Services.AddSingleton<IChatClientRegistry>(new SnapshotChatClientRegistry(runtime));
 var providerHealth = new ProviderHealth();
 var probeAllowList = ProviderProbe.BuildAllowList(builder.Configuration["Providers:ProbeAllowList"], StartupValidation.Trimmed(builder.Configuration["Local:Endpoint"]));
@@ -244,9 +286,11 @@ builder.Services.AddSingleton(sp =>
         new PolicyStage(new PolicyEngine(denyAllPolicy)),// policy v2 on the bound snapshot, fail-closed
         new CacheStage(responseCache, new CacheConfig()),// cache before budget/provider: a hit skips the model call
         new RateLimitStage(rateCounterGlobal, rateCounterTeams, new RateLimitConfig()), // rate half of budget/rate; cache hits bypass (free)
-        new BudgetStage(killSwitch, spendLedger, new BudgetConfig { GlobalCapUsd = 0m }, noPrices), // pause + caps; charges failed calls on unwind
+        new PauseStage(killSwitch),                      // global provider-call pause (after cache: a hit is served during a pause)
+        new BudgetStage(killSwitch, budgetLedger),       // ADR-0014: scopes + atomic reservation of attempt 1; gate for fallbacks
         new ProviderCallStage(liveRegistry, providerHealth,
-            preferRequestClients: liveRegistry is SnapshotChatClientRegistry), // route + provider call on the request's snapshot clients
+            preferRequestClients: liveRegistry is SnapshotChatClientRegistry,
+            classifier: SdkProviderFailureClassifier.Shared), // approved fallback over the request's snapshot clients (ADR-0013)
         new AttributionStage(noPrices),                  // attribute cost (connection-scoped price book of the snapshot)
     ]);
 });
@@ -306,6 +350,9 @@ app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipel
     var ctx = new InferenceContext(request);
     using var lease = SnapshotLease.Bind(runtime, ctx);   // ADR-0011: one configuration version for the whole request
     var msgId = requestId;
+    var traceBuffer = traceHub.Begin(requestId, ctx.ConfigVersion, ctx.Configuration?.Config.Settings.TraceRetentionMinutes ?? 10);
+    ctx.TraceSink = traceBuffer.Append;   // created BEFORE the pipeline starts (ADR-0013)
+    using var traceDone = new TraceCompletion(traceBuffer, traceHub.Clock);
 
     if (request.Stream)
     {
@@ -326,7 +373,7 @@ app.MapPost("/v1/messages", async (AnthropicMessagesRequest body, InferencePipel
                 resp.StatusCode = StatusCodes.Status200OK;
                 resp.ContentType = "text/event-stream";
                 resp.Headers.CacheControl = "no-cache";
-                await WriteEventAsync("message_start", AnthropicWire.MessageStartEvent(msgId, ctx.Policy?.Route?.ModelId ?? ""), token);
+                await WriteEventAsync("message_start", AnthropicWire.MessageStartEvent(msgId, ctx.AttemptedModel ?? ctx.Policy?.Route?.ModelId ?? ""), token);
                 await WriteEventAsync("content_block_start", AnthropicWire.ContentBlockStartEvent, token);
             }
             await WriteEventAsync("content_block_delta", AnthropicWire.ContentBlockDeltaEvent(delta.Content), token);
@@ -385,7 +432,7 @@ app.MapGet("/v1/models", (HttpContext http) =>
 });
 
 app.MapPost("/v1/chat/completions",
-    async (OpenAiChatRequest body, InferencePipeline pipe, HttpContext http, CancellationToken ct) =>
+    async Task<IResult> (OpenAiChatRequest body, InferencePipeline pipe, HttpContext http, CancellationToken ct) =>
 {
     // Bearer key for the auth stage. OpenAI SDK clients pointed at Covenant send their configured
     // api-key here automatically — a virtual key drops into existing tooling unchanged.
@@ -414,110 +461,8 @@ app.MapPost("/v1/chat/completions",
 
     var ctx = new InferenceContext(request);
     using var lease = SnapshotLease.Bind(runtime, ctx);   // ADR-0011: one configuration version for the whole request
-
-    // --- Streamed mode (ADR-0002): SSE headers commit lazily on the FIRST delta, so a pre-flight denial still returns a plain JSON error below. ---
-    if (request.Stream)
-    {
-        var resp = http.Response;
-        var chunkId = request.RequestId!;
-        bool sseStarted = false;
-
-        async ValueTask WriteChunkAsync(OpenAiChatChunk chunk, CancellationToken token)
-        {
-            var json = System.Text.Json.JsonSerializer.Serialize(chunk, CovenantJsonContext.Default.OpenAiChatChunk);
-            await resp.WriteAsync($"data: {json}\n\n", token);
-            await resp.Body.FlushAsync(token);
-        }
-
-        OpenAiChatChunk Chunk(string? role, string? content, string? finish, OpenAiUsage? usage) => new()
-        {
-            Id = chunkId,
-            Model = ctx.Policy?.Route?.ModelId ?? "",
-            Choices = [new OpenAiChunkChoice { Index = 0, Delta = new OpenAiDelta { Role = role, Content = content }, FinishReason = finish }],
-            Usage = usage,
-        };
-
-        ctx.DeltaSink = async (delta, token) =>
-        {
-            if (!sseStarted)
-            {
-                sseStarted = true;
-                resp.StatusCode = StatusCodes.Status200OK;
-                resp.ContentType = "text/event-stream";
-                resp.Headers.CacheControl = "no-cache";
-                await WriteChunkAsync(Chunk("assistant", null, null, null), token);
-            }
-            await WriteChunkAsync(Chunk(null, delta.Content, null, null), token);
-        };
-
-        await pipe.ExecuteAsync(ctx, ct);
-
-        if (!sseStarted)
-        {
-            // Denied before the first byte — same JSON error contract as buffered mode.
-            return DenialResult(ctx);
-        }
-
-        if (ctx.IsDenied)
-        {
-            // Mid-stream failure after a committed 200: terminate with an error event (audited already).
-            var err = System.Text.Json.JsonSerializer.Serialize(
-                new ErrorResponse { Error = "upstream_error", Reason = ctx.DenialReason ?? "stream failed", RequestId = request.RequestId },
-                CovenantJsonContext.Default.ErrorResponse);
-            await resp.WriteAsync($"data: {err}\n\n", ct);
-        }
-        else if (ctx.Response is { } finalResp)
-        {
-            await WriteChunkAsync(Chunk(null, null, "stop", new OpenAiUsage
-            {
-                PromptTokens = finalResp.Usage.InputTokens,
-                CompletionTokens = finalResp.Usage.OutputTokens,
-                TotalTokens = finalResp.Usage.TotalTokens,
-            }), ct);
-        }
-
-        await resp.WriteAsync("data: [DONE]\n\n", ct);
-        await resp.Body.FlushAsync(ct);
-        return Results.Empty;
-    }
-
-    await pipe.ExecuteAsync(ctx, ct);
-
-    if (ctx.IsDenied || ctx.Response is null)
-        return DenialResult(ctx);
-
-    var r = ctx.Response;
-    var dto = new OpenAiChatResponse
-    {
-        Id = request.RequestId,
-        Model = r.ServedByModel,
-        Choices = [new OpenAiChoice { Index = 0, Message = new OpenAiMessage { Role = "assistant", Content = OpenAiWire.TextElement(r.Message.Content) } }],
-        Usage = new OpenAiUsage
-        {
-            PromptTokens = r.Usage.InputTokens,
-            CompletionTokens = r.Usage.OutputTokens,
-            TotalTokens = r.Usage.TotalTokens
-        }
-    };
-    return Results.Json(dto, CovenantJsonContext.Default.OpenAiChatResponse);
+    return await ChatCompletions.RunAsync(http, pipe, ctx, traceHub, ct);   // same contract as console inference
 });
-
-// No credentials → 401. Governance said no → 403. Upstream broke, refused fail-closed → 502.
-static IResult DenialResult(InferenceContext ctx)
-{
-    var (error, status) = ctx.DenialKind switch
-    {
-        DenialKind.Unauthenticated => ("unauthenticated", StatusCodes.Status401Unauthorized),
-        DenialKind.UpstreamFailure => ("upstream_error", StatusCodes.Status502BadGateway),
-        DenialKind.RateLimited => ("rate_limited", StatusCodes.Status429TooManyRequests),
-        DenialKind.Unsupported => ("unsupported", StatusCodes.Status400BadRequest),
-        DenialKind.Cancelled => ("cancelled", 499),
-        _ => ("denied", StatusCodes.Status403Forbidden),
-    };
-    return Results.Json(
-        new ErrorResponse { Error = error, Reason = ctx.DenialReason ?? "no response", RequestId = ctx.Request.RequestId },
-        CovenantJsonContext.Default.ErrorResponse, statusCode: status);
-}
 
 // Anthropic-dialect denial: same DenialKind semantics, Anthropic's error taxonomy and statuses.
 static IResult AnthropicDenial(InferenceContext ctx)
@@ -607,7 +552,11 @@ StatusReport BuildStatus()
     var cfg = snapshot.Config;
     var (verification, entries) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
     var anchorInfo = AnchorInfo.Read(anchorPath);
-    var teamSpend = spendLedger.SnapshotByTeam();
+    // Spend comes from the budget ledger (ADR-0014): the global budget's current period; teams over the same period.
+    var globalBudget = cfg.Budgets.FirstOrDefault(b => b.Scope == "global");
+    var statusPeriod = globalBudget?.Period ?? BudgetPeriod.None;
+    var teamSpend = budgetLedger.SpentByScopePrefix("team:", statusPeriod)
+        .ToDictionary(kv => kv.Key["team:".Length..], kv => kv.Value, StringComparer.OrdinalIgnoreCase);
 
     var teamCaps = cfg.Budgets
         .Where(b => b.Scope.StartsWith("team:", StringComparison.Ordinal))
@@ -628,7 +577,9 @@ StatusReport BuildStatus()
     // where no savings are claimed). The "local" model for the local split is the first local-boundary model.
     var localModel = cfg.Connections.Where(c => c.Boundary == Boundary.Local).SelectMany(c => c.Models).Select(m => m.ModelId).FirstOrDefault()
         ?? LegacyImport.UnconfiguredLocalModel;
-    var baselineModel = cfg.SavingsBaseline?.ModelId ?? localModel;
+    // Savings only against a configured, PRICED baseline (spec §4.5); otherwise hidden (null) and every legacy figure is 0.
+    var baseline = cfg.SavingsBaseline is { } sb && snapshot.FindModel(sb.ConnectionId, sb.ModelId)?.Price is not null ? sb : null;
+    var baselineModel = baseline?.ModelId ?? localModel;
 
     return new StatusReport
     {
@@ -637,12 +588,12 @@ StatusReport BuildStatus()
         KillSwitch = new KillSwitchState { Engaged = killSwitch.IsTripped, Reason = killSwitch.Reason },
         Budget = new BudgetStatus
         {
-            GlobalCapUsd = cfg.Budgets.FirstOrDefault(b => b.Scope == "global")?.CapUsd ?? 0m,
-            GlobalSpendUsd = spendLedger.GlobalSpendUsd,
+            GlobalCapUsd = globalBudget?.CapUsd ?? 0m,
+            GlobalSpendUsd = budgetLedger.Spent("global", statusPeriod),
             Teams = teams,
         },
         Routes = routes,
-        FinOps = FinOps.Build(entries, localModel, baselineModel, PricesByModel(cfg)),
+        FinOps = FinOps.Build(entries, localModel, baselineModel, PricesByModel(cfg), baseline?.ToString()),
         ChainValid = verification.Valid,
         AuditEntries = verification.EntryCount,
         Auth = new AuthStatus { AllowAnonymous = allowAnonymous, KeyCount = apiKeys.Count },
@@ -695,14 +646,14 @@ app.MapGet("/admin/status/stream", async (HttpContext http, CancellationToken ct
     return Results.Empty;
 });
 
-// Demo/ops reset: ARCHIVES the audit log (rename — evidence is never deleted) and clears the ledger
-// together, so ledger and evidence stay consistent; the archived chain remains verifiable.
+// Audit archive: ARCHIVES the audit log (rename — evidence is never deleted); the archived chain remains verifiable and
+// navigable (GET /admin/audit/segments). It is NOT a budget operation: the budget ledger is independent of audit segments
+// (ADR-0014), so an archive never reopens a budget or erases accrued spend.
 app.MapPost("/admin/reset", async (HttpContext http) =>
 {
     if (!Authorized(http)) return Unauthorized();
 
     var archived = await auditSink.RotateAsync();
-    spendLedger.Reset();
     return Results.Json(
         new ResetResponse { ArchivedTo = archived },
         CovenantJsonContext.Default.ResetResponse);
@@ -710,30 +661,7 @@ app.MapPost("/admin/reset", async (HttpContext http) =>
 
 // ---- Console API (docs/ui-api-contract.md) ----
 
-// Recent evidence: newest-first records of the CURRENT audit segment (since the last archive), bounded.
-// Not a historical search — the response says which segment it covers.
-app.MapGet("/admin/requests", (HttpContext http, int? limit) =>
-{
-    if (!Authorized(http)) return Unauthorized();
-    http.Response.Headers.CacheControl = "no-store";
-    var (verification, all) = AuditChainVerifier.VerifyAndRead(auditPath, anchorPath);
-    var entries = all.Where(e => e.IsRequest()).ToList();   // v3: control-plane events → GET /admin/config/versions
-    int take = Math.Clamp(limit ?? 200, 1, 1000);
-    var page = new RequestsPage
-    {
-        Segment = new SegmentInfo
-        {
-            Path = Path.GetFullPath(auditPath),
-            Entries = entries.Count,
-            ChainValid = verification.Valid,
-            FirstUtc = entries.Count > 0 ? entries[0].TimestampUtc : null,
-            LastUtc = entries.Count > 0 ? entries[^1].TimestampUtc : null,
-            Events = all.Count - entries.Count,
-        },
-        Items = Enumerable.Reverse(entries).Take(take).ToList(),
-    };
-    return Results.Json(page, AuditJsonContext.Default.RequestsPage);
-});
+// Recent evidence (GET /admin/requests?limit=&cursor=&segment=), segments and export: see ArchiveApi (AuditSegments.cs).
 
 // Exact lookup by correlation id (== audit Id). 404 means "not in the current segment yet" — the sink
 // is asynchronous, so a caller polls briefly before concluding "unavailable"; it is never proof that an
@@ -896,6 +824,11 @@ app.MapConfigAdmin(new ConfigAdminServices
     Classifier = classifier,
     Authorized = Authorized,
 });
+
+app.MapPlayground(runtime, traceHub, consoleSubmissions, Authorized);    // ADR-0012 console inference
+app.MapTrace(traceHub, Authorized);                                       // ADR-0013 request trace
+app.MapBudgets(runtime, budgetLedger, Authorized);                        // ADR-0014 budget state
+app.MapArchive(new AuditSegments(auditPath, anchorPath), Authorized, anchorPath);   // spec §5 archive + export
 
 app.MapConsole();
 app.Run();
