@@ -20,6 +20,8 @@
   try { applyTheme(window.localStorage.getItem(THEME_KEY)); } catch (e) { applyTheme("dark"); }
 
   var traps = {}; // containerId -> keydown handler (focus trap for drawers/dialogs)
+  var escWatchers = {}; // watch id -> document keydown handler (presentation mode Escape)
+  var escSeq = 0;
 
   function focusables(container) {
     var sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -86,6 +88,27 @@
       if (!handler) return;
       document.removeEventListener("keydown", handler, true);
       delete traps[containerId];
+    },
+
+    // Presentation mode: Escape anywhere on the page (focus may be on <body> after the Run button disabled itself)
+    // calls the .NET method. Ignored when a dialog/popover inside the page handles its own Escape. Returns a watch id.
+    watchEscape: function (dotnetRef, method) {
+      var id = "esc-" + (++escSeq);
+      var handler = function (ev) {
+        if (ev.key !== "Escape" || ev.defaultPrevented) return;
+        var t = ev.target;
+        if (t && typeof t.closest === "function" && t.closest('[role="dialog"], .popover')) return;
+        dotnetRef.invokeMethodAsync(method);
+      };
+      escWatchers[id] = handler;
+      document.addEventListener("keydown", handler);
+      return id;
+    },
+    unwatchEscape: function (id) {
+      var handler = escWatchers[id];
+      if (!handler) return;
+      document.removeEventListener("keydown", handler);
+      delete escWatchers[id];
     },
 
     // Copy operator-selected text (a request id or the visible response — never a credential). Resolves true on success.

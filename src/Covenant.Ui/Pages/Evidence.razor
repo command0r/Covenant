@@ -168,11 +168,11 @@
                             <tbody>
                                 @foreach (var sg in segs)
                                 {
-                                    var current = SegmentScope.IsCurrent(sg, segs);
+                                    var current = SegmentScope.IsCurrent(sg);
                                     <tr>
-                                        <td>@(current ? "Current" : "Archived · " + (sg.Label ?? sg.Id))</td>
+                                        <td>@(current ? "Current" : "Archived · " + (string.IsNullOrWhiteSpace(sg.Label) ? sg.Id : sg.Label))</td>
                                         <td class="mono">@(sg.FirstUtc is null ? "No records" : Fmt.Utc(sg.FirstUtc) + " → " + Fmt.Utc(sg.LastUtc))</td>
-                                        <td class="num mono">@(sg.Entries is { } n ? Fmt.Int(n) : "—")</td>
+                                        <td class="num mono">@Fmt.Int(sg.Entries)</td>
                                         <td>@ChainLabel(sg.ChainValid)</td>
                                     </tr>
                                 }

@@ -104,7 +104,9 @@
         var s = State.LastStatus;
         if (s is not null && !s.ChainValid)
             return new("Audit chain failed", "bad", "evidence", "The current audit segment's hash chain does not verify");
-        var local = RouteHealth.LocalRoute(State.Catalog, DateTimeOffset.UtcNow);
+        // Review round 2 (B11): the CURRENT runtime connection's health (catalog.local.connection_id + status
+        // connection_health, pushed every 2 s) — never an adapter that merely happens to be named "local".
+        var local = RouteHealth.LocalRoute(State.Catalog, s, DateTimeOffset.UtcNow);
         var title = local.Text + (local.LastError is { Length: > 0 } e ? " · last error: " + e : "");
         return local.State switch
         {

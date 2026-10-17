@@ -5,8 +5,9 @@ using Covenant.Ui.Models;
 
 namespace Covenant.Ui.Services;
 
-/// <summary>Where a run's trace currently comes from (shown next to the TraceBar).</summary>
-public enum TraceFeedState { Idle, Connecting, Live, Reconnecting, Snapshot, Complete, Expired, Unavailable }
+/// <summary>Where a run's trace currently comes from (shown next to the TraceBar). <see cref="Locating"/> = the run was
+/// submitted and the console is asking the Host for its request id (GET /admin/playground/submissions/{id}).</summary>
+public enum TraceFeedState { Idle, Locating, Connecting, Live, Reconnecting, Snapshot, Complete, Expired, Unavailable }
 
 /// <summary>Follows one request's real trace (ADR-0013): GET /admin/requests/{id}/trace/stream over the admin
 /// HttpClient (the token travels in a header; EventSource cannot do that). Replay-then-live; on a dropped

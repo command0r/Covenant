@@ -13,9 +13,11 @@
 <PageTitle>Requests · Covenant</PageTitle>
 
 @*
-  T08. Audit records of ONE segment (current, or an archived one chosen from GET /admin/audit/segments), loaded in
-  bounded newest-first pages (GET /admin/requests?limit=&cursor=&segment=) with "Load older". Filters apply only to
-  what is loaded — the page says so. Deep links (/requests/{id}) fetch the exact record (current segment). The drawer
+  T08 + review round 2 (U9). Audit records of ONE segment (current, or an archived one chosen from GET
+  /admin/audit/segments), loaded in bounded newest-first pages (GET /admin/requests?limit=&cursor=&segment=) with "Load
+  older" following next_cursor (stable: appends never shift a page). The scope label comes from the page's segment
+  descriptor (segment.is_current/id/label) — never from the first row. 410 cursor_expired (the segment was archived)
+  stops paging and asks for a reload. Filters apply only to what is loaded — the page says so. Deep links (/requests/{id}) fetch the exact record (current segment). The drawer
   shows attempts, trace summary, config version and identity, and exports the per-request evidence report
   (GET /admin/requests/{id}/export — no prompt/response content).
 *@
@@ -33,7 +35,7 @@
                     <option value="">Current segment</option>
                     @foreach (var seg in ArchivedSegments)
                     {
-                        <option value="@seg.Id">@SegmentScope.Option(seg, false)</option>
+                        <option value="@seg.Id">@SegmentScope.Option(seg)</option>
                     }
                 </select>
                 <span class="help">@(View.SegmentsError ?? (View.Segments is null ? "Loading segments…" : ArchivedSegments.Count == 0 ? "No archived segments." : "Archived segments are read-only."))</span>
@@ -42,6 +44,16 @@
         </div>
 
         <ErrorBanner Title="Could not load requests" Message="@_loadError" OnRetry="ReloadAsync" Busy="@_loading" />
+        @if (View.Paging.Expired)
+        {
+            <div class="alert warn" role="alert">
+                <div class="alert-text">
+                    <strong>@RequestPaging.CursorExpiredMessage</strong>
+                    <span class="alert-body">Older pages of the list you loaded can no longer be followed (410 cursor_expired). The records shown stay as loaded; reload to page the segment again from its newest record.</span>
+                </div>
+                <Button OnClick="ReloadAsync" Busy="@_loading" BusyText="Reloading…">Reload the list</Button>
+            </div>
+        }
 
         <div class="filters" role="search" aria-label="Filter loaded requests">
             <div class="field search">
@@ -104,7 +116,7 @@
 
         <section class="panel flush" aria-labelledby="rq-h">
             <div class="panel-head">
-                <h2 id="rq-h">@(View.SegmentId is null ? "Requests — current segment" : "Requests — archived segment")</h2>
+                <h2 id="rq-h">@(View.Segment is { } hs ? (hs.IsCurrent ? "Requests — current segment" : "Requests — archived segment") : "Requests")</h2>
                 <span class="panel-sub">@CountLabel</span>
             </div>
             @if (!View.Loaded)
@@ -190,17 +202,17 @@
                     {
                         <span class="note warn">Loaded the browser limit of @Fmt.Int(RequestsViewState.MaxLoaded) records. Open a specific request by id, or choose a segment.</span>
                     }
-                    else if (View.NextCursor is not null)
+                    else if (View.Paging.CanLoadOlder)
                     {
                         <Button OnClick="LoadOlderAsync" Busy="@_loadingMore" BusyText="Loading older…">Load older</Button>
                     }
-                    else if (View.Segment is { } sg && sg.Entries > View.Items.Count)
+                    else if (View.Paging.Expired)
                     {
-                        <span class="note">This Host returned no cursor, so older records of this segment are not reachable from here.</span>
+                        <span class="note warn">@RequestPaging.CursorExpiredMessage</span>
                     }
                     else
                     {
-                        <span class="note">All records of this segment are loaded.</span>
+                        <span class="note">No older records in this segment (the Host sent no next cursor).</span>
                     }
                 </div>
             }
@@ -231,6 +243,7 @@
                 var o = OutcomeModel.FromRecord(rec);
                 var mf = ModelFacts.From(rec);
                 var trace = TraceModel.FromAuditSummary(rec.Trace, rec.Attempts, rec.ConfigVersion);
+                var incomplete = RecordFacts.IncompleteStreamText(rec);
 
                 <section class="drawer-section" aria-label="Result">
                     <h3>Result</h3>
@@ -239,6 +252,14 @@
                     </div>
                     <span class="secondary">@o.Explanation</span>
                     <span class="note">Recorded when the request was processed. Today's pause, policy or model health does not change it.</span>
+                    @if (incomplete is not null)
+                    {
+                        <div class="alert bad" role="status"><div class="alert-text"><strong>Stream incomplete — not served</strong><span class="alert-body">@incomplete</span></div></div>
+                    }
+                    @if (RecordFacts.Truncated(rec))
+                    {
+                        <div class="alert warn" role="status"><div class="alert-text"><strong>Truncated at the output bound</strong><span class="alert-body">@RecordFacts.TruncatedText(rec) (enforced bound @RecordFacts.EffectiveMaxOutputTokens(rec) tokens).</span></div></div>
+                    }
                     <div class="btn-row tight">
                         <button type="button" class="btn sm" @onclick="() => ExportAsync(rec.Id)" disabled="@_exporting" aria-busy="@(_exporting ? "true" : null)">
                             @(_exporting ? "Preparing…" : "Export evidence (JSON)")
@@ -246,6 +267,10 @@
                         <span class="secondary subtle">Version, attempts, costs and integrity — no prompt or response content.</span>
                     </div>
                     <ErrorBanner Title="Export failed" Message="@_exportError" />
+                    @if (_exportNote is not null)
+                    {
+                        <span class="note" role="status">@_exportNote</span>
+                    }
                 </section>
 
                 <section class="drawer-section" aria-label="Who and which rule">
@@ -284,8 +309,16 @@
                         <dt>Selected route</dt><dd class="mono wrap-any">@mf.Selected</dd>
                         <dt>Attempted</dt><dd class="mono wrap-any">@mf.Attempted</dd>
                         <dt>Served</dt><dd class="mono wrap-any">@mf.Served</dd>
+                        <dt>Served connection</dt><dd class="mono wrap-any">@RecordFacts.ServedConnection(rec)</dd>
                         <dt>Destination</dt><dd><span class="mono wrap-any">@dest.Text</span> @if (!rec.CacheHit && dest.Text != ModelFacts.NoProviderCall && dest.Text != ModelFacts.NotRecorded) { <BoundaryTag Boundary="@dest.Boundary" /> }</dd>
                         <dt>Streamed</dt><dd>@(rec.Stream is { } st ? (st ? "Yes" : "No") : "Not recorded")</dd>
+                        <dt>Requested max output tokens</dt><dd class="mono">@RecordFacts.RequestedMaxOutputTokens(rec)</dd>
+                        <dt>Effective (enforced) max output tokens</dt><dd class="mono">@RecordFacts.EffectiveMaxOutputTokens(rec)</dd>
+                        <dt>Truncated</dt><dd>@RecordFacts.TruncatedText(rec)</dd>
+                        @if (rec.PartialOutputChars is not null)
+                        {
+                            <dt>Partial output</dt><dd>@RecordFacts.PartialOutput(rec)</dd>
+                        }
                     </dl>
                     @{ var lines = AttemptFacts.Lines(rec, Ws.Connections); }
                     @if (lines.Count > 0)
@@ -298,7 +331,7 @@
                                     <span class="mono wrap-any">@a.Target</span>
                                     <BoundaryTag Boundary="@a.Boundary" />
                                     <span>@(a.Outcome + (a.ErrorClass is { } ec ? " · " + ec : ""))</span>
-                                    <span class="subtle">@a.Duration · @a.Cost</span>
+                                    <span class="subtle">@AttemptFacts.Detail(a)</span>
                                 </li>
                             }
                         </ol>
@@ -347,7 +380,7 @@
                 <section class="drawer-section" aria-label="Audit evidence">
                     <h3>Audit evidence</h3>
                     <dl class="facts">
-                        <dt>Segment</dt><dd>@(View.SegmentId is null ? "Current segment" : "Archived segment " + View.SegmentId)@(SegmentChain is { } cv2 ? (cv2 ? " · chain verified" : " · chain verification FAILS") : "")</dd>
+                        <dt>Segment</dt><dd>@(View.Segment is { } ds && IsInLoaded(rec) ? SegmentScope.Label(ds) : "Current segment (exact lookup by id)")@(SegmentChain is { } cv2 && IsInLoaded(rec) ? (cv2 ? " · chain verified" : " · chain verification FAILS") : "")</dd>
                         <dt>Prompt SHA-256</dt><dd class="mono wrap-any">@Fmt.OrNotRecorded(rec.PromptSha256)</dd>
                         <dt>Prompt length</dt><dd class="mono">@rec.PromptChars chars</dd>
                         <dt>Schema version</dt><dd class="mono">@(rec.SchemaVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "1 (legacy)")</dd>
@@ -389,12 +422,15 @@
     private string? _paramId;
     private bool _exporting;
     private string? _exportError;
+    private string? _exportNote;
 
     private IReadOnlyList<AuditEntryView> Items => View.Items;
     private IReadOnlyList<AuditEntryView> Filtered => RequestFilter.Apply(Items, View.Criteria, DateTimeOffset.UtcNow);
 
     private IReadOnlyList<AuditSegmentDto> ArchivedSegments
-        => View.Segments is { } all ? all.Where(s => !SegmentScope.IsCurrent(s, all)).ToList() : [];
+        => View.Segments is { } all ? all.Where(s => !SegmentScope.IsCurrent(s)).ToList() : [];
+
+    private bool IsInLoaded(AuditEntryView rec) => View.Items.Any(i => string.Equals(i.Id, rec.Id, StringComparison.Ordinal));
 
     private bool? SegmentChain => View.Segment?.ChainValid;
 
@@ -415,20 +451,16 @@
     private bool DrawerOpen => Id is not null;
     private string DrawerTitle => Id is null ? "Request" : "Request " + Truncate(Id);
 
+    /// <summary>From the Host's segment descriptor of the loaded pages (segment.is_current/label/id); before the first
+    /// page arrives, only what was asked for.</summary>
     private string ScopeLabel
-    {
-        get
-        {
-            if (View.SegmentId is null)
-                return View.Segment is { } cur ? SegmentScope.Label(new AuditSegmentDto { Id = SegmentScope.CurrentId, FirstUtc = cur.FirstUtc }, true) : "Current segment";
-            var listed = View.Segments?.FirstOrDefault(s => s.Id == View.SegmentId) ?? new AuditSegmentDto { Id = View.SegmentId };
-            return SegmentScope.Label(listed, false);
-        }
-    }
+        => View.Segment is { } seg
+            ? SegmentScope.Label(seg)
+            : View.SegmentId is null ? "Current segment" : "Archived segment " + View.SegmentId + " (loading)";
 
     private string CoverageText
         => View.Loaded
-            ? SegmentScope.Coverage(ScopeLabel, View.Items.Count, View.Segment?.Entries, View.NextCursor is not null, View.Criteria.IsActive)
+            ? SegmentScope.Coverage(ScopeLabel, View.Items.Count, View.Segment?.Entries, View.Paging.CanLoadOlder, View.Criteria.IsActive)
             : "Filters apply only to the records loaded from the selected segment — never to the whole audit history.";
 
     private string CountLabel
@@ -531,7 +563,7 @@
 
     private async Task LoadOlderAsync()
     {
-        if (View.NextCursor is not { } cursor || _loadingMore) return;
+        if (!View.Paging.CanLoadOlder || View.NextCursor is not { } cursor || _loadingMore) return;
         await LoadPageAsync(cursor, first: false);
     }
 
@@ -550,23 +582,28 @@
                 _loadError = "Archived segments cannot be browsed on this Host.";
                 return;
             }
-            var page = await Api.GetRequestsPageAsync(RequestsViewState.PageSize, cursor, requested);
+            // A cursor encodes its segment: the next page is requested with the cursor alone (segment= would only be
+            // re-checked against it by the Host).
+            var page = await Api.GetRequestsPageAsync(RequestsViewState.PageSize, cursor, cursor is null ? requested : null);
             if (!string.Equals(View.SegmentId, requested, StringComparison.Ordinal)) return; // selection changed meanwhile
-            if (requested is not null && !string.Equals(page.Segment.Id, requested, StringComparison.Ordinal))
+            if (View.Paging.ApplyPage(page, older: cursor is not null) != PageResult.Accepted)
             {
-                _loadError = "The Host did not confirm the requested archived segment (it answered for "
-                             + (page.Segment.Id ?? "an unidentified segment") + "), so nothing is shown rather than mislabelled records.";
+                _loadError = View.Paging.Problem;
                 return;
             }
-            View.Segment = page.Segment;
             View.AddPage(page.Items);
-            View.NextCursor = page.Items.Count == 0 ? null : page.NextCursor;
-            View.Loaded = true;
             View.LoadedUtc = DateTimeOffset.UtcNow;
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
         {
             // ConsoleSession disconnects and routes to /connect.
+        }
+        catch (ApiException ex)
+        {
+            if (!string.Equals(View.SegmentId, requested, StringComparison.Ordinal)) return;
+            // 410 cursor_expired: the segment was archived/replaced since the cursor was issued → banner + reload.
+            if (View.Paging.ApplyError((int?)ex.Status, ex.ErrorCode, ex.Message) != PageResult.CursorExpired)
+                _loadError = View.Paging.Problem;
         }
         catch (Exception ex)
         {
@@ -637,8 +674,10 @@
         _exportError = null;
         try
         {
-            var json = await Api.GetRequestExportJsonAsync(id, View.SegmentId);
+            _exportNote = null;
+            var json = await Api.GetRequestExportJsonAsync(id, View.Segment is { IsCurrent: false, Id: { } sid } ? sid : null);
             await Interop.DownloadTextAsync("covenant-request-" + id + ".json", "application/json", json);
+            _exportNote = ExportSummary(json);
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
         {
@@ -656,6 +695,19 @@
         {
             _exporting = false;
         }
+    }
+
+    /// <summary>One line about the downloaded export (the file itself is the server's bytes, unmodified).</summary>
+    private static string? ExportSummary(string json)
+    {
+        RequestExportDto? e;
+        try { e = JsonSerializer.Deserialize(json, UiJsonContext.Default.RequestExportDto); }
+        catch (JsonException) { return "Downloaded. The export could not be summarised (unexpected shape)."; }
+        if (e is null) return null;
+        var integrity = e.Integrity.Status == "verified" ? "integrity verified" : "integrity UNVERIFIED (" + (e.Integrity.ChainFailure ?? "chain broken") + ")";
+        return "Downloaded " + e.RequestId + " · " + SegmentScope.Label(e.Segment) + " · " + integrity
+               + (e.Integrity.Line is { } line ? " · line " + line.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")
+               + (e.ContentIncluded ? " · CONTAINS content" : " · no prompt/response content");
     }
 
     private void Open(AuditEntryView r)

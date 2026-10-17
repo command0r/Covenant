@@ -757,8 +757,9 @@ public sealed class ComposerRulesTests
 
         config.Mode = "local-only";
         Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "public-tickets", null).Select(o => o.Value));
-        config.Mode = "LocalOnly"; // enum-name spelling from an older Host is still understood
-        Assert.Equal(new[] { "ollama/qwen3:8b" }, ComposerRules.EligibleOverrides(config, "public-tickets", null).Select(o => o.Value));
+        // One contract spelling only: an enum-name spelling is not "local-only" (the Host never sends it).
+        Assert.False(PolicyRoutes.IsLocalOnly("LocalOnly"));
+        Assert.True(PolicyRoutes.IsLocalOnly("local-only"));
     }
 }
 
@@ -964,15 +965,22 @@ public sealed class TraceModelTests
     }
 
     [Fact]
-    public void Audit_summary_fallback_reads_objects_and_compact_strings()
+    public void Audit_summary_fallback_reads_the_typed_compact_trace()
     {
-        var summary = System.Text.Json.JsonDocument.Parse(
-            "[{\"Stage\":\"auth\",\"State\":\"passed\",\"DurationMs\":1},\"policy:passed:3\",\"provider:failed:900\",\"provider:passed:400\",{\"nonsense\":1}]")
-            .RootElement.EnumerateArray().Select(e => e.Clone()).ToList();
+        // Core AuditTraceStep shape only ({Stage, State, DurationMs, AttemptId?, ReasonCode?}); provider steps are matched
+        // to Attempts[] by AttemptId.
+        var summary = new List<AuditTraceStepView>
+        {
+            new() { Stage = "auth", State = "passed", DurationMs = 1 },
+            new() { Stage = "policy", State = "passed", DurationMs = 3 },
+            new() { Stage = "provider", State = "failed", DurationMs = 900, AttemptId = "a1", ReasonCode = "timeout" },
+            new() { Stage = "provider", State = "passed", DurationMs = 400, AttemptId = "a2" },
+            new() { Stage = "", State = "passed" },
+        };
         var attempts = new List<AuditAttemptView>
         {
-            new() { AttemptId = "a1", ConnectionId = "openai", ModelId = "gpt-x" },
-            new() { AttemptId = "a2", ConnectionId = "ollama", ModelId = "qwen" },
+            new() { AttemptId = "a1", ConnectionId = "openai", ModelId = "gpt-x", Outcome = "failed" },
+            new() { AttemptId = "a2", ConnectionId = "ollama", ModelId = "qwen", Outcome = "served" },
         };
         var v = TraceModel.FromAuditSummary(summary, attempts, 3)!;
         Assert.Equal("audit summary", v.Source);
@@ -983,6 +991,8 @@ public sealed class TraceModelTests
         Assert.Equal(2, p.Attempts.Count);
         Assert.Equal("openai/gpt-x", p.Attempts[0].Target);
         Assert.Equal(TraceStepState.Failed, p.Attempts[0].State);
+        Assert.Equal("timeout", p.Attempts[0].ReasonCode);
+        Assert.Equal("ollama/qwen", p.Attempts[1].Target);
         Assert.Equal(TraceStepState.Passed, p.State);
         Assert.Null(TraceModel.FromAuditSummary(null));
         Assert.Null(TraceModel.FromAuditSummary([]));
@@ -1013,12 +1023,13 @@ public sealed class ShellStatusTests
 {
     [Theory]
     [InlineData("local-only", "Local-only", "local")]
-    [InlineData("LocalOnly", "Local-only", "local")]
     [InlineData("hybrid", "Hybrid", "hybrid")]
-    [InlineData("Hybrid", "Hybrid", "hybrid")]
     [InlineData("legacy-cloud", "Legacy cloud", "legacy")]
-    [InlineData("LegacyCloud", "Legacy cloud", "legacy")]
-    [InlineData("cloud", "Legacy cloud", "legacy")]
+    // One explicit contract (docs/ui-api-contract.md "Wire spellings"): other spellings are not guessed.
+    [InlineData("LocalOnly", "Mode not reported", "unknown")]
+    [InlineData("Hybrid", "Mode not reported", "unknown")]
+    [InlineData("LegacyCloud", "Mode not reported", "unknown")]
+    [InlineData("cloud", "Mode not reported", "unknown")]
     [InlineData(null, "Mode not reported", "unknown")]
     [InlineData("", "Mode not reported", "unknown")]
     [InlineData("quantum", "Mode not reported", "unknown")]
@@ -1626,34 +1637,40 @@ public sealed class PolicyRoutesTests
 public sealed class SegmentScopeTests
 {
     [Fact]
-    public void Current_segment_is_explicit_then_by_id_then_first()
+    public void Current_segment_is_the_hosts_explicit_flag_only()
     {
-        var a = new AuditSegmentDto { Id = "seg-2", Current = true };
-        var b = new AuditSegmentDto { Id = "current" };
-        var c = new AuditSegmentDto { Id = "2026-10-01" };
-        Assert.True(SegmentScope.IsCurrent(a));
-        Assert.True(SegmentScope.IsCurrent(b));
-        Assert.False(SegmentScope.IsCurrent(new AuditSegmentDto { Id = "x", Current = false }));
-        var unflagged = new List<AuditSegmentDto> { new() { Id = "live" }, c };
-        Assert.True(SegmentScope.IsCurrent(unflagged[0], unflagged));
-        Assert.False(SegmentScope.IsCurrent(c, unflagged));
-        Assert.False(SegmentScope.IsCurrent(c, [b, c]));
+        Assert.True(SegmentScope.IsCurrent(new AuditSegmentDto { Id = "seg-2", Current = true }));
+        // Never inferred from the id or from the list order.
+        Assert.False(SegmentScope.IsCurrent(new AuditSegmentDto { Id = "current", Current = false }));
+        Assert.False(SegmentScope.IsCurrent(new AuditSegmentDto { Id = "a-0123456789abcdef" }));
+    }
+
+    [Fact]
+    public void Page_scope_comes_from_the_segment_descriptor()
+    {
+        var first = new DateTimeOffset(2026, 10, 16, 9, 0, 0, TimeSpan.Zero);
+        Assert.Equal("Current segment · since 2026-10-16 09:00:00 UTC",
+            SegmentScope.Label(new SegmentInfo { Id = "current", Label = "Current segment", IsCurrent = true, FirstUtc = first }));
+        Assert.Equal("Archived segment Archived 2026-10-01 09:00:00 UTC · read-only",
+            SegmentScope.Label(new SegmentInfo { Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00:00 UTC", IsCurrent = false }));
+        // An archived page whose id happens to be "current" is still archived: the flag decides.
+        Assert.StartsWith("Archived segment", SegmentScope.Label(new SegmentInfo { Id = "current", IsCurrent = false }), StringComparison.Ordinal);
     }
 
     [Fact]
     public void Labels_say_which_segment_and_that_filters_cover_only_loaded_records()
     {
         var first = new DateTimeOffset(2026, 10, 16, 9, 0, 0, TimeSpan.Zero);
-        Assert.Equal("Current segment · since 2026-10-16 09:00:00 UTC", SegmentScope.Label(new AuditSegmentDto { Id = "current", FirstUtc = first }, true));
-        Assert.Equal("Archived segment Oct 1 · read-only", SegmentScope.Label(new AuditSegmentDto { Id = "a1", Label = "Oct 1" }, false));
-        Assert.Equal("Archived · a1 (1,200 records)", SegmentScope.Option(new AuditSegmentDto { Id = "a1", Entries = 1200 }, false));
+        Assert.Equal("Current segment · since 2026-10-16 09:00:00 UTC", SegmentScope.Label(new AuditSegmentDto { Id = "current", Current = true, FirstUtc = first }));
+        Assert.Equal("Archived segment Oct 1 · read-only", SegmentScope.Label(new AuditSegmentDto { Id = "a1", Label = "Oct 1" }));
+        Assert.Equal("Archived · a1 (1,200 records)", SegmentScope.Option(new AuditSegmentDto { Id = "a1", Entries = 1200 }));
 
         var cov = SegmentScope.Coverage("Current segment", 200, 1500, moreAvailable: true, filtersActive: true);
         Assert.Contains("200 of 1,500 records loaded", cov, StringComparison.Ordinal);
         Assert.Contains("Load older", cov, StringComparison.Ordinal);
         Assert.Contains("only to these loaded records", cov, StringComparison.Ordinal);
         Assert.DoesNotContain("all history", cov, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("not reachable", SegmentScope.Coverage("Current segment", 200, 1500, moreAvailable: false, filtersActive: false), StringComparison.Ordinal);
+        Assert.DoesNotContain("Load older", SegmentScope.Coverage("Current segment", 200, 1500, moreAvailable: false, filtersActive: false), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -1709,25 +1726,6 @@ public sealed class BudgetTextTests
         Assert.True(BudgetText.NoSpendAnywhere([new BudgetStateDto { Id = "g", CapUsd = 10m }]));
         Assert.False(BudgetText.NoSpendAnywhere([new BudgetStateDto { Id = "g", CapUsd = 10m, ReservedUsd = 0.0001m }]));
         Assert.False(BudgetText.NoSpendAnywhere(null));
-    }
-
-    [Fact]
-    public void Contributing_requests_parse_leniently_and_unknown_shapes_are_null()
-    {
-        var arr = BudgetRequests.Parse("[{\"request_id\":\"req_1\",\"attempt_id\":\"a1\",\"amount_usd\":0.000184,\"ts_utc\":\"2026-10-16T09:00:00Z\"},{\"nope\":1}]");
-        var one = Assert.Single(arr!);
-        Assert.Equal("req_1", one.RequestId);
-        Assert.Equal(0.000184m, one.AmountUsd);
-        Assert.Equal("a1", one.AttemptId);
-        Assert.NotNull(one.TimestampUtc);
-
-        var wrapped = BudgetRequests.Parse("{\"items\":[{\"id\":\"req_2\",\"settled_usd\":1.5}]}");
-        Assert.Equal("req_2", Assert.Single(wrapped!).RequestId);
-        Assert.Equal(1.5m, wrapped![0].AmountUsd);
-
-        Assert.Null(BudgetRequests.Parse("{\"something\":true}"));
-        Assert.Null(BudgetRequests.Parse("not json"));
-        Assert.Null(BudgetRequests.Parse(""));
     }
 }
 
@@ -1917,5 +1915,453 @@ public sealed class RequestFilterApplicationTests
         Assert.True(RequestFilter.Matches(a, c, DateTimeOffset.UtcNow));
         Assert.False(RequestFilter.Matches(legacy, c, DateTimeOffset.UtcNow));
         Assert.Equal(new[] { "demo-app" }, RequestFilter.Applications([a, legacy]));
+    }
+}
+
+// ---- Review round 2 (UI): pure logic behind U2/U4/U6/U7/U8/U9/U10 ----
+
+public sealed class SubmissionPollTests
+{
+    private const string Client = "0123456789abcdef0123456789abcdef";
+    private const string Req = "req_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    private static PlaygroundSubmissionDto Found(string state = "running") => new() { ClientRequestId = Client, RequestId = Req, State = state };
+
+    [Fact]
+    public void Not_registered_yet_polls_again_then_subscribes_exactly_once()
+    {
+        var p = new SubmissionPoll(Client);
+        Assert.True(p.ShouldPoll);
+        Assert.Equal(SubmissionPollAction.PollAgain, p.OnPollResult(404, null));
+        Assert.Equal(SubmissionPollAction.PollAgain, p.OnPollResult(null, null));   // transport hiccup: bounded retry
+        Assert.Equal(SubmissionPollAction.Subscribe, p.OnPollResult(200, Found()));
+        Assert.Equal(Req, p.RequestId);
+        Assert.Equal("submission lookup", p.Source);
+        Assert.False(p.ShouldPoll);
+        Assert.Equal(3, p.Polls);
+
+        // Later answers and the finished POST never start a second subscription.
+        Assert.Equal(SubmissionPollAction.Stop, p.OnPollResult(200, Found("completed")));
+        Assert.Equal(SubmissionPollAction.Stop, p.OnSendCompleted(Req));
+        Assert.True(p.Stopped);
+    }
+
+    [Fact]
+    public void A_body_for_another_submission_is_not_accepted()
+    {
+        var p = new SubmissionPoll(Client);
+        var other = new PlaygroundSubmissionDto { ClientRequestId = "ffff", RequestId = "req_x", State = "running" };
+        Assert.Equal(SubmissionPollAction.PollAgain, p.OnPollResult(200, other));
+        Assert.Null(p.RequestId);
+    }
+
+    [Fact]
+    public void Response_id_is_the_backstop_when_polling_found_nothing()
+    {
+        var p = new SubmissionPoll(Client);
+        Assert.Equal(SubmissionPollAction.PollAgain, p.OnPollResult(404, null));
+        Assert.Equal(SubmissionPollAction.Subscribe, p.OnSendCompleted(Req));
+        Assert.Equal("response", p.Source);
+        Assert.False(p.ShouldPoll);
+
+        var none = new SubmissionPoll(Client);
+        Assert.Equal(SubmissionPollAction.Stop, none.OnSendCompleted(null));   // 400 before governance: no id, no trace
+        Assert.Null(none.RequestId);
+    }
+
+    [Fact]
+    public void Unauthorized_and_the_bound_stop_polling()
+    {
+        var p = new SubmissionPoll(Client);
+        Assert.Equal(SubmissionPollAction.Stop, p.OnPollResult(401, null));
+        Assert.False(p.ShouldPoll);
+
+        var b = new SubmissionPoll(Client);
+        for (int i = 1; i < SubmissionPoll.MaxPolls; i++) Assert.Equal(SubmissionPollAction.PollAgain, b.OnPollResult(404, null));
+        Assert.Equal(SubmissionPollAction.Stop, b.OnPollResult(404, null));
+        Assert.False(b.ShouldPoll);
+        Assert.Equal(TimeSpan.FromMilliseconds(250), SubmissionPoll.Interval);
+    }
+
+    [Fact]
+    public void Client_request_ids_are_guid_n()
+    {
+        var id = RequestSnapshot.NewClientRequestId();
+        Assert.Matches("^[0-9a-f]{32}$", id);
+    }
+}
+
+public sealed class LiveTraceStartTests
+{
+    private static TraceEventDto E(long seq, string stage, string state, string? attempt = null, double? ms = null)
+        => new() { Seq = seq, Stage = stage, State = state, AttemptId = attempt, DurationMs = ms, RequestId = "req_1" };
+
+    [Fact]
+    public void Provider_shows_running_while_waiting_with_its_output_bounds()
+    {
+        var acc = new TraceAccumulator();
+        acc.AddRange([E(1, "auth", "passed", ms: 0.4), E(2, "budget", "passed", ms: 0.2),
+            new TraceEventDto { Seq = 3, Stage = "provider", State = "running", AttemptId = "att_1", Target = "ollama/qwen",
+                RequestedMaxOutputTokens = 256, EffectiveMaxOutputTokens = 64 }]);
+        var v = acc.View();
+        var provider = v.Steps.Single(s => s.Stage == "provider");
+        Assert.Equal(TraceStepState.Running, provider.State);
+        Assert.Null(provider.DurationMs);                   // no invented timing while it runs
+        var a = Assert.Single(provider.Attempts);
+        Assert.Equal(256, a.RequestedMaxOutputTokens);
+        Assert.Equal(64, a.EffectiveMaxOutputTokens);
+        Assert.True(v.HasEvents);
+        Assert.Equal(TraceStepState.Pending, v.Steps.Single(s => s.Stage == "attribution").State);
+    }
+
+    [Fact]
+    public void Unknown_state_spellings_are_not_guessed()
+        => Assert.Equal(TraceStepState.NotReported, TraceModel.ParseState("canceled"));
+}
+
+public sealed class PolicyEditingTests
+{
+    private static CovenantConfigDto AllClasses()
+    {
+        var cfg = Cfg.Hybrid();
+        cfg.Mode = "legacy-cloud";
+        cfg.Profiles = [new WorkloadProfileDto { Id = "internal", Name = "Internal", Baseline = "Internal" }];
+        cfg.Policies =
+        [
+            new PolicyDto
+            {
+                Id = "legacy", Name = "Imported", Enabled = true, Classifications = ["Public", "Internal", "Pii", "Phi"], Strategy = "fixed",
+                Targets = [new PolicyTargetDto { ConnectionId = "openai", ModelId = "gpt-4o-mini" }, new PolicyTargetDto { ConnectionId = "ollama", ModelId = "qwen2.5-coder:7b" }],
+                Retry = new RetrySettingsDto { MaxAttempts = 2, DeadlineMs = 60_000, On = ["timeout"] },
+            },
+        ];
+        return cfg;
+    }
+
+    [Fact]
+    public void Split_makes_public_cloud_with_local_fallback_and_never_cloud_for_sensitive()
+    {
+        var cfg = AllClasses();
+        Assert.True(PolicyEditing.CanSplit(cfg.Policies[0]));
+        Assert.Null(PolicyEditing.ApplySplit(cfg, "legacy"));
+        Assert.Equal(2, cfg.Policies.Count);
+
+        var pub = cfg.Policies[0];
+        Assert.Equal(new[] { "Public" }, pub.Classifications);
+        Assert.Equal(new[] { "openai/gpt-4o-mini", "ollama/qwen2.5-coder:7b" }, pub.Targets.Select(PolicyRoutes.Key));
+        Assert.Equal(60_000, pub.Retry!.DeadlineMs);
+
+        var restricted = cfg.Policies[1];
+        Assert.Equal(new[] { "Internal", "Pii", "Phi" }, restricted.Classifications);
+        Assert.Equal(new[] { "ollama/qwen2.5-coder:7b" }, restricted.Targets.Select(PolicyRoutes.Key));
+        Assert.DoesNotContain(restricted.Targets, t => t.ConnectionId == "openai");
+        Assert.All(PolicyRoutes.Targets(restricted, cfg), t => Assert.Equal("Local", t.Boundary));
+        Assert.NotEqual(pub.Id, restricted.Id);
+        Assert.DoesNotContain(cfg.Policies, p => p.Id == "legacy");
+    }
+
+    [Fact]
+    public void Split_without_a_cloud_target_proposes_a_priced_cloud_model_and_local_only_mode_keeps_public_local()
+    {
+        var cfg = AllClasses();
+        cfg.Policies[0].Targets = [new PolicyTargetDto { ConnectionId = "ollama", ModelId = "qwen2.5-coder:7b" }];
+        var plan = PolicyEditing.PlanSplit(cfg.Policies[0], cfg);
+        Assert.Null(plan.Problem);
+        Assert.Equal("openai/gpt-4o-mini", PolicyRoutes.Key(plan.PublicPolicy!.Targets[0]));
+        Assert.Contains(plan.Notes, n => n.Contains("first enabled, priced cloud model", StringComparison.Ordinal));
+
+        cfg.Mode = "local-only";
+        var local = PolicyEditing.PlanSplit(cfg.Policies[0], cfg);
+        Assert.Equal(new[] { "ollama/qwen2.5-coder:7b" }, local.PublicPolicy!.Targets.Select(PolicyRoutes.Key));
+        Assert.DoesNotContain(local.RestrictedPolicy!.Targets, t => t.ConnectionId == "openai");
+    }
+
+    [Fact]
+    public void Split_needs_a_local_model_and_a_mixed_policy()
+    {
+        var cfg = AllClasses();
+        cfg.Connections.RemoveAll(c => c.Boundary == "Local");
+        var before = ConfigCopy.Canonical(cfg);
+        Assert.NotNull(PolicyEditing.ApplySplit(cfg, "legacy"));
+        Assert.Equal(before, ConfigCopy.Canonical(cfg));   // untouched
+
+        Assert.False(PolicyEditing.CanSplit(Cfg.Hybrid().Policies[0]));   // Public only
+    }
+
+    [Fact]
+    public void Create_policy_never_accepts_a_cloud_target_for_pii_or_phi()
+    {
+        var cfg = Cfg.Hybrid();
+        var form = new NewPolicyForm { Id = "pii-cloud", Name = "PII", Classifications = ["Pii"], Targets = ["openai/gpt-4o-mini"] };
+        var problems = PolicyEditing.Problems(form, cfg);
+        Assert.Contains(problems, p => p.Contains(PolicyText.SensitiveNeverCloud, StringComparison.Ordinal));
+        Assert.Contains(PolicyEditing.TargetOptions(["Pii"], cfg), o => o.Value == "openai/gpt-4o-mini" && o.DisabledReason is not null);
+        Assert.NotEmpty(PolicyEditing.Add(cfg, form));
+        Assert.Equal(3, cfg.Policies.Count);
+
+        var ok = new NewPolicyForm { Id = "public-2", Name = "Public tickets", Classifications = ["Public"], Profiles = [], Targets = ["openai/gpt-4o-mini", "ollama/qwen2.5-coder:7b"] };
+        Assert.Empty(PolicyEditing.Add(cfg, ok));
+        var added = cfg.Policies[^1];
+        Assert.Equal("public-2", added.Id);
+        Assert.True(added.Enabled);
+        Assert.Equal("fixed", added.Strategy);
+        Assert.Equal(new[] { "openai/gpt-4o-mini", "ollama/qwen2.5-coder:7b" }, added.Targets.Select(PolicyRoutes.Key));
+
+        Assert.Contains(PolicyEditing.Problems(new NewPolicyForm { Id = "public-2", Name = "x", Classifications = ["Public"], Targets = ["ollama/qwen2.5-coder:7b"] }, cfg),
+            p => p.Contains("already exists", StringComparison.Ordinal));
+        Assert.Contains(PolicyEditing.Problems(new NewPolicyForm { Id = "p", Name = "x", Classifications = ["Public"], Profiles = ["nope"], Targets = ["ollama/qwen2.5-coder:7b"] }, cfg),
+            p => p.Contains("does not exist", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Applicability_edits_refuse_sensitive_classes_behind_a_cloud_target()
+    {
+        var cfg = Cfg.Hybrid();
+        var pub = cfg.Policies[0];   // openai first
+        Assert.NotNull(PolicyEditing.SetClassifications(pub, ["Public", "Pii"], cfg));
+        Assert.Equal(new[] { "Public" }, pub.Classifications);
+        Assert.NotNull(PolicyEditing.SetClassifications(pub, [], cfg));
+        Assert.Null(PolicyEditing.SetClassifications(cfg.Policies[1], ["Internal", "Public"], cfg));
+        Assert.Equal(new[] { "Public", "Internal" }, cfg.Policies[1].Classifications);   // contract order
+
+        cfg.Profiles = [new WorkloadProfileDto { Id = "internal", Name = "Internal", Baseline = "Internal" }];
+        Assert.Null(PolicyEditing.SetProfiles(cfg.Policies[1], ["internal"], cfg));
+        Assert.Equal(new[] { "internal" }, cfg.Policies[1].Profiles);
+        Assert.NotNull(PolicyEditing.SetProfiles(cfg.Policies[1], ["ghost"], cfg));
+    }
+
+    [Fact]
+    public void Removing_the_only_policy_for_a_class_says_it_will_be_refused()
+    {
+        var cfg = Cfg.Hybrid();
+        var lines = PolicyEditing.RemovalImpact(cfg.Policies[2], cfg);
+        Assert.Equal(2, lines.Count);
+        Assert.All(lines, l => Assert.Contains("REFUSED", l, StringComparison.Ordinal));
+        Assert.True(PolicyEditing.Remove(cfg, "sensitive"));
+        Assert.Equal(new[] { "public", "internal" }, cfg.Policies.Select(p => p.Id));
+        Assert.False(PolicyEditing.Remove(cfg, "sensitive"));
+    }
+}
+
+public sealed class RoundTwoCostAndFactsTests
+{
+    [Fact]
+    public void Mixed_cost_basis_is_labelled_as_including_estimates()
+    {
+        var r = Rec.V2(costBasis: "mixed", cost: 0.0021m);
+        Assert.Equal("≈ $0.0021 · Mixed (includes estimates)", CostText.Cost(r));
+        Assert.Equal("≈ $0.0021 mixed", CostText.CostShort(r));
+        Assert.Contains("includes estimates", CostText.BasisDescription("mixed"), StringComparison.Ordinal);
+        Assert.Equal("≈ $0.0021 Mixed (includes estimates)", CostText.BasisCost("mixed", 0.0021m));
+        Assert.DoesNotContain("reported", CostText.Cost(r), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Requested_and_effective_output_bounds_are_labelled_separately()
+    {
+        var r = Rec.V2();
+        r.RequestedMaxOutputTokens = 256;
+        r.EffectiveMaxOutputTokens = 64;
+        r.ServedConnectionId = "ollama";
+        Assert.Equal("256", RecordFacts.RequestedMaxOutputTokens(r));
+        Assert.Equal("64", RecordFacts.EffectiveMaxOutputTokens(r));
+        Assert.Equal("Requested 256 · enforced 64", RecordFacts.BoundsLine(r));
+        Assert.Equal("ollama", RecordFacts.ServedConnection(r));
+
+        var none = Rec.V2();
+        none.EffectiveMaxOutputTokens = 1024;
+        Assert.StartsWith("None requested", RecordFacts.RequestedMaxOutputTokens(none), StringComparison.Ordinal);
+
+        var old = Rec.V2();   // older record: neither field
+        Assert.Equal("Not recorded", RecordFacts.RequestedMaxOutputTokens(old));
+        Assert.Equal("Not recorded", RecordFacts.EffectiveMaxOutputTokens(old));
+        Assert.Equal("Not recorded", RecordFacts.ServedConnection(old));
+        Assert.Equal("Not recorded", RecordFacts.TruncatedText(old));
+    }
+
+    [Fact]
+    public void Truncation_and_incomplete_streams_are_stated_clearly()
+    {
+        var t = Rec.V2();
+        t.EffectiveMaxOutputTokens = 64;
+        t.Attempts = [new AuditAttemptView { AttemptId = "att_1", ConnectionId = "ollama", ModelId = "qwen", Outcome = "served", EffectiveMaxOutputTokens = 64, Truncated = true }];
+        Assert.True(RecordFacts.Truncated(t));
+        Assert.StartsWith("Yes", RecordFacts.TruncatedText(t), StringComparison.Ordinal);
+        var line = Assert.Single(AttemptFacts.Lines(t));
+        Assert.True(line.Truncated);
+        Assert.Equal(64, line.EffectiveMaxOutputTokens);
+        Assert.EndsWith("· bound 64 · truncated (length)", AttemptFacts.Detail(line), StringComparison.Ordinal);
+
+        var inc = Rec.Upstream();
+        inc.PartialOutputChars = 120;
+        inc.Attempts = [new AuditAttemptView { AttemptId = "att_1", ConnectionId = "openai", ModelId = "gpt-x", Outcome = "failed", ErrorClass = "incomplete_stream", EffectiveMaxOutputTokens = 256 }];
+        Assert.True(RecordFacts.IsIncompleteStream(inc));
+        var text = RecordFacts.IncompleteStreamText(inc)!;
+        Assert.Contains("NOT served", text, StringComparison.Ordinal);
+        Assert.Contains("120 characters", text, StringComparison.Ordinal);
+        Assert.Equal("256 (last attempt — not served)", RecordFacts.EffectiveMaxOutputTokens(inc));
+        Assert.Null(RecordFacts.IncompleteStreamText(t));
+    }
+
+    [Fact]
+    public void Attempt_success_is_the_contract_word_served_only()
+    {
+        Assert.True(AttemptFacts.IsSuccess(new AuditAttemptView { Outcome = "served" }));
+        Assert.False(AttemptFacts.IsSuccess(new AuditAttemptView { Outcome = "ok" }));
+        Assert.False(AttemptFacts.IsSuccess(new AuditAttemptView { Outcome = "succeeded" }));
+    }
+
+    [Theory]
+    [InlineData("Ollama")]
+    [InlineData("OpenAi")]
+    [InlineData("Anthropic")]
+    [InlineData("OpenAiCompatible")]
+    public void New_connections_start_with_a_120_second_timeout(string kind)
+    {
+        var f = kind == "Ollama" ? ConnectionForm.NewOllama([]) : ConnectionForm.NewCloud(kind, []);
+        Assert.Equal(120, f.TimeoutSeconds);
+        Assert.Equal(ConnectionForm.DefaultTimeoutSeconds, f.TimeoutSeconds);
+        Assert.Equal(120, f.ToConnection().TimeoutSeconds);
+        Assert.DoesNotContain(f.Problems([], null), p => p.Contains("Timeout", StringComparison.Ordinal));
+    }
+}
+
+public sealed class RequestPagingTests
+{
+    private static RequestsResponse Page(string id, bool current, string? cursor, int items = 2)
+        => new()
+        {
+            Segment = new SegmentInfo { Id = id, Label = current ? "Current segment" : "Archived 2026-10-01 09:00:00 UTC", IsCurrent = current, Entries = 10, ChainValid = true },
+            Items = Enumerable.Range(0, items).Select(i => Rec.V2(id: "req_" + id + i.ToString(System.Globalization.CultureInfo.InvariantCulture))).ToList(),
+            NextCursor = cursor,
+        };
+
+    [Fact]
+    public void Current_pages_follow_next_cursor_until_the_last_page()
+    {
+        var p = new RequestPaging();
+        p.Reset(null);
+        Assert.False(p.CanLoadOlder);
+        Assert.Equal(PageResult.Accepted, p.ApplyPage(Page("current", true, "c2-a"), older: false));
+        Assert.True(p.CanLoadOlder);
+        Assert.Equal("c2-a", p.NextCursor);
+        Assert.Equal("Current segment", p.Segment!.Label);
+        Assert.Equal(PageResult.Accepted, p.ApplyPage(Page("current", true, null), older: true));
+        Assert.False(p.CanLoadOlder);
+        Assert.True(p.Loaded);
+    }
+
+    [Fact]
+    public void Scope_is_the_descriptor_never_the_request()
+    {
+        var p = new RequestPaging();
+        p.Reset(null);
+        // Asked for the current segment, but the Host says this page is archived: refused, nothing shown.
+        Assert.Equal(PageResult.SegmentMismatch, p.ApplyPage(Page("a-0123456789abcdef", false, "x"), older: false));
+        Assert.False(p.Loaded);
+        Assert.NotNull(p.Problem);
+
+        var a = new RequestPaging();
+        a.Reset("a-0123456789abcdef");
+        Assert.Equal(PageResult.SegmentMismatch, a.ApplyPage(Page("current", true, "x"), older: false));
+        Assert.Equal(PageResult.Accepted, a.ApplyPage(Page("a-0123456789abcdef", false, "y"), older: false));
+        Assert.Equal(PageResult.SegmentMismatch, a.ApplyPage(Page("a-ffffffffffffffff", false, null), older: true));   // older page of another segment
+        Assert.Null(a.NextCursor);
+    }
+
+    [Fact]
+    public void Cursor_expired_410_stops_paging_and_asks_for_a_reload()
+    {
+        var p = new RequestPaging();
+        p.Reset(null);
+        p.ApplyPage(Page("current", true, "c2-a"), older: false);
+        Assert.Equal(PageResult.CursorExpired, p.ApplyError(410, "cursor_expired", "410: the segment was rotated"));
+        Assert.True(p.Expired);
+        Assert.False(p.CanLoadOlder);
+        Assert.Null(p.NextCursor);
+        Assert.Equal("The audit segment changed (archived) — reload the list.", p.Problem);
+
+        Assert.Equal(PageResult.Failed, p.ApplyError(400, "invalid_cursor", "400: bad"));
+        Assert.Contains("invalid_cursor", p.Problem, StringComparison.Ordinal);
+        Assert.Equal(PageResult.Failed, p.ApplyError(410, "expired", "410: other"));   // only cursor_expired means "reload"
+
+        p.Reset(null);
+        Assert.False(p.Expired);
+        Assert.Null(p.Problem);
+        Assert.Equal(PageResult.Accepted, p.ApplyPage(Page("current", true, "c2-b"), older: false));
+        Assert.True(p.CanLoadOlder);
+    }
+
+    [Fact]
+    public void An_empty_page_has_no_older_cursor()
+    {
+        var p = new RequestPaging();
+        p.Reset(null);
+        Assert.Equal(PageResult.Accepted, p.ApplyPage(Page("current", true, "c2-a", items: 0), older: false));
+        Assert.False(p.CanLoadOlder);
+    }
+}
+
+public sealed class HeaderLocalHealthTests
+{
+    private static readonly DateTimeOffset Now = new(2026, 10, 17, 12, 0, 0, TimeSpan.Zero);
+
+    private static CatalogResponse Catalog(ModelHealth? health, ModelHealth? endpoint = null) => new()
+    {
+        Mode = "hybrid",
+        Local = new LocalRouteInfo
+        {
+            Configured = true, Registered = true, ConnectionId = "ollama-2", ModelId = "qwen2.5-coder:7b", Endpoint = "http://localhost:11434/v1",
+            Health = health, EndpointHealth = endpoint ?? new ModelHealth(),
+        },
+        // A stale legacy connection literally named "local" must never be consulted.
+        Models = [new CatalogModel { Adapter = "local", ModelId = "qwen2.5-coder:7b", Registered = true, Health = new ModelHealth { State = "failed", LastFailureUtc = Now } }],
+    };
+
+    private static ConnectionHealthDto Row(string key, ModelHealth h) => new()
+    {
+        Key = key, ConnectionId = key.Split(':')[0], ModelId = key[(key.IndexOf(':') + 1)..], Boundary = "Local", Enabled = true, Health = h,
+    };
+
+    [Fact]
+    public void A_successful_governed_local_call_is_ready_from_status_connection_health()
+    {
+        var v = LocalHealth.Derive(Catalog(new ModelHealth()), [Row("ollama-2:qwen2.5-coder:7b", new ModelHealth { State = "ok", LastSuccessUtc = Now })]);
+        Assert.Equal(LocalRouteState.Ready, v.State);
+        Assert.Equal("status connection_health", v.Source);
+        Assert.Equal("ollama-2", v.ConnectionId);
+    }
+
+    [Fact]
+    public void Catalog_local_health_is_used_when_status_has_no_row_and_the_legacy_local_adapter_is_ignored()
+    {
+        var v = LocalHealth.Derive(Catalog(new ModelHealth { State = "ok", LastSuccessUtc = Now }), null);
+        Assert.Equal(LocalRouteState.Ready, v.State);
+        Assert.Equal("catalog local.health", v.Source);
+
+        var unobserved = LocalHealth.Derive(Catalog(new ModelHealth()), [Row("local:qwen2.5-coder:7b", new ModelHealth { State = "failed", LastFailureUtc = Now })]);
+        Assert.Equal(LocalRouteState.NotObserved, unobserved.State);   // another connection's row is not this one's health
+    }
+
+    [Fact]
+    public void Endpoint_health_only_when_runtime_health_is_unknown_and_newer_failures_degrade()
+    {
+        var probe = LocalHealth.Derive(Catalog(new ModelHealth { State = "unknown" }, new ModelHealth { State = "ok", LastSuccessUtc = Now }), []);
+        Assert.Equal(LocalRouteState.Ready, probe.State);
+        Assert.Equal("catalog local.endpoint_health", probe.Source);
+
+        var degraded = LocalHealth.Derive(Catalog(new ModelHealth { State = "failed", LastSuccessUtc = Now.AddMinutes(-5), LastFailureUtc = Now, LastError = "timeout" },
+            new ModelHealth { State = "ok", LastSuccessUtc = Now }), null);
+        Assert.Equal(LocalRouteState.Degraded, degraded.State);
+        Assert.Equal("timeout", degraded.Health!.LastError);
+    }
+
+    [Fact]
+    public void Not_configured_not_registered_and_unknown()
+    {
+        Assert.Equal(LocalRouteState.Unknown, LocalHealth.Derive(null, null).State);
+        Assert.Equal(LocalRouteState.NotConfigured, LocalHealth.Derive(new CatalogResponse { Local = new LocalRouteInfo { Configured = false } }, null).State);
+        Assert.Equal(LocalRouteState.NotRegistered,
+            LocalHealth.Derive(new CatalogResponse { Local = new LocalRouteInfo { Configured = true, Registered = false, ConnectionId = "ollama" } }, null).State);
     }
 }

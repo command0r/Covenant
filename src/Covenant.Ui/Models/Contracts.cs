@@ -2,10 +2,11 @@ using System.Text.Json.Serialization;
 
 namespace Covenant.Ui.Models;
 
-// Wire shapes the console reads, mirrored from docs/ui-api-contract.md and the Host's StatusContracts.cs /
-// Evidence.cs / OpenAiContracts.cs. Deliberately lenient: nothing is `required`, fields added by later tasks are
-// nullable, unknown members are ignored — the console must render an older or newer Host truthfully
-// ("Not recorded") rather than fail to deserialize.
+// Wire shapes the console reads, mirrored one-to-one from the Host DTOs (StatusContracts.cs, Evidence.cs,
+// OpenAiContracts.cs, ConsoleBackend.cs, AuditSegments.cs, Covenant.Core AuditEntry) and docs/ui-api-contract.md.
+// ONE shape per endpoint: no alternative field names, no shape sniffing. The only intentional variance is the
+// documented audit-record evolution (legacy lines lack the v2/v3 fields → nullable here → "Not recorded").
+// tests/Covenant.Tests/ContractRoundTripTests.cs serializes the Host types and reads them with UiJsonContext.
 
 public sealed class StatusReport
 {
@@ -21,7 +22,6 @@ public sealed class StatusReport
     [JsonPropertyName("otel_enabled")] public bool OtelEnabled { get; set; }
     [JsonPropertyName("routing_threshold_tokens")] public long RoutingThresholdTokens { get; set; }
 
-    // Task 07 additions (nullable until the Host ships them).
     [JsonPropertyName("environment")] public string? Environment { get; set; }
     [JsonPropertyName("mode")] public string? Mode { get; set; }
     [JsonPropertyName("audit_path")] public string? AuditPath { get; set; }
@@ -31,6 +31,21 @@ public sealed class StatusReport
     [JsonPropertyName("version")] public string? Version { get; set; }
     // v2: the active configuration version every new request binds to.
     [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
+    /// <summary>Review round 2 (B11): CURRENT runtime health of every configured connection + model.</summary>
+    [JsonPropertyName("connection_health")] public List<ConnectionHealthDto>? ConnectionHealth { get; set; }
+}
+
+/// <summary>/admin/status <c>connection_health[]</c> row (Host ConnectionHealthView).</summary>
+public sealed class ConnectionHealthDto
+{
+    /// <summary>"connection_id:model_id".</summary>
+    [JsonPropertyName("key")] public string Key { get; set; } = "";
+    [JsonPropertyName("connection_id")] public string ConnectionId { get; set; } = "";
+    [JsonPropertyName("model_id")] public string ModelId { get; set; } = "";
+    /// <summary>Local | Cloud.</summary>
+    [JsonPropertyName("boundary")] public string Boundary { get; set; } = "";
+    [JsonPropertyName("enabled")] public bool Enabled { get; set; }
+    [JsonPropertyName("health")] public ModelHealth Health { get; set; } = new();
 }
 
 public sealed class AnchorStatus
@@ -81,11 +96,27 @@ public sealed class FinOpsSummary
     [JsonPropertyName("savings_router_usd")] public decimal SavingsRouterUsd { get; set; }
     [JsonPropertyName("savings_cache_usd")] public decimal SavingsCacheUsd { get; set; }
     [JsonPropertyName("cache_hits")] public int CacheHits { get; set; }
+    [JsonPropertyName("unknown_cost_requests")] public int UnknownCostRequests { get; set; }
+    /// <summary>Requests whose total includes an estimate (estimated_from_text / estimated_failed_call / mixed).</summary>
+    [JsonPropertyName("estimated_cost_requests")] public int EstimatedCostRequests { get; set; }
     [JsonPropertyName("cost_by_team_usd")] public Dictionary<string, decimal> CostByTeamUsd { get; set; } = new();
     [JsonPropertyName("denials_by_reason")] public Dictionary<string, int> DenialsByReason { get; set; } = new();
     [JsonPropertyName("activity")] public List<ActivityBucket> Activity { get; set; } = [];
     [JsonPropertyName("requests_by_model")] public Dictionary<string, int> RequestsByModel { get; set; } = new();
     [JsonPropertyName("recent")] public List<RecentRequest> Recent { get; set; } = [];
+    /// <summary>Present only when the active configuration names a priced savings baseline; null otherwise.</summary>
+    [JsonPropertyName("savings")] public SavingsSummaryDto? Savings { get; set; }
+}
+
+public sealed class SavingsSummaryDto
+{
+    [JsonPropertyName("label")] public string Label { get; set; } = "";
+    /// <summary>"connection/model" of the configured baseline.</summary>
+    [JsonPropertyName("baseline")] public string Baseline { get; set; } = "";
+    [JsonPropertyName("route_avoided_usd")] public decimal RouteAvoidedUsd { get; set; }
+    [JsonPropertyName("cache_avoided_usd")] public decimal CacheAvoidedUsd { get; set; }
+    [JsonPropertyName("total_usd")] public decimal TotalUsd { get; set; }
+    [JsonPropertyName("excluded_records")] public int ExcludedRecords { get; set; }
 }
 
 public sealed class ActivityBucket
@@ -119,6 +150,7 @@ public sealed class RecentRequest
     [JsonPropertyName("signal")] public string? Signal { get; set; }
     [JsonPropertyName("prompt_preview")] public string? PromptPreview { get; set; }
     [JsonPropertyName("cache")] public bool CacheHit { get; set; }
+    [JsonPropertyName("cost_basis")] public string? CostBasis { get; set; }
 }
 
 public sealed class KillSwitchRequest
@@ -154,6 +186,8 @@ public sealed class EvidenceReport
     [JsonPropertyName("chain_failure")] public string? ChainFailure { get; set; }
     [JsonPropertyName("first_invalid_line")] public int? FirstInvalidLine { get; set; }
     [JsonPropertyName("entries")] public int Entries { get; set; }
+    /// <summary>Control-plane events in the chain (config.activated, …) — not requests.</summary>
+    [JsonPropertyName("events")] public int Events { get; set; }
     [JsonPropertyName("allowed")] public int Allowed { get; set; }
     [JsonPropertyName("denied")] public int Denied { get; set; }
     [JsonPropertyName("first_entry_utc")] public DateTimeOffset? FirstEntryUtc { get; set; }
@@ -162,7 +196,6 @@ public sealed class EvidenceReport
     [JsonPropertyName("cost_by_team_usd")] public Dictionary<string, decimal> CostByTeamUsd { get; set; } = new();
     [JsonPropertyName("requests_by_classification")] public Dictionary<string, int> RequestsByClassification { get; set; } = new();
 
-    // Task 07 additions.
     [JsonPropertyName("anchor_configured")] public bool? AnchorConfigured { get; set; }
     [JsonPropertyName("anchor_count")] public long? AnchorCount { get; set; }
     [JsonPropertyName("last_anchor_utc")] public DateTimeOffset? LastAnchorUtc { get; set; }
@@ -170,21 +203,24 @@ public sealed class EvidenceReport
 
 // ---- Admin lookups (Task 02): audit records are serialized with their C# names (AuditJsonContext). ----
 
+/// <summary>GET /admin/requests page (Host RequestsPage, AuditJsonContext).</summary>
 public sealed class RequestsResponse
 {
     [JsonPropertyName("segment")] public SegmentInfo Segment { get; set; } = new();
     [JsonPropertyName("items")] public List<AuditEntryView> Items { get; set; } = [];
-    /// <summary>Opaque newest-first position of the next (older) page; null/absent = no older page from this Host.</summary>
+    /// <summary>Opaque cursor of the next (older) page of the SAME segment; null on the last page.</summary>
     [JsonPropertyName("next_cursor")] public string? NextCursor { get; set; }
 }
 
+/// <summary>Segment descriptor of a requests page (Host SegmentInfo). <see cref="Id"/>, <see cref="Label"/> and
+/// <see cref="IsCurrent"/> come from the server on every page — the console never infers the current segment.</summary>
 public sealed class SegmentInfo
 {
-    /// <summary>Segment id (GET /admin/audit/segments). Required to confirm an archived-segment answer.</summary>
     [JsonPropertyName("id")] public string? Id { get; set; }
     [JsonPropertyName("label")] public string? Label { get; set; }
-    [JsonPropertyName("path")] public string? Path { get; set; }
-    [JsonPropertyName("events")] public int? Events { get; set; }
+    [JsonPropertyName("is_current")] public bool IsCurrent { get; set; }
+    [JsonPropertyName("path")] public string Path { get; set; } = "";
+    [JsonPropertyName("events")] public int Events { get; set; }
     [JsonPropertyName("entries")] public int Entries { get; set; }
     [JsonPropertyName("chain_valid")] public bool ChainValid { get; set; }
     [JsonPropertyName("first_utc")] public DateTimeOffset? FirstUtc { get; set; }
@@ -230,28 +266,50 @@ public sealed class AuditEntryView
     [JsonPropertyName("ProfileId")] public string? ProfileId { get; set; }
     [JsonPropertyName("BaselineClassification")] public string? BaselineClassification { get; set; }
     [JsonPropertyName("Attempts")] public List<AuditAttemptView>? Attempts { get; set; }
-    /// <summary>Compact persisted trace. Kept as raw JSON elements because the summary may be objects
-    /// ({Stage, State, DurationMs}) or "stage:state:ms" strings; Logic/TraceModel.FromAuditSummary reads both, so an
-    /// unexpected shape degrades to "Not recorded" instead of breaking the whole record.</summary>
-    [JsonPropertyName("Trace")] public List<System.Text.Json.JsonElement>? Trace { get; set; }
+    /// <summary>Compact persisted trace (Core AuditTraceStep): terminal states only, one provider step per attempt.</summary>
+    [JsonPropertyName("Trace")] public List<AuditTraceStepView>? Trace { get; set; }
     [JsonPropertyName("ReservedUsd")] public decimal? ReservedUsd { get; set; }
     [JsonPropertyName("SettledUsd")] public decimal? SettledUsd { get; set; }
+    /// <summary>max_tokens as the caller asked (null = none asked, or a record older than this field).</summary>
+    [JsonPropertyName("RequestedMaxOutputTokens")] public int? RequestedMaxOutputTokens { get; set; }
+    /// <summary>The output bound Covenant enforced (sent to the provider and used for the reservation).</summary>
+    [JsonPropertyName("EffectiveMaxOutputTokens")] public int? EffectiveMaxOutputTokens { get; set; }
+    /// <summary>Characters already emitted to the client before a stream failed (non-served records only).</summary>
+    [JsonPropertyName("PartialOutputChars")] public int? PartialOutputChars { get; set; }
+    /// <summary>Connection of the attempt that served (a fallback when one served; on a cache hit the connection that
+    /// produced the cached entry).</summary>
+    [JsonPropertyName("ServedConnectionId")] public string? ServedConnectionId { get; set; }
 }
 
-/// <summary>One provider attempt recorded on an audit v3 record (fallback evidence).</summary>
+/// <summary>One step of the compact persisted trace (Core AuditTraceStep).</summary>
+public sealed class AuditTraceStepView
+{
+    [JsonPropertyName("Stage")] public string Stage { get; set; } = "";
+    [JsonPropertyName("State")] public string State { get; set; } = "";
+    [JsonPropertyName("DurationMs")] public double? DurationMs { get; set; }
+    [JsonPropertyName("AttemptId")] public string? AttemptId { get; set; }
+    [JsonPropertyName("ReasonCode")] public string? ReasonCode { get; set; }
+}
+
+/// <summary>One provider attempt recorded on an audit v3 record (Core AuditAttempt). Outcome ∈ served | failed | cancelled;
+/// ErrorClass ∈ connect | timeout | 429 | 5xx | non_retryable | client_cancelled | client_disconnected | incomplete_stream.</summary>
 public sealed class AuditAttemptView
 {
-    [JsonPropertyName("AttemptId")] public string? AttemptId { get; set; }
-    [JsonPropertyName("ConnectionId")] public string? ConnectionId { get; set; }
-    [JsonPropertyName("ModelId")] public string? ModelId { get; set; }
-    [JsonPropertyName("Outcome")] public string? Outcome { get; set; }
+    [JsonPropertyName("AttemptId")] public string AttemptId { get; set; } = "";
+    [JsonPropertyName("ConnectionId")] public string ConnectionId { get; set; } = "";
+    [JsonPropertyName("ModelId")] public string ModelId { get; set; } = "";
+    [JsonPropertyName("Outcome")] public string Outcome { get; set; } = "";
     [JsonPropertyName("ErrorClass")] public string? ErrorClass { get; set; }
-    [JsonPropertyName("DurationMs")] public double? DurationMs { get; set; }
+    [JsonPropertyName("DurationMs")] public double DurationMs { get; set; }
     [JsonPropertyName("CostUsd")] public decimal? CostUsd { get; set; }
     [JsonPropertyName("CostBasis")] public string? CostBasis { get; set; }
     // T04/T06 additive: the attempt's reservation and whether the reported charge exceeded it (settled in full).
     [JsonPropertyName("ReservedUsd")] public decimal? ReservedUsd { get; set; }
     [JsonPropertyName("Overrun")] public bool? Overrun { get; set; }
+    /// <summary>The output bound enforced for THIS attempt (a fallback model may have a lower model bound).</summary>
+    [JsonPropertyName("EffectiveMaxOutputTokens")] public int? EffectiveMaxOutputTokens { get; set; }
+    /// <summary>True when the provider finished with "length" (output cut at the bound).</summary>
+    [JsonPropertyName("Truncated")] public bool? Truncated { get; set; }
 }
 
 public sealed class AttributionTagsView
@@ -327,9 +385,10 @@ public sealed class CatalogModel
     [JsonPropertyName("key")] public string? Key { get; set; }
 }
 
+/// <summary>Host HealthView: state ∈ unknown | ok | failed.</summary>
 public sealed class ModelHealth
 {
-    [JsonPropertyName("state")] public string? State { get; set; }
+    [JsonPropertyName("state")] public string State { get; set; } = "unknown";
     [JsonPropertyName("last_success_utc")] public DateTimeOffset? LastSuccessUtc { get; set; }
     [JsonPropertyName("last_failure_utc")] public DateTimeOffset? LastFailureUtc { get; set; }
     [JsonPropertyName("last_error")] public string? LastError { get; set; }
@@ -341,7 +400,11 @@ public sealed class LocalRouteInfo
     [JsonPropertyName("endpoint")] public string? Endpoint { get; set; }
     [JsonPropertyName("model_id")] public string? ModelId { get; set; }
     [JsonPropertyName("registered")] public bool Registered { get; set; }
-    [JsonPropertyName("endpoint_health")] public ModelHealth? EndpointHealth { get; set; }
+    [JsonPropertyName("endpoint_health")] public ModelHealth EndpointHealth { get; set; } = new();
+    /// <summary>Review round 2 (B11): the local-boundary connection this view describes.</summary>
+    [JsonPropertyName("connection_id")] public string? ConnectionId { get; set; }
+    /// <summary>CURRENT runtime health of exactly <see cref="ConnectionId"/>:<see cref="ModelId"/> (real governed attempts).</summary>
+    [JsonPropertyName("health")] public ModelHealth? Health { get; set; }
 }
 
 public sealed class ProbeRequest
@@ -455,4 +518,8 @@ public sealed class StreamFrameDto
 // T08 editors and evidence
 [JsonSerializable(typeof(ConfigErrorResponseDto))]
 [JsonSerializable(typeof(List<AuditSegmentDto>))]
+// Review round 2: typed budget drill-down, request export, early console request id.
+[JsonSerializable(typeof(BudgetRequestsDto))]
+[JsonSerializable(typeof(RequestExportDto))]
+[JsonSerializable(typeof(PlaygroundSubmissionDto))]
 public partial class UiJsonContext : JsonSerializerContext;

@@ -113,17 +113,20 @@ public static class ModelFacts
 /// "Local", "Cloud" or null when the connection's boundary is not known (shown as text, never guessed).</summary>
 public sealed record DestinationView(string Text, string? Boundary, bool Served);
 
-/// <summary>One recorded provider attempt, ready to display.</summary>
-public sealed record AttemptLine(int Number, string Target, string Outcome, string? ErrorClass, string Duration, string Cost, string? Boundary);
+/// <summary>One recorded provider attempt, ready to display. <see cref="EffectiveMaxOutputTokens"/> = the output bound
+/// sent for this attempt; <see cref="Truncated"/> = it finished with "length" (review round 2).</summary>
+public sealed record AttemptLine(int Number, string Target, string Outcome, string? ErrorClass, string Duration, string Cost, string? Boundary)
+{
+    public int? EffectiveMaxOutputTokens { get; init; }
+    public bool Truncated { get; init; }
+}
 
 /// <summary>Attempt-level evidence (audit v3 <c>Attempts[]</c>, ADR-0013): fallback is shown as what it was —
 /// a second, approved attempt after a transient failure — never as a silent retry.</summary>
 public static class AttemptFacts
 {
-    private static readonly string[] SuccessWords = ["served", "success", "succeeded", "ok", "passed", "completed"];
-
-    public static bool IsSuccess(AuditAttemptView a)
-        => a.Outcome is { } o && SuccessWords.Contains(o.Trim().ToLowerInvariant());
+    /// <summary>Contract vocabulary: Outcome ∈ served | failed | cancelled.</summary>
+    public static bool IsSuccess(AuditAttemptView a) => string.Equals(a.Outcome, "served", StringComparison.Ordinal);
 
     public static IReadOnlyList<AttemptLine> Lines(AuditEntryView r, IReadOnlyList<ConnectionDto>? connections = null)
     {
@@ -136,14 +139,24 @@ public static class AttemptFacts
             lines.Add(new AttemptLine(
                 n,
                 TraceModel.Target(a) ?? ModelFacts.NotRecorded,
-                string.IsNullOrWhiteSpace(a.Outcome) ? ModelFacts.NotRecorded : a.Outcome!,
+                string.IsNullOrWhiteSpace(a.Outcome) ? ModelFacts.NotRecorded : a.Outcome,
                 string.IsNullOrWhiteSpace(a.ErrorClass) ? null : a.ErrorClass,
-                a.DurationMs is { } d ? FormatMs(d) : "Not reported",
+                FormatMs(a.DurationMs),
                 a.CostUsd is { } c ? CostText.BasisCost(a.CostBasis, c) : CostText.NotReported,
-                ModelFacts.BoundaryOf(a.ConnectionId, connections)));
+                ModelFacts.BoundaryOf(a.ConnectionId, connections))
+            {
+                EffectiveMaxOutputTokens = a.EffectiveMaxOutputTokens,
+                Truncated = a.Truncated == true,
+            });
         }
         return lines;
     }
+
+    /// <summary>"1.20 s · ≈ $0.0004 estimated · bound 64 · truncated (length)".</summary>
+    public static string Detail(AttemptLine a)
+        => a.Duration + " · " + a.Cost
+           + (a.EffectiveMaxOutputTokens is { } b ? " · bound " + b.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")
+           + (a.Truncated ? " · truncated (length)" : "");
 
     /// <summary>"Attempt 1 (openai/gpt-x) failed: timeout; attempt 2 served." — only when more than one attempt
     /// was recorded and the last one served. Null otherwise.</summary>
@@ -154,7 +167,7 @@ public static class AttemptFacts
         for (int i = 0; i < attempts.Count - 1; i++)
         {
             var a = attempts[i];
-            var why = string.IsNullOrWhiteSpace(a.ErrorClass) ? (a.Outcome ?? "not served") : a.ErrorClass;
+            var why = string.IsNullOrWhiteSpace(a.ErrorClass) ? (string.IsNullOrWhiteSpace(a.Outcome) ? "not served" : a.Outcome) : a.ErrorClass;
             parts.Add("attempt " + (i + 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
                       + " (" + (TraceModel.Target(a) ?? "target not recorded") + ") failed: " + why);
         }

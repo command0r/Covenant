@@ -244,7 +244,7 @@
                             <li>
                                 <a class="mono" href="@("requests/" + Uri.EscapeDataString(req.RequestId))">@req.RequestId</a>
                                 <span class="mono">@Money.Usd(req.AmountUsd)</span>
-                                <span class="subtle secondary">@(req.TimestampUtc is { } ts ? Fmt.Utc(ts) : "time not reported")@(req.AttemptId is { Length: > 0 } at ? " · attempt " + at : "")@(req.Kind is { Length: > 0 } k && k != "settle" ? " · " + k : "")</span>
+                                <span class="subtle secondary">@(Fmt.Utc(req.TsUtc) + (req.AttemptId.Length > 0 ? " · attempt " + req.AttemptId : "") + (req.Kind != "settle" && req.Kind.Length > 0 ? " · " + req.Kind : ""))</span>
                                 @if (req.Overrun)
                                 {
                                     <span class="note warn">Reported charge exceeded the reservation — settled in full.</span>
@@ -269,7 +269,7 @@
     private BudgetStateDto? _drill;
     private bool _drillLoading;
     private string? _drillError;
-    private List<BudgetRequestDto>? _drillRows;
+    private List<BudgetContributionDto>? _drillRows;
 
     private string _newKind = "team";
     private string? _newName;
@@ -399,10 +399,9 @@
         StateHasChanged();
         try
         {
-            var json = await Api.GetBudgetRequestsJsonAsync(b.Id);
+            var page = await Api.GetBudgetRequestsAsync(b.Id);
             if (!ReferenceEquals(_drill, b)) return;
-            _drillRows = BudgetRequests.Parse(json);
-            if (_drillRows is null) _drillError = "The Host answered in an unrecognised shape — nothing is shown rather than a guess.";
+            _drillRows = page.Items;
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
         {

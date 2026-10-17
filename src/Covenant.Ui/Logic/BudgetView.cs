@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using Covenant.Ui.Models;
 
 namespace Covenant.Ui.Logic;
@@ -45,7 +44,7 @@ public static class BudgetText
     public static string Enforcement(string? enforcement) => (enforcement ?? "").Trim().ToLowerInvariant() switch
     {
         "hard" => "Hard — refuses paid work that would exceed the cap (estimated bound)",
-        "warn-only" or "warnonly" => "Warn only — never blocks",
+        "warn-only" => "Warn only — never blocks",
         "" => "Enforcement not reported",
         _ => enforcement!.Trim(),
     };
@@ -87,64 +86,4 @@ public static class BudgetText
 
     public static string FormatThresholds(IReadOnlyList<decimal>? warnAt)
         => warnAt is null ? "" : string.Join(", ", warnAt.Select(w => (w * 100m).ToString("0.##", CultureInfo.InvariantCulture)));
-}
-
-/// <summary>Lenient reader for GET /admin/budgets/{id}/requests ("contributing settled request ids and amounts"):
-/// accepts a bare array or <c>{"items":[…]}</c> and the obvious alternative field names, so a small backend naming
-/// difference degrades to "Not reported" values instead of a broken page. Unknown shapes return null.</summary>
-public static class BudgetRequests
-{
-    public static List<BudgetRequestDto>? Parse(string? json)
-    {
-        if (string.IsNullOrWhiteSpace(json)) return null;
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            JsonElement array;
-            if (root.ValueKind == JsonValueKind.Array) array = root;
-            else if (root.ValueKind == JsonValueKind.Object && TryGet(root, out array, "items", "requests") && array.ValueKind == JsonValueKind.Array) { }
-            else return null;
-
-            var list = new List<BudgetRequestDto>();
-            foreach (var e in array.EnumerateArray())
-            {
-                if (e.ValueKind != JsonValueKind.Object) continue;
-                var id = Str(e, "request_id", "id", "requestId");
-                if (string.IsNullOrWhiteSpace(id)) continue;
-                list.Add(new BudgetRequestDto
-                {
-                    RequestId = id,
-                    AttemptId = Str(e, "attempt_id", "attemptId"),
-                    AmountUsd = Dec(e, "amount_usd", "settled_usd", "cost_usd", "amount"),
-                    TimestampUtc = Time(e, "ts_utc", "settled_utc", "timestamp_utc", "utc"),
-                    Scope = Str(e, "scope"),
-                    Kind = Str(e, "kind", "op"),
-                    Overrun = TryGet(e, out var ov, "overrun") && ov.ValueKind == JsonValueKind.True,
-                });
-            }
-            return list;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static bool TryGet(JsonElement o, out JsonElement value, params string[] names)
-    {
-        foreach (var n in names)
-            if (o.TryGetProperty(n, out value)) return true;
-        value = default;
-        return false;
-    }
-
-    private static string? Str(JsonElement o, params string[] names)
-        => TryGet(o, out var v, names) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-
-    private static decimal? Dec(JsonElement o, params string[] names)
-        => TryGet(o, out var v, names) && v.ValueKind == JsonValueKind.Number && v.TryGetDecimal(out var d) ? d : null;
-
-    private static DateTimeOffset? Time(JsonElement o, params string[] names)
-        => TryGet(o, out var v, names) && v.ValueKind == JsonValueKind.String && v.TryGetDateTimeOffset(out var t) ? t : null;
 }

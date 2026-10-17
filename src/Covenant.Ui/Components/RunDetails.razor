@@ -32,7 +32,9 @@
         <dt>Run as</dt><dd class="mono">@(Run.Snapshot.ApplicationId ?? "Not set")</dd>
         <dt>Workload profile</dt><dd>@(Run.Snapshot.ProfileId is { } pid ? ComposerRules.ProfileLabel(Ws.Profiles, pid) : "Application default (server-side)")</dd>
         <dt>Model</dt><dd class="mono wrap-any">@(Run.Snapshot.RoutingLabel + (Run.Snapshot.Mode == RouteMode.Explicit ? " (test input)" : ""))</dd>
-        <dt>Mode</dt><dd>@(Run.Snapshot.Streaming ? "Streamed" : "Buffered") · max output @(Run.Snapshot.MaxTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "application bound")</dd>
+        <dt>Mode</dt><dd>@(Run.Snapshot.Streaming ? "Streamed" : "Buffered")</dd>
+        <dt>Requested max output tokens</dt><dd class="mono">@(Run.Evidence.Record is { } rr ? RecordFacts.RequestedMaxOutputTokens(rr) : Run.Snapshot.MaxTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "None requested — the application/model bound applies")</dd>
+        <dt>Effective (enforced) max output tokens</dt><dd class="mono">@(Run.Evidence.Record is { } er2 ? RecordFacts.EffectiveMaxOutputTokens(er2) : "Known once the audit record is found")</dd>
         <dt>Labels</dt><dd class="mono">@(Run.Snapshot.Workflow ?? "—") · @(Run.Snapshot.UseCase ?? "—")</dd>
         <dt>Submitted</dt><dd>@Fmt.Utc(Run.Snapshot.SubmittedUtc)</dd>
         <dt>Client request id</dt><dd class="mono wrap-any">@Run.Snapshot.ClientRequestId</dd>
@@ -58,8 +60,14 @@
             <dt>Actual destination</dt>
             <dd><span class="mono wrap-any">@dest.Text</span> @if (!rec.CacheHit && dest.Text != ModelFacts.NoProviderCall) { <BoundaryTag Boundary="@dest.Boundary" /> }</dd>
             <dt>Served</dt><dd class="mono wrap-any">@ModelFacts.Served(rec)</dd>
+            <dt>Served connection</dt><dd class="mono wrap-any">@RecordFacts.ServedConnection(rec)</dd>
+            <dt>Truncated</dt><dd>@RecordFacts.TruncatedText(rec)</dd>
             <dt>Config version</dt><dd class="mono">@(rec.ConfigVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? ModelFacts.NotRecorded)</dd>
         </dl>
+        @if (RecordFacts.IncompleteStreamText(rec) is { } incomplete)
+        {
+            <div class="alert bad" role="status"><div class="alert-text"><strong>Stream incomplete — not served</strong><span class="alert-body">@incomplete</span></div></div>
+        }
         @{ var lines = AttemptFacts.Lines(rec, Ws.Connections); }
         @if (lines.Count > 0)
         {
@@ -71,7 +79,7 @@
                         <span class="mono wrap-any">@a.Target</span>
                         <BoundaryTag Boundary="@a.Boundary" />
                         <span>@(a.Outcome + (a.ErrorClass is { } ec ? " · " + ec : ""))</span>
-                        <span class="subtle">@a.Duration · @a.Cost</span>
+                        <span class="subtle">@AttemptFacts.Detail(a)</span>
                     </li>
                 }
             </ol>

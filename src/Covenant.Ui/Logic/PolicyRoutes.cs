@@ -48,8 +48,7 @@ public static class PolicyText
             ? "Length-based heuristic (threshold " + (p.ThresholdTokens ?? 400).ToString("N0", CultureInfo.InvariantCulture) + " tokens)"
             : "Fixed + fallback";
 
-    public static bool IsLengthHeuristic(PolicyDto p) => string.Equals(p.Strategy, "length-heuristic", StringComparison.OrdinalIgnoreCase)
-                                                         || string.Equals(p.Strategy, "LengthHeuristic", StringComparison.OrdinalIgnoreCase);
+    public static bool IsLengthHeuristic(PolicyDto p) => string.Equals(p.Strategy, "length-heuristic", StringComparison.Ordinal);
 
     /// <summary>"Public", "PII + PHI", "Internal · profile internal-docs".</summary>
     public static string Applicability(PolicyDto p)
@@ -79,17 +78,11 @@ public static class PolicyRoutes
 {
     public static string Key(PolicyTargetDto t) => t.ConnectionId + "/" + t.ModelId;
 
-    public static bool IsLocalOnly(string? mode)
-    {
-        var m = (mode ?? "").Trim().ToLowerInvariant().Replace("-", "", StringComparison.Ordinal).Replace("_", "", StringComparison.Ordinal);
-        return m is "localonly";
-    }
+    /// <summary>Contract spelling only ("local-only").</summary>
+    public static bool IsLocalOnly(string? mode) => string.Equals(mode, ShellStatus.LocalOnly, StringComparison.Ordinal);
 
-    public static bool IsLegacy(string? mode)
-    {
-        var m = (mode ?? "").Trim().ToLowerInvariant().Replace("-", "", StringComparison.Ordinal).Replace("_", "", StringComparison.Ordinal);
-        return m is "legacycloud" or "cloud";
-    }
+    /// <summary>Contract spelling only ("legacy-cloud").</summary>
+    public static bool IsLegacy(string? mode) => string.Equals(mode, ShellStatus.LegacyCloud, StringComparison.Ordinal);
 
     /// <summary>The configured target list with each target's structural eligibility.</summary>
     public static IReadOnlyList<TargetState> Targets(PolicyDto p, CovenantConfigDto cfg)

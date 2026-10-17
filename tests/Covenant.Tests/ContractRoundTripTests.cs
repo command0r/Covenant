@@ -15,6 +15,12 @@ namespace Covenant.Tests;
 //     → Host reads it (ConfigJsonContext.ConfigPutRequest)
 // and the configuration that comes out is the one that went in. The UI DTOs are compiled in by link
 // (Covenant.Tests.csproj), so a field the console drops or misspells fails here, not in production.
+//
+// Review round 2 (U1): ONE explicit contract. Every admin DTO the console consumes is pinned Host → UI here: the Host
+// object is serialized with the SAME context its endpoint uses (CovenantJsonContext: status, catalog, probe, evidence,
+// errors, budgets; ConfigJsonContext: config, validate, versions, rollback, applications, simulate; AuditJsonContext:
+// requests page, request, segments, export; TraceJsonContext: trace snapshot/event, playground submission) and read with
+// UiJsonContext, then asserted field by field. The console has no alternative-shape fallback parser left.
 public sealed class ContractRoundTripTests
 {
     private static readonly DateTimeOffset Created = new(2026, 10, 16, 9, 30, 0, TimeSpan.Zero);
@@ -508,7 +514,12 @@ public sealed class ContractRoundTripTests
         {
             Mode = "hybrid",
             Models = [new CatalogModel { Adapter = "ollama", ModelId = "qwen3:8b", Classifications = ["Internal"], Registered = true, PriceBasis = "zero", Health = ok, ConnectionId = "ollama", Boundary = "Local", Key = "ollama:qwen3:8b" }],
-            Local = new LocalConfigView { Configured = true, Endpoint = "http://ollama-host:11434/v1", ModelId = "qwen3:8b", Registered = true, EndpointHealth = new HealthView { State = "failed", LastFailureUtc = Created, LastError = "refused" } },
+            Local = new LocalConfigView
+            {
+                Configured = true, Endpoint = "http://ollama-host:11434/v1", ModelId = "qwen3:8b", Registered = true,
+                EndpointHealth = new HealthView { State = "failed", LastFailureUtc = Created, LastError = "refused" },
+                ConnectionId = "ollama", Health = new HealthView { State = "ok", LastSuccessUtc = Created.AddMinutes(1) },
+            },
             ProbeAllowList = ["ollama-host:11434"],
             ConfigVersion = 7,
             EgressAllowList = ["api.openai.com:443", "ollama-host:11434"],
@@ -529,16 +540,46 @@ public sealed class ContractRoundTripTests
         Assert.Equal("Local", ui.Models[0].Boundary);
         Assert.Equal("ollama", ui.Models[0].ConnectionId);
         Assert.Equal("ollama:qwen3:8b", ui.Models[0].Key);
-        Assert.Equal("refused", ui.Local!.EndpointHealth!.LastError);
+        Assert.Equal("hybrid", ui.Mode);
+        Assert.Equal(new[] { "ollama-host:11434" }, ui.ProbeAllowList);
+        var m0 = Assert.Single(ui.Models);
+        Assert.Equal("ollama", m0.Adapter);
+        Assert.Equal("qwen3:8b", m0.ModelId);
+        Assert.Equal(new[] { "Internal" }, m0.Classifications);
+        Assert.True(m0.Registered);
+        Assert.Equal("zero", m0.PriceBasis);
+        Assert.Equal("ok", m0.Health!.State);
+        Assert.Equal(Created, m0.Health!.LastSuccessUtc);
+        var local = ui.Local!;
+        Assert.True(local.Configured);
+        Assert.True(local.Registered);
+        Assert.Equal("http://ollama-host:11434/v1", local.Endpoint);
+        Assert.Equal("qwen3:8b", local.ModelId);
+        Assert.Equal("failed", local.EndpointHealth.State);
+        Assert.Equal("refused", local.EndpointHealth.LastError);
+        Assert.Equal(Created, local.EndpointHealth.LastFailureUtc);
+        // Review round 2 (B11): the CURRENT runtime connection and its health.
+        Assert.Equal("ollama", local.ConnectionId);
+        Assert.Equal("ok", local.Health!.State);
+        Assert.Equal(Created.AddMinutes(1), local.Health!.LastSuccessUtc);
+        Assert.Equal(Covenant.Ui.Logic.LocalRouteState.Ready, Covenant.Ui.Logic.LocalHealth.Derive(ui, null).State);
         var c = Assert.Single(ui.Connections!);
+        Assert.Equal("openai", c.Id);
+        Assert.Equal("OpenAI", c.DisplayName);
+        Assert.True(c.Enabled);
+        Assert.Null(c.Endpoint);
         Assert.Equal("OpenAi", c.Kind);
         Assert.Equal("Cloud", c.Boundary);
         Assert.True(c.EndpointAllowListed);
         Assert.False(c.SecretAvailable);
         Assert.Equal("Secrets:openai", c.SecretRef);
         var m = Assert.Single(c.Models);
+        Assert.Equal("openai:gpt-x-mini", m.Key);
+        Assert.Equal("gpt-x-mini", m.ModelId);
         Assert.False(m.Registered);
+        Assert.Equal("configured", m.PriceBasis);
         Assert.Equal(0.15m, m.InPer1M);
+        Assert.Equal(0.60m, m.OutPer1M);
         Assert.Equal("unknown", m.Health!.State);
     }
 
@@ -557,6 +598,14 @@ public sealed class ContractRoundTripTests
             },
         }, CovenantJsonContext.Default.ListBudgetStateView);
         var ui = Assert.Single(JsonSerializer.Deserialize(states, UiModels.UiJsonContext.Default.ListBudgetStateDto)!);
+        Assert.Equal("global", ui.Id);
+        Assert.Equal("global", ui.Scope);
+        Assert.Equal("monthly", ui.Period);
+        Assert.Equal(25m, ui.CapUsd);
+        Assert.Equal(24.997716m, ui.RemainingUsd);
+        Assert.Equal("none", ui.Warning);
+        Assert.Equal("hard", ui.Enforcement);
+        Assert.Equal(Created.AddDays(16), ui.PeriodEndUtc);
         Assert.Equal("2026-10", ui.PeriodId);
         Assert.Equal(0.000184m, ui.SpentUsd);
         Assert.Equal(0.0021m, ui.ReservedUsd);
@@ -573,13 +622,19 @@ public sealed class ContractRoundTripTests
                 new BudgetContributionView { RequestId = "req_b", AttemptId = "att_1", Kind = "settle-recovered", AmountUsd = 0.0021m, TsUtc = Created },
             ],
         }, CovenantJsonContext.Default.BudgetRequestsView);
-        var rows = Covenant.Ui.Logic.BudgetRequests.Parse(contributions)!;
+        var page = JsonSerializer.Deserialize(contributions, UiModels.UiJsonContext.Default.BudgetRequestsDto)!;
+        Assert.Equal("global", page.BudgetId);
+        Assert.Equal("global", page.Scope);
+        Assert.Equal("2026-10", page.PeriodId);
+        var rows = page.Items;
         Assert.Equal(new[] { "req_a", "req_b" }, rows.Select(r => r.RequestId));
         Assert.Equal(0.000184m, rows[0].AmountUsd);
         Assert.Equal("att_2", rows[0].AttemptId);
+        Assert.Equal("settle", rows[0].Kind);
         Assert.True(rows[0].Overrun);
+        Assert.False(rows[1].Overrun);
         Assert.Equal("settle-recovered", rows[1].Kind);
-        Assert.Equal(Created, rows[0].TimestampUtc);
+        Assert.Equal(Created, rows[0].TsUtc);
     }
 
     [Fact]
@@ -591,22 +646,578 @@ public sealed class ContractRoundTripTests
             new() { Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00", Current = false, Entries = 40, Events = 2, ChainValid = true, ArchivedUtc = Created.AddDays(-15) },
         }, AuditJsonContext.Default.ListSegmentView);
         var ui = JsonSerializer.Deserialize(segs, UiModels.UiJsonContext.Default.ListAuditSegmentDto)!;
-        Assert.True(Covenant.Ui.Logic.SegmentScope.IsCurrent(ui[0], ui));
-        Assert.False(Covenant.Ui.Logic.SegmentScope.IsCurrent(ui[1], ui));
+        Assert.True(Covenant.Ui.Logic.SegmentScope.IsCurrent(ui[0]));
+        Assert.False(Covenant.Ui.Logic.SegmentScope.IsCurrent(ui[1]));
+        Assert.Equal("current", ui[0].Id);
+        Assert.Equal("Current", ui[0].Label);
+        Assert.Equal(12, ui[0].Entries);
+        Assert.Equal(Created, ui[0].FirstUtc);
+        Assert.True(ui[0].ChainValid);
+        Assert.Equal("a-0123456789abcdef", ui[1].Id);
+        Assert.Equal("Archived 2026-10-01 09:00", ui[1].Label);
         Assert.Equal(40, ui[1].Entries);
         Assert.Equal(2, ui[1].Events);
-        Assert.NotNull(ui[1].ArchivedUtc);
+        Assert.Equal(Created.AddDays(-15), ui[1].ArchivedUtc);
 
+        var cursor = AuditSegments.Cursor("a-0123456789abcdef", "0123456789abcdef", 40);
         var page = JsonSerializer.Serialize(new RequestsPage
         {
-            Segment = new SegmentInfo { Path = "/var/covenant/audit.jsonl", Entries = 40, ChainValid = true, Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00" },
+            Segment = new SegmentInfo
+            {
+                Path = "/var/covenant/audit.jsonl", Entries = 80, Events = 3, ChainValid = true, FirstUtc = Created, LastUtc = Created.AddHours(1),
+                Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00", IsCurrent = false,
+            },
             Items = [],
-            NextCursor = "opaque-token",
+            NextCursor = cursor,
         }, AuditJsonContext.Default.RequestsPage);
         var uiPage = JsonSerializer.Deserialize(page, UiModels.UiJsonContext.Default.RequestsResponse)!;
-        Assert.Equal("a-0123456789abcdef", uiPage.Segment.Id); // the console refuses to label an unconfirmed segment
-        Assert.Equal("opaque-token", uiPage.NextCursor);
-        Assert.Equal(40, uiPage.Segment.Entries);
+        // The segment descriptor — never inferred from a row.
+        Assert.Equal("a-0123456789abcdef", uiPage.Segment.Id);
+        Assert.Equal("Archived 2026-10-01 09:00", uiPage.Segment.Label);
+        Assert.False(uiPage.Segment.IsCurrent);
+        Assert.Equal("/var/covenant/audit.jsonl", uiPage.Segment.Path);
+        Assert.Equal(80, uiPage.Segment.Entries);
+        Assert.Equal(3, uiPage.Segment.Events);
+        Assert.True(uiPage.Segment.ChainValid);
+        Assert.Equal(Created, uiPage.Segment.FirstUtc);
+        Assert.Equal(Created.AddHours(1), uiPage.Segment.LastUtc);
+        Assert.Equal(cursor, uiPage.NextCursor);   // opaque: passed back verbatim
+        Assert.Equal("Archived segment Archived 2026-10-01 09:00 · read-only", Covenant.Ui.Logic.SegmentScope.Label(uiPage.Segment));
+
+        var paging = new Covenant.Ui.Logic.RequestPaging();
+        paging.Reset("a-0123456789abcdef");
+        Assert.Equal(Covenant.Ui.Logic.PageResult.Accepted, paging.ApplyPage(uiPage, older: false));
+
+        // is_current is ALWAYS on the wire, even when false.
+        Assert.False(Wire(page).GetProperty("segment").GetProperty("is_current").GetBoolean());
+        var last = JsonSerializer.Serialize(new RequestsPage
+        {
+            Segment = new SegmentInfo { Path = "/var/covenant/audit.jsonl", Entries = 0, ChainValid = true, Id = "current", Label = "Current segment", IsCurrent = true },
+            Items = [],
+            NextCursor = null,
+        }, AuditJsonContext.Default.RequestsPage);
+        var uiLast = JsonSerializer.Deserialize(last, UiModels.UiJsonContext.Default.RequestsResponse)!;
+        Assert.True(uiLast.Segment.IsCurrent);
+        Assert.Null(uiLast.NextCursor);
+    }
+
+    // ---- Review round 2 (U1): the remaining Host → UI contracts, field by field ----
+
+    private static AuditEntry RoundTwoRecord() => new(
+        Id: "req_0123456789abcdef0123456789abcdef",
+        TimestampUtc: Created,
+        Principal: "console:demo-app",
+        Tags: new AttributionTags("payments", "console", "playground"),
+        Classification: DataClassification.Pii,
+        Effect: PolicyEffect.Allow,
+        Reason: "allowed",
+        ServedByModel: "ollama/qwen3:8b",
+        Usage: new Usage(84, 10, 0.0021m),
+        DurationMs: 812.5,
+        PromptChars: 120,
+        PromptSha256: new string('a', 64),
+        Signal: "US SSN pattern",
+        PromptPreview: null,
+        CacheHit: false,
+        SchemaVersion: 2,
+        CorrelationId: "req_0123456789abcdef0123456789abcdef",
+        ClassificationEvaluated: true,
+        DenialKind: "None",
+        StoppedAtStage: null,
+        SelectedModel: "openai/gpt-x-mini",
+        AttemptedModel: "ollama/qwen3:8b",
+        Stream: true,
+        UsageReported: true,
+        CostBasis: "mixed",
+        EventType: "request",
+        ConfigVersion: 13,
+        EntryPoint: "console",
+        OperatorRef: "shared-admin-token",
+        ApplicationId: "demo-app",
+        ProfileId: "public-tickets",
+        BaselineClassification: DataClassification.Public,
+        Attempts:
+        [
+            new AuditAttempt("att_1", "openai", "gpt-x-mini", "failed", "incomplete_stream", 1500.25, 0.0021m, "estimated_failed_call",
+                ReservedUsd: 0.0021m, Overrun: false, EffectiveMaxOutputTokens: 256, Truncated: null),
+            new AuditAttempt("att_2", "ollama", "qwen3:8b", "served", null, 640.5, 0m, "zero_priced",
+                ReservedUsd: 0m, Overrun: false, EffectiveMaxOutputTokens: 64, Truncated: true),
+        ],
+        Trace:
+        [
+            new AuditTraceStep("auth", "passed", 0.4),
+            new AuditTraceStep("provider", "failed", 1500.25, "att_1", "incomplete_stream"),
+            new AuditTraceStep("provider", "passed", 640.5, "att_2"),
+        ],
+        ReservedUsd: 0.0021m,
+        SettledUsd: 0.0021m,
+        RequestedMaxOutputTokens: 256,
+        EffectiveMaxOutputTokens: 64,
+        PartialOutputChars: null,
+        ServedConnectionId: "ollama");
+
+    private static void AssertRecord(AuditEntry h, UiModels.AuditEntryView u)
+    {
+        Assert.Equal(h.Id, u.Id);
+        Assert.Equal(h.TimestampUtc, u.TimestampUtc);
+        Assert.Equal(h.Principal, u.Principal);
+        Assert.Equal(h.Tags.Team, u.Tags.Team);
+        Assert.Equal(h.Tags.Workflow, u.Tags.Workflow);
+        Assert.Equal(h.Tags.UseCase, u.Tags.UseCase);
+        Assert.Equal("Pii", u.Classification);
+        Assert.Equal("Allow", u.Effect);
+        Assert.Equal(h.Reason, u.Reason);
+        Assert.Equal(h.ServedByModel, u.ServedByModel);
+        Assert.Equal(h.Usage.InputTokens, u.Usage.InputTokens);
+        Assert.Equal(h.Usage.OutputTokens, u.Usage.OutputTokens);
+        Assert.Equal(h.Usage.TotalTokens, u.Usage.TotalTokens);
+        Assert.Equal(h.Usage.CostUsd, u.Usage.CostUsd);
+        Assert.Equal(h.DurationMs, u.DurationMs);
+        Assert.Equal(h.PromptChars, u.PromptChars);
+        Assert.Equal(h.PromptSha256, u.PromptSha256);
+        Assert.Equal(h.Signal, u.Signal);
+        Assert.Null(u.PromptPreview);
+        Assert.Equal(h.CacheHit, u.CacheHit);
+        Assert.Equal(h.SchemaVersion, u.SchemaVersion);
+        Assert.Equal(h.CorrelationId, u.CorrelationId);
+        Assert.Equal(h.ClassificationEvaluated, u.ClassificationEvaluated);
+        Assert.Equal(h.DenialKind, u.DenialKind);
+        Assert.Equal(h.StoppedAtStage, u.StoppedAtStage);
+        Assert.Equal(h.SelectedModel, u.SelectedModel);
+        Assert.Equal(h.AttemptedModel, u.AttemptedModel);
+        Assert.Equal(h.Stream, u.Stream);
+        Assert.Equal(h.UsageReported, u.UsageReported);
+        Assert.Equal(h.CostBasis, u.CostBasis);
+        Assert.Equal(h.EventType, u.EventType);
+        Assert.Equal(h.ConfigVersion, u.ConfigVersion);
+        Assert.Equal(h.EntryPoint, u.EntryPoint);
+        Assert.Equal(h.OperatorRef, u.OperatorRef);
+        Assert.Equal(h.ApplicationId, u.ApplicationId);
+        Assert.Equal(h.ProfileId, u.ProfileId);
+        Assert.Equal("Public", u.BaselineClassification);
+        Assert.Equal(h.ReservedUsd, u.ReservedUsd);
+        Assert.Equal(h.SettledUsd, u.SettledUsd);
+        Assert.Equal(h.RequestedMaxOutputTokens, u.RequestedMaxOutputTokens);
+        Assert.Equal(h.EffectiveMaxOutputTokens, u.EffectiveMaxOutputTokens);
+        Assert.Equal(h.PartialOutputChars, u.PartialOutputChars);
+        Assert.Equal(h.ServedConnectionId, u.ServedConnectionId);
+
+        Assert.Equal(h.Attempts!.Count, u.Attempts!.Count);
+        foreach (var (ha, ua) in h.Attempts!.Zip(u.Attempts!))
+        {
+            Assert.Equal(ha.AttemptId, ua.AttemptId);
+            Assert.Equal(ha.ConnectionId, ua.ConnectionId);
+            Assert.Equal(ha.ModelId, ua.ModelId);
+            Assert.Equal(ha.Outcome, ua.Outcome);
+            Assert.Equal(ha.ErrorClass, ua.ErrorClass);
+            Assert.Equal(ha.DurationMs, ua.DurationMs);
+            Assert.Equal(ha.CostUsd, ua.CostUsd);
+            Assert.Equal(ha.CostBasis, ua.CostBasis);
+            Assert.Equal(ha.ReservedUsd, ua.ReservedUsd);
+            Assert.Equal(ha.Overrun, ua.Overrun);
+            Assert.Equal(ha.EffectiveMaxOutputTokens, ua.EffectiveMaxOutputTokens);
+            Assert.Equal(ha.Truncated, ua.Truncated);
+        }
+        Assert.Equal(h.Trace!.Count, u.Trace!.Count);
+        foreach (var (ht, ut) in h.Trace!.Zip(u.Trace!))
+        {
+            Assert.Equal(ht.Stage, ut.Stage);
+            Assert.Equal(ht.State, ut.State);
+            Assert.Equal(ht.DurationMs, ut.DurationMs);
+            Assert.Equal(ht.AttemptId, ut.AttemptId);
+            Assert.Equal(ht.ReasonCode, ut.ReasonCode);
+        }
+    }
+
+    [Fact]
+    public void Audit_record_v3_round_two_fields_reach_the_console_from_the_requests_page_and_the_by_id_lookup()
+    {
+        var record = RoundTwoRecord();
+        var page = JsonSerializer.Serialize(new RequestsPage
+        {
+            Segment = new SegmentInfo { Path = "/var/covenant/audit.jsonl", Entries = 1, ChainValid = true, Id = "current", Label = "Current segment", IsCurrent = true },
+            Items = [record],
+            NextCursor = null,
+        }, AuditJsonContext.Default.RequestsPage);
+        var ui = JsonSerializer.Deserialize(page, UiModels.UiJsonContext.Default.RequestsResponse)!;
+        AssertRecord(record, Assert.Single(ui.Items));
+
+        var byId = JsonSerializer.Deserialize(JsonSerializer.Serialize(record, AuditJsonContext.Default.AuditEntry), UiModels.UiJsonContext.Default.AuditEntryView)!;
+        AssertRecord(record, byId);
+
+        // What the drawer shows from those fields.
+        Assert.Equal("256", Covenant.Ui.Logic.RecordFacts.RequestedMaxOutputTokens(byId));
+        Assert.Equal("64", Covenant.Ui.Logic.RecordFacts.EffectiveMaxOutputTokens(byId));
+        Assert.True(Covenant.Ui.Logic.RecordFacts.Truncated(byId));
+        Assert.True(Covenant.Ui.Logic.RecordFacts.IsIncompleteStream(byId));
+        Assert.Equal("ollama", Covenant.Ui.Logic.RecordFacts.ServedConnection(byId));
+        Assert.Contains("Mixed (includes estimates)", Covenant.Ui.Logic.CostText.Cost(byId), StringComparison.Ordinal);
+        var trace = Covenant.Ui.Logic.TraceModel.FromAuditSummary(byId.Trace, byId.Attempts, byId.ConfigVersion)!;
+        var provider = trace.Steps.Single(st => st.Stage == "provider");
+        Assert.Equal(2, provider.Attempts.Count);
+        Assert.Equal("openai/gpt-x-mini", provider.Attempts[0].Target);
+        Assert.Equal("incomplete_stream", provider.Attempts[0].ReasonCode);
+    }
+
+    [Fact]
+    public void Status_report_with_connection_health_reaches_the_console()
+    {
+        var recent = new RecentRequest
+        {
+            Id = "req_1", T = Created, Principal = "console:demo-app", Team = "payments", Workflow = "console", UseCase = "playground",
+            Classification = "Pii", Effect = "Allow", Model = "ollama/qwen3:8b", Tokens = 94, TokensIn = 84, TokensOut = 10, CostUsd = 0.0021m,
+            Ms = 812.5, Reason = "allowed", PromptChars = 120, PromptSha256 = "abc", Signal = "US SSN pattern", PromptPreview = null, CacheHit = false, CostBasis = "mixed",
+        };
+        var host = new StatusReport
+        {
+            GeneratedUtc = Created, StartedUtc = Created.AddHours(-1),
+            KillSwitch = new KillSwitchState { Engaged = true, Reason = "demo" },
+            Budget = new BudgetStatus { GlobalCapUsd = 25m, GlobalSpendUsd = 0.5m, Teams = [new TeamBudgetStatus { Team = "payments", CapUsd = null, SpendUsd = 0.5m }] },
+            Routes = [new RouteView { Classification = "Pii", Adapter = "ollama", Model = "qwen3:8b" }],
+            FinOps = new FinOpsSummary
+            {
+                Requests = 3, Allowed = 2, Denied = 1, TotalCostUsd = 0.0021m, LocalRequests = 1, LocalTokens = 94,
+                EstimatedSavingsUsd = 0m, SavingsLocalUsd = 0m, SavingsRouterUsd = 0m, SavingsCacheUsd = 0m, CacheHits = 0,
+                UnknownCostRequests = 1, EstimatedCostRequests = 1,
+                CostByTeamUsd = new() { ["payments"] = 0.0021m }, DenialsByReason = new() { ["paused"] = 1 },
+                Activity = [new ActivityBucket { T = Created, Requests = 3, Denied = 1, CostUsd = 0.0021m, AvgMs = 400.5 }],
+                RequestsByModel = new() { ["ollama/qwen3:8b"] = 2 },
+                Recent = [recent],
+                Savings = new SavingsSummary { Baseline = "openai/gpt-x", RouteAvoidedUsd = 0.01m, CacheAvoidedUsd = 0.002m, TotalUsd = 0.012m, ExcludedRecords = 1 },
+            },
+            ChainValid = true, AuditEntries = 3, Auth = new AuthStatus { AllowAnonymous = false, KeyCount = 2 }, OtelEnabled = false, RoutingThresholdTokens = 400,
+            Environment = "local", Mode = "local-only", AuditPath = "/var/covenant/audit.jsonl", CacheTtlSeconds = 300, PromptPreviewChars = 0,
+            Anchor = new AnchorStatus { Configured = true, Every = 100, AnchorsWritten = 2, LastAnchorUtc = Created },
+            Version = "2.0.0", ConfigVersion = 13,
+            ConnectionHealth =
+            [
+                new ConnectionHealthView
+                {
+                    Key = "ollama:qwen3:8b", ConnectionId = "ollama", ModelId = "qwen3:8b", Boundary = "Local", Enabled = true,
+                    Health = new HealthView { State = "ok", LastSuccessUtc = Created, LastFailureUtc = Created.AddMinutes(-5), LastError = "timeout" },
+                },
+            ],
+        };
+        var ui = JsonSerializer.Deserialize(JsonSerializer.Serialize(host, CovenantJsonContext.Default.StatusReport), UiModels.UiJsonContext.Default.StatusReport)!;
+
+        Assert.Equal(Created, ui.GeneratedUtc);
+        Assert.Equal(Created.AddHours(-1), ui.StartedUtc);
+        Assert.True(ui.KillSwitch.Engaged);
+        Assert.Equal("demo", ui.KillSwitch.Reason);
+        Assert.Equal(25m, ui.Budget.GlobalCapUsd);
+        Assert.Equal(0.5m, ui.Budget.GlobalSpendUsd);
+        Assert.Equal("payments", Assert.Single(ui.Budget.Teams).Team);
+        Assert.Null(ui.Budget.Teams[0].CapUsd);
+        Covenant.Ui.Models.RouteView route = Assert.Single(ui.Routes);
+        Assert.Equal("Pii", route.Classification);
+        Assert.Equal("ollama", route.Adapter);
+        Assert.Equal("qwen3:8b", route.Model);
+        Assert.True(ui.ChainValid);
+        Assert.Equal(3, ui.AuditEntries);
+        Assert.False(ui.Auth.AllowAnonymous);
+        Assert.Equal(2, ui.Auth.KeyCount);
+        Assert.False(ui.OtelEnabled);
+        Assert.Equal(400, ui.RoutingThresholdTokens);
+        Assert.Equal("local", ui.Environment);
+        Assert.Equal("local-only", ui.Mode);
+        Assert.Equal("Local-only", Covenant.Ui.Logic.ShellStatus.Mode(ui.Mode).Label);
+        Assert.Equal("/var/covenant/audit.jsonl", ui.AuditPath);
+        Assert.Equal(300, ui.CacheTtlSeconds);
+        Assert.Equal(0, ui.PromptPreviewChars);
+        Assert.True(ui.Anchor!.Configured);
+        Assert.Equal(100, ui.Anchor!.Every);
+        Assert.Equal(2, ui.Anchor!.AnchorsWritten);
+        Assert.Equal(Created, ui.Anchor!.LastAnchorUtc);
+        Assert.Equal("2.0.0", ui.Version);
+        Assert.Equal(13, ui.ConfigVersion);
+
+        var f = ui.FinOps;
+        Assert.Equal(3, f.Requests);
+        Assert.Equal(2, f.Allowed);
+        Assert.Equal(1, f.Denied);
+        Assert.Equal(0.0021m, f.TotalCostUsd);
+        Assert.Equal(1, f.LocalRequests);
+        Assert.Equal(94, f.LocalTokens);
+        Assert.Equal(1, f.UnknownCostRequests);
+        Assert.Equal(1, f.EstimatedCostRequests);
+        Assert.Equal(0.0021m, f.CostByTeamUsd["payments"]);
+        Assert.Equal(1, f.DenialsByReason["paused"]);
+        Assert.Equal(2, f.RequestsByModel["ollama/qwen3:8b"]);
+        var b = Assert.Single(f.Activity);
+        Assert.Equal(Created, b.T);
+        Assert.Equal(400.5, b.AvgMs);
+        Assert.Equal("Estimated provider charge avoided", f.Savings!.Label);
+        Assert.Equal("openai/gpt-x", f.Savings!.Baseline);
+        Assert.Equal(0.01m, f.Savings!.RouteAvoidedUsd);
+        Assert.Equal(0.002m, f.Savings!.CacheAvoidedUsd);
+        Assert.Equal(0.012m, f.Savings!.TotalUsd);
+        Assert.Equal(1, f.Savings!.ExcludedRecords);
+        var r = Assert.Single(f.Recent);
+        Assert.Equal("req_1", r.Id);
+        Assert.Equal(Created, r.T);
+        Assert.Equal("Pii", r.Classification);
+        Assert.Equal("Allow", r.Effect);
+        Assert.Equal("ollama/qwen3:8b", r.Model);
+        Assert.Equal(94, r.Tokens);
+        Assert.Equal(84, r.TokensIn);
+        Assert.Equal(10, r.TokensOut);
+        Assert.Equal(0.0021m, r.CostUsd);
+        Assert.Equal(812.5, r.Ms);
+        Assert.Equal(120, r.PromptChars);
+        Assert.Equal("US SSN pattern", r.Signal);
+        Assert.False(r.CacheHit);
+        Assert.Equal("mixed", r.CostBasis);
+
+        // Review round 2 (B11): connection_health — the header's source for the CURRENT runtime connection.
+        var h = Assert.Single(ui.ConnectionHealth!);
+        Assert.Equal("ollama:qwen3:8b", h.Key);
+        Assert.Equal("ollama", h.ConnectionId);
+        Assert.Equal("qwen3:8b", h.ModelId);
+        Assert.Equal("Local", h.Boundary);
+        Assert.True(h.Enabled);
+        Assert.Equal("ok", h.Health.State);
+        Assert.Equal(Created, h.Health.LastSuccessUtc);
+        Assert.Equal(Created.AddMinutes(-5), h.Health.LastFailureUtc);
+        Assert.Equal("timeout", h.Health.LastError);
+
+        var catalog = new UiModels.CatalogResponse
+        {
+            Local = new UiModels.LocalRouteInfo { Configured = true, Registered = true, ConnectionId = "ollama", ModelId = "qwen3:8b" },
+        };
+        Assert.Equal(Covenant.Ui.Logic.LocalRouteState.Ready, Covenant.Ui.Logic.LocalHealth.Derive(catalog, ui.ConnectionHealth).State);
+    }
+
+    [Fact]
+    public void Applications_reach_the_console_without_credentials()
+    {
+        var body = JsonSerializer.Serialize(new List<ApplicationView>
+        {
+            new() { Id = "demo-app", Team = "payments", Enabled = true, ConsoleTesting = true, GrantedProfiles = ["public-tickets", "internal"], DefaultProfile = "internal" },
+            new() { Id = "prod-app", Team = "risk", Enabled = false, ConsoleTesting = false, GrantedProfiles = [], DefaultProfile = null },
+        }, ConfigJsonContext.Default.ListApplicationView);
+        var ui = JsonSerializer.Deserialize(body, UiModels.UiJsonContext.Default.ListApplicationSummaryDto)!;
+        Assert.Equal(2, ui.Count);
+        Assert.Equal("demo-app", ui[0].Id);
+        Assert.Equal("payments", ui[0].Team);
+        Assert.True(ui[0].Enabled);
+        Assert.True(ui[0].ConsoleTesting);
+        Assert.Equal(new[] { "public-tickets", "internal" }, ui[0].GrantedProfiles);
+        Assert.Equal("internal", ui[0].DefaultProfile);
+        Assert.False(ui[1].Enabled);
+        Assert.False(ui[1].ConsoleTesting);
+        Assert.Empty(ui[1].GrantedProfiles);
+        Assert.Null(ui[1].DefaultProfile);
+        Assert.DoesNotContain("key", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Rollback_answer_and_config_errors_reach_the_console()
+    {
+        // POST /admin/config/rollback answers like a PUT: {version, etag} (ConfigJsonContext.ConfigPutResponse).
+        var ok = JsonSerializer.Deserialize(JsonSerializer.Serialize(new ConfigPutResponse { Version = 14, Etag = "\"v14\"" }, ConfigJsonContext.Default.ConfigPutResponse),
+            UiModels.UiJsonContext.Default.ConfigPutResponseDto)!;
+        Assert.Equal(14, ok.Version);
+        Assert.Equal("\"v14\"", ok.Etag);
+
+        var notFound = JsonSerializer.Deserialize(JsonSerializer.Serialize(new ConfigErrorResponse { Error = "not_found", Reason = "no activated configuration version 99", ActiveVersion = 13 },
+            ConfigJsonContext.Default.ConfigErrorResponse), UiModels.UiJsonContext.Default.ConfigErrorResponseDto)!;
+        Assert.Equal("not_found", notFound.Error);
+        Assert.Equal("no activated configuration version 99", notFound.Reason);
+        Assert.Equal(13, notFound.ActiveVersion);
+        Assert.Null(notFound.Errors);
+
+        var rolledBack = Covenant.Ui.Logic.EditOutcomes.FromResponse(200,
+            JsonSerializer.Serialize(new ConfigPutResponse { Version = 14, Etag = "\"v14\"" }, ConfigJsonContext.Default.ConfigPutResponse), rollback: true);
+        Assert.True(rolledBack.Succeeded);
+        Assert.Equal(14, rolledBack.Version);
+
+        // A historical snapshot (GET /admin/config/versions/{n}) is a plain CovenantConfig.
+        var snap = JsonSerializer.Deserialize(JsonSerializer.Serialize(Representative(ProviderMode.LocalOnly), ConfigJsonContext.Default.CovenantConfig),
+            UiModels.UiJsonContext.Default.CovenantConfigDto)!;
+        Assert.Equal(7, snap.Version);
+        Assert.Equal("local-only", snap.Mode);
+        Assert.Equal(4, snap.Connections.Count);
+        Assert.Equal(90, snap.Connections[0].TimeoutSeconds);
+    }
+
+    [Fact]
+    public void Common_admin_error_body_carries_the_error_code_the_console_branches_on()
+    {
+        foreach (var (error, reason) in new[] { ("cursor_expired", "the segment was rotated"), ("invalid_cursor", "malformed"), ("not_found", "no record") })
+        {
+            var ui = JsonSerializer.Deserialize(JsonSerializer.Serialize(new ErrorResponse { Error = error, Reason = reason, RequestId = "req_1", Scanned = 3 }, CovenantJsonContext.Default.ErrorResponse),
+                UiModels.UiJsonContext.Default.ErrorResponse)!;
+            Assert.Equal(error, ui.Error);
+            Assert.Equal(reason, ui.Reason);
+            Assert.Equal("req_1", ui.RequestId);
+            Assert.Equal(3, ui.Scanned);
+        }
+        var p = new Covenant.Ui.Logic.RequestPaging();
+        p.Reset(null);
+        Assert.Equal(Covenant.Ui.Logic.PageResult.CursorExpired, p.ApplyError(410, "cursor_expired", "410"));
+    }
+
+    [Fact]
+    public void Request_export_reaches_the_console_without_content()
+    {
+        var record = RoundTwoRecord() with { PromptPreview = null };
+        var host = new RequestExport
+        {
+            ExportedUtc = Created.AddDays(1),
+            RequestId = record.Id,
+            Segment = new SegmentView { Id = "a-0123456789abcdef", Label = "Archived 2026-10-01 09:00:00 UTC", Current = false, Entries = 40, Events = 2, FirstUtc = Created, LastUtc = Created.AddHours(2), ChainValid = true, ArchivedUtc = Created.AddDays(1) },
+            ConfigVersion = 13,
+            Record = record,
+            Attempts = record.Attempts,
+            Trace = record.Trace,
+            Integrity = new ExportIntegrity
+            {
+                SegmentId = "a-0123456789abcdef", ChainValid = true, ChainFailure = null, Line = 17, PreviousHash = new string('b', 64), EntryHash = new string('c', 64),
+                AnchorConfigured = true, Status = "verified",
+            },
+            ContentIncluded = false,
+        };
+        var ui = JsonSerializer.Deserialize(JsonSerializer.Serialize(host, AuditJsonContext.Default.RequestExport), UiModels.UiJsonContext.Default.RequestExportDto)!;
+        Assert.Equal(Created.AddDays(1), ui.ExportedUtc);
+        Assert.Equal(record.Id, ui.RequestId);
+        Assert.Equal("a-0123456789abcdef", ui.Segment.Id);
+        Assert.Equal("Archived 2026-10-01 09:00:00 UTC", ui.Segment.Label);
+        Assert.False(ui.Segment.Current);
+        Assert.Equal(40, ui.Segment.Entries);
+        Assert.Equal(2, ui.Segment.Events);
+        Assert.Equal(Created, ui.Segment.FirstUtc);
+        Assert.Equal(Created.AddHours(2), ui.Segment.LastUtc);
+        Assert.True(ui.Segment.ChainValid);
+        Assert.Equal(Created.AddDays(1), ui.Segment.ArchivedUtc);
+        Assert.Equal(13, ui.ConfigVersion);
+        AssertRecord(record, ui.Record);
+        Assert.Equal(new[] { "att_1", "att_2" }, ui.Attempts!.Select(a => a.AttemptId));
+        Assert.Equal(new[] { "auth", "provider", "provider" }, ui.Trace!.Select(t => t.Stage));
+        Assert.Equal("a-0123456789abcdef", ui.Integrity.SegmentId);
+        Assert.True(ui.Integrity.ChainValid);
+        Assert.Null(ui.Integrity.ChainFailure);
+        Assert.Equal(17, ui.Integrity.Line);
+        Assert.Equal(new string('b', 64), ui.Integrity.PreviousHash);
+        Assert.Equal(new string('c', 64), ui.Integrity.EntryHash);
+        Assert.True(ui.Integrity.AnchorConfigured);
+        Assert.Equal("verified", ui.Integrity.Status);
+        Assert.False(ui.ContentIncluded);
+    }
+
+    [Fact]
+    public void Trace_snapshot_event_and_playground_submission_reach_the_console()
+    {
+        var ev = new TraceEventView
+        {
+            Seq = 9, RequestId = "req_1", ConfigVersion = 13, Stage = "provider", AttemptId = "att_1", State = "running", TsUtc = Created,
+            DurationMs = null, ReasonCode = null, Target = "ollama/qwen3:8b", RequestedMaxOutputTokens = 256, EffectiveMaxOutputTokens = 64,
+        };
+        var uiEv = JsonSerializer.Deserialize(JsonSerializer.Serialize(ev, TraceJsonContext.Default.TraceEventView), UiModels.UiJsonContext.Default.TraceEventDto)!;
+        Assert.Equal(9, uiEv.Seq);
+        Assert.Equal("req_1", uiEv.RequestId);
+        Assert.Equal(13, uiEv.ConfigVersion);
+        Assert.Equal("provider", uiEv.Stage);
+        Assert.Equal("att_1", uiEv.AttemptId);
+        Assert.Equal("running", uiEv.State);
+        Assert.Equal(Created, uiEv.TsUtc);
+        Assert.Null(uiEv.DurationMs);
+        Assert.Null(uiEv.ReasonCode);
+        Assert.Equal("ollama/qwen3:8b", uiEv.Target);
+        Assert.Equal(256, uiEv.RequestedMaxOutputTokens);
+        Assert.Equal(64, uiEv.EffectiveMaxOutputTokens);
+
+        var snap = new TraceSnapshotView
+        {
+            RequestId = "req_1", ConfigVersion = 13, Complete = true, Truncated = true,
+            Events = [ev, new TraceEventView { Seq = 10, RequestId = "req_1", ConfigVersion = 13, Stage = "provider", AttemptId = "att_1", State = "passed", TsUtc = Created.AddSeconds(1), DurationMs = 812.25 }],
+        };
+        var uiSnap = JsonSerializer.Deserialize(JsonSerializer.Serialize(snap, TraceJsonContext.Default.TraceSnapshotView), UiModels.UiJsonContext.Default.TraceSnapshotDto)!;
+        Assert.Equal("req_1", uiSnap.RequestId);
+        Assert.Equal(13, uiSnap.ConfigVersion);
+        Assert.True(uiSnap.Complete);
+        Assert.True(uiSnap.Truncated);
+        Assert.Equal(new long[] { 9, 10 }, uiSnap.Events.Select(e => e.Seq));
+        Assert.Equal(812.25, uiSnap.Events[1].DurationMs);
+        var acc = new Covenant.Ui.Logic.TraceAccumulator();
+        acc.ApplySnapshot(uiSnap);
+        var attempt = Assert.Single(acc.View().Steps.Single(st => st.Stage == "provider").Attempts);
+        Assert.Equal(Covenant.Ui.Logic.TraceStepState.Passed, attempt.State);
+        Assert.Equal(64, attempt.EffectiveMaxOutputTokens);
+
+        foreach (var state in new[] { "running", "completed" })
+        {
+            var sub = new PlaygroundSubmissionView { ClientRequestId = "0123456789abcdef0123456789abcdef", RequestId = "req_1", State = state };
+            var uiSub = JsonSerializer.Deserialize(JsonSerializer.Serialize(sub, TraceJsonContext.Default.PlaygroundSubmissionView), UiModels.UiJsonContext.Default.PlaygroundSubmissionDto)!;
+            Assert.Equal("0123456789abcdef0123456789abcdef", uiSub.ClientRequestId);
+            Assert.Equal("req_1", uiSub.RequestId);
+            Assert.Equal(state, uiSub.State);
+            var poll = new Covenant.Ui.Logic.SubmissionPoll("0123456789abcdef0123456789abcdef");
+            Assert.Equal(Covenant.Ui.Logic.SubmissionPollAction.Subscribe, poll.OnPollResult(200, uiSub));
+            Assert.Equal("req_1", poll.RequestId);
+        }
+    }
+
+    [Fact]
+    public void Console_inference_body_always_carries_a_client_request_id_the_host_accepts()
+    {
+        var snapshot = Covenant.Ui.Logic.RequestSnapshot.Freeze(1, new Covenant.Ui.Logic.PlaygroundForm { ApplicationId = "demo-app", Prompt = "Reply OK." }, Created);
+        var body = JsonSerializer.Serialize(new UiModels.PlaygroundRequestDto
+        {
+            ApplicationId = "demo-app", Messages = [new UiModels.ChatMessageDto { Role = "user", Content = "Reply OK." }], MaxTokens = 256, Stream = true,
+            ClientRequestId = snapshot.ClientRequestId,
+        }, UiModels.UiJsonContext.Default.PlaygroundRequestDto);
+        var host = JsonSerializer.Deserialize(body, CovenantJsonContext.Default.PlaygroundRequest)!;
+        Assert.Null(PlaygroundApi.Validate(host));   // required since review round 2 (B7)
+        Assert.Equal(snapshot.ClientRequestId, host.ClientRequestId);
+        Assert.True(PlaygroundApi.IsValidClientRequestId(host.ClientRequestId));
+        Assert.Equal(256, host.MaxTokens);
+        Assert.True(host.Stream);
+    }
+
+    [Fact]
+    public void Probe_evidence_and_kill_switch_reach_the_console()
+    {
+        var probe = JsonSerializer.Deserialize(JsonSerializer.Serialize(new ProbeResult
+        {
+            Allowed = true, Reachable = true, HttpStatus = 200, Models = ["qwen2.5-coder:7b"], Error = null, DurationMs = 12.5, Endpoint = "http://localhost:11434/v1/", CheckedUtc = Created,
+        }, CovenantJsonContext.Default.ProbeResult), UiModels.UiJsonContext.Default.ProbeResponse)!;
+        Assert.True(probe.Allowed);
+        Assert.True(probe.Reachable);
+        Assert.Equal(200, probe.HttpStatus);
+        Assert.Equal(new[] { "qwen2.5-coder:7b" }, probe.Models);
+        Assert.Equal(12.5, probe.DurationMs);
+        Assert.Equal("http://localhost:11434/v1/", probe.Endpoint);
+        Assert.Equal(Created, probe.CheckedUtc);
+
+        var ev = JsonSerializer.Deserialize(JsonSerializer.Serialize(new EvidenceReport
+        {
+            GeneratedUtc = Created, AuditLogPath = "/var/covenant/audit.jsonl", ChainValid = false, ChainFailure = "hash mismatch", FirstInvalidLine = 4,
+            Entries = 10, Events = 2, Allowed = 7, Denied = 3, FirstEntryUtc = Created, LastEntryUtc = Created.AddHours(1), TotalCostUsd = 0.5m,
+            CostByTeamUsd = new() { ["payments"] = 0.5m }, RequestsByClassification = new() { ["Pii"] = 4 }, AnchorConfigured = true, AnchorCount = 3, LastAnchorUtc = Created,
+        }, CovenantJsonContext.Default.EvidenceReport), UiModels.UiJsonContext.Default.EvidenceReport)!;
+        Assert.Equal(Created, ev.GeneratedUtc);
+        Assert.Equal("/var/covenant/audit.jsonl", ev.AuditLogPath);
+        Assert.False(ev.ChainValid);
+        Assert.Equal("hash mismatch", ev.ChainFailure);
+        Assert.Equal(4, ev.FirstInvalidLine);
+        Assert.Equal(10, ev.Entries);
+        Assert.Equal(2, ev.Events);
+        Assert.Equal(7, ev.Allowed);
+        Assert.Equal(3, ev.Denied);
+        Assert.Equal(0.5m, ev.TotalCostUsd);
+        Assert.Equal(0.5m, ev.CostByTeamUsd["payments"]);
+        Assert.Equal(4, ev.RequestsByClassification["Pii"]);
+        Assert.True(ev.AnchorConfigured);
+        Assert.Equal(3, ev.AnchorCount);
+        Assert.Equal(Created, ev.LastAnchorUtc);
+
+        var ks = JsonSerializer.Deserialize(JsonSerializer.Serialize(new KillSwitchState { Engaged = true, Reason = "paused from console" }, CovenantJsonContext.Default.KillSwitchState),
+            UiModels.UiJsonContext.Default.KillSwitchState)!;
+        Assert.True(ks.Engaged);
+        Assert.Equal("paused from console", ks.Reason);
+        var reset = JsonSerializer.Deserialize(JsonSerializer.Serialize(new ResetResponse { ArchivedTo = "/var/covenant/audit.jsonl.20261017-120000.archived" }, CovenantJsonContext.Default.ResetResponse),
+            UiModels.UiJsonContext.Default.ResetResponse)!;
+        Assert.Equal("/var/covenant/audit.jsonl.20261017-120000.archived", reset.ArchivedTo);
     }
 
     private static JsonElement Wire(string json)

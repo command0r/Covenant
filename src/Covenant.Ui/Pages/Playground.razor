@@ -5,7 +5,7 @@
 @inject WorkspaceConfig Ws
 @inject Interop Interop
 @inject NavigationManager Nav
-@implements IDisposable
+@implements IAsyncDisposable
 
 <PageTitle>Playground · Covenant</PageTitle>
 
@@ -20,7 +20,9 @@
 @if (_present)
 {
     <RequiresConnection>
-        <div class="present-root" id="pg-present-root" tabindex="-1" role="region" aria-label="Playground presentation mode" @onkeydown="OnPresentKeyDown">
+        @* Escape is a document-level listener (Interop.WatchEscapeAsync) while presentation mode is active: after Run the
+           Run button disables itself and focus would otherwise fall to <body>, outside any element handler. *@
+        <div class="present-root" id="pg-present-root" tabindex="-1" role="region" aria-label="Playground presentation mode">
             <header class="present-head">
                 <span class="brand">Covenant</span>
                 <span class="env" title="Environment">@State.EnvironmentLabel</span>
@@ -43,7 +45,7 @@
                         <button type="button" class="btn primary form" disabled="@(!Pg.CanRun)" aria-busy="@(Pg.Running ? "true" : null)" @onclick="RunAsync">
                             <Icon Name="play" Size="18" /><span>@(Pg.Running ? "Running…" : "Run")</span>
                         </button>
-                        <button type="button" class="btn form" disabled="@(!Pg.Running)" @onclick="Pg.Cancel"><Icon Name="stop" Size="18" /><span>Cancel</span></button>
+                        <button type="button" class="btn form" id="pg-present-cancel" disabled="@(!Pg.Running)" @onclick="Pg.Cancel"><Icon Name="stop" Size="18" /><span>Cancel</span></button>
                         @if (!Pg.Running && Pg.Problem is { } pr)
                         {
                             <span class="action-status">@pr</span>
@@ -51,7 +53,7 @@
                     </div>
                 </section>
 
-                <section class="present-response" aria-label="Response">
+                <section class="present-response" id="pg-present-result" tabindex="-1" aria-label="Response">
                     @if (Pg.Selected is { } prun)
                     {
                         <div class="response md @(prun.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text" aria-busy="@(prun.InFlight ? "true" : "false")">
@@ -192,6 +194,12 @@ else
     private bool _present;
     private bool _wasPresent;
     private bool _focusPending;
+    private DotNetObjectReference<Playground>? _self;
+    private string? _escapeWatch;
+    private bool _escapeBusy;
+    // Run disables itself while the request runs: focus moves to Cancel, then to the result region when it finishes.
+    private bool _focusCancelPending;
+    private bool _cancelFocused;
     private string? _appliedScenario;
     private bool _detailsOpen;
     private bool _raw;
@@ -220,11 +228,62 @@ else
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        if (!_focusPending) return;
-        _focusPending = false;
-        try { await Interop.FocusElementAsync(_present ? "pg-present-root" : "pg-present-toggle"); }
+        await SyncEscapeWatchAsync();
+        if (_focusPending)
+        {
+            _focusPending = false;
+            await FocusAsync(_present ? "pg-present-root" : "pg-present-toggle");
+        }
+        if (!_present)
+        {
+            _focusCancelPending = false;
+            _cancelFocused = false;
+            return;
+        }
+        if (_focusCancelPending && Pg.Running)
+        {
+            _focusCancelPending = false;
+            _cancelFocused = true;
+            await FocusAsync("pg-present-cancel");
+        }
+        else if (_cancelFocused && !Pg.Running)
+        {
+            _cancelFocused = false;
+            await FocusAsync("pg-present-result");
+        }
+    }
+
+    private async Task FocusAsync(string id)
+    {
+        try { await Interop.FocusElementAsync(id); }
         catch (JSException) { /* focus is best effort */ }
     }
+
+    /// <summary>Starts the document-level Escape listener while presentation mode is active; disposes it on exit.</summary>
+    private async Task SyncEscapeWatchAsync()
+    {
+        if (_escapeBusy) return;
+        _escapeBusy = true;
+        try
+        {
+            if (_present && _escapeWatch is null)
+            {
+                _self ??= DotNetObjectReference.Create(this);
+                _escapeWatch = await Interop.WatchEscapeAsync(_self, nameof(OnEscapePressed));
+            }
+            else if (!_present && _escapeWatch is { } id)
+            {
+                _escapeWatch = null;
+                await Interop.UnwatchEscapeAsync(id);
+            }
+        }
+        catch (JSException) { /* keyboard exit stays available through the Exit button */ }
+        finally { _escapeBusy = false; }
+    }
+
+    /// <summary>Called by the document-level Escape listener (presentation mode only).</summary>
+    [JSInvokable]
+    public Task OnEscapePressed() => InvokeAsync(() => { if (_present) ExitPresent(); });
 
     /// <summary>A scenario in the URL only fills the composer, like clicking the preset — never runs it.</summary>
     private void ApplyScenarioFromRoute()
@@ -237,7 +296,11 @@ else
         if (!Pg.Running && ScenarioPresets.Find(Scenario) is { } preset) Pg.ApplyPreset(preset);
     }
 
-    private Task RunAsync() => Pg.RunAsync();
+    private Task RunAsync()
+    {
+        if (_present && Pg.CanRun) _focusCancelPending = true;
+        return Pg.RunAsync();
+    }
 
     private void EnterPresent()
     {
@@ -246,11 +309,6 @@ else
     }
 
     private void ExitPresent() => Nav.NavigateTo(Nav.GetUriWithQueryParameter("present", (string?)null));
-
-    private void OnPresentKeyDown(KeyboardEventArgs e)
-    {
-        if (e.Key == "Escape") ExitPresent();
-    }
 
     private void OpenDetails() => _detailsOpen = true;
     private void CloseDetails() => _detailsOpen = false;
@@ -289,10 +347,18 @@ else
         });
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         State.Changed -= OnChanged;
         Pg.Changed -= OnChanged;
         Ws.Changed -= OnChanged;
+        if (_escapeWatch is { } id)
+        {
+            _escapeWatch = null;
+            try { await Interop.UnwatchEscapeAsync(id); }
+            catch (JSException) { /* page is going away */ }
+            catch (JSDisconnectedException) { /* idem */ }
+        }
+        _self?.Dispose();
     }
 }

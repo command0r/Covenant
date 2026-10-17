@@ -20,12 +20,16 @@ public sealed class RequestsViewState : IDisposable
         _state.Disconnected += Clear;
     }
 
+    /// <summary>Cursor paging of the selected segment (Logic/RequestPaging): requested segment, the Host's segment
+    /// descriptor, next_cursor and the 410 cursor_expired state.</summary>
+    public RequestPaging Paging { get; } = new();
     /// <summary>Segment id requested (null = current segment).</summary>
-    public string? SegmentId { get; set; }
-    public SegmentInfo? Segment { get; set; }
+    public string? SegmentId => Paging.RequestedSegmentId;
+    /// <summary>The Host's descriptor of the loaded pages (never inferred from a row).</summary>
+    public SegmentInfo? Segment => Paging.Segment;
     public List<AuditEntryView> Items { get; } = [];
-    public string? NextCursor { get; set; }
-    public bool Loaded { get; set; }
+    public string? NextCursor => Paging.NextCursor;
+    public bool Loaded => Paging.Loaded;
     public DateTimeOffset? LoadedUtc { get; set; }
 
     public List<AuditSegmentDto>? Segments { get; set; }
@@ -40,15 +44,12 @@ public sealed class RequestsViewState : IDisposable
     /// <summary>Starts over for a (possibly different) segment.</summary>
     public void ResetPages(string? segmentId)
     {
-        SegmentId = segmentId;
-        Segment = null;
+        Paging.Reset(segmentId);
         Items.Clear();
-        NextCursor = null;
-        Loaded = false;
         LoadedUtc = null;
     }
 
-    /// <summary>Appends a page, de-duplicating by id (a cursor page may overlap after new writes).</summary>
+    /// <summary>Appends a page, de-duplicating by id (defensive: stable cursors never overlap).</summary>
     public int AddPage(IEnumerable<AuditEntryView> page)
     {
         var seen = new HashSet<string>(Items.Select(i => i.Id), StringComparer.Ordinal);

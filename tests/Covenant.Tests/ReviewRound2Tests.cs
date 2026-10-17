@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Covenant.Adapters;
 using Covenant.Core;
 using Covenant.Governance;
 using Covenant.Host;

@@ -30,6 +30,8 @@ public sealed class ConnectionForm
     public const string BasisLocal = "zero-marginal-local";
     public const string BasisList = "provider-list";
     public const string BasisContract = "contract";
+    /// <summary>Provider call timeout a NEW connection starts with, for every kind (the Host's own default; 1–600).</summary>
+    public const int DefaultTimeoutSeconds = 120;
 
     public bool IsNew { get; init; }
     /// <summary>Id of the saved connection being edited (immutable on edit: policies reference it).</summary>
@@ -56,11 +58,12 @@ public sealed class ConnectionForm
         Boundary = "Local",
         DisplayName = "Ollama (in perimeter)",
         Id = ConnectionRules.UniqueId("ollama", existingIds),
+        TimeoutSeconds = DefaultTimeoutSeconds,
     };
 
     public static ConnectionForm NewCloud(string kind, IEnumerable<string> existingIds)
     {
-        var f = new ConnectionForm { IsNew = true };
+        var f = new ConnectionForm { IsNew = true, TimeoutSeconds = DefaultTimeoutSeconds };
         f.SetKind(kind);
         f.DisplayName = ConnectionRules.KindLabel(kind);
         f.Id = ConnectionRules.UniqueId(kind.ToLowerInvariant(), existingIds);

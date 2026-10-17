@@ -233,9 +233,9 @@
 
     private ConnectionHealthView HealthFor(ConnectionDto conn, CatalogConnectionDto? cat)
     {
+        // One shape: the catalog's connection-scoped view (catalog.connections[].models[].health). A connection the
+        // catalog does not list has no observed health yet.
         var models = cat?.Models.Select(m => m.Health).ToList() ?? new List<ModelHealth?>();
-        if (cat is null && State.Catalog is { } legacy)
-            models = legacy.Models.Where(m => string.Equals(m.ConnectionId ?? m.Adapter, conn.Id, StringComparison.Ordinal)).Select(m => m.Health).ToList();
         ModelHealth? endpointHealth = null;
         if (State.Catalog?.Local is { } local && ConnectionLogic.SameEndpoint(local.Endpoint, conn.Endpoint)) endpointHealth = local.EndpointHealth;
         _probes.TryGetValue(conn.Id, out var probe);

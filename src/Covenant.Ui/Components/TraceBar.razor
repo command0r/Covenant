@@ -48,6 +48,10 @@
                             <span class="mono wrap-any">@(a.Target ?? "target not reported")</span>
                             <span class="state-text s-@StateKey(a.State)">@TraceModel.StateText(a.State)</span>
                             <span class="subtle">@(a.DurationMs is { } ad ? Fmt.Ms(ad) : "duration not reported")</span>
+                            @if (a.EffectiveMaxOutputTokens is { } eff)
+                            {
+                                <span class="subtle">output bound: requested @(a.RequestedMaxOutputTokens?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none") · enforced @eff.ToString(System.Globalization.CultureInfo.InvariantCulture)</span>
+                            }
                             @if (a.ReasonCode is { Length: > 0 } rc)
                             {
                                 <span class="mono subtle wrap-any">@rc</span>
@@ -117,7 +121,8 @@
             if (Trace.Source == "audit summary") return "From the audit record (live trace no longer retained)" + version;
             return FeedState switch
             {
-                TraceFeedState.Connecting => "Connecting to the trace…",
+                TraceFeedState.Locating => "Submitted — locating the request id to follow its live trace…",
+                TraceFeedState.Connecting => "Connecting to the live trace…",
                 TraceFeedState.Live => (Trace.Complete ? "Trace complete" : "Live trace") + version,
                 TraceFeedState.Reconnecting => "Trace connection dropped — reconnecting (resumes after the last event)" + version,
                 TraceFeedState.Snapshot => "Trace snapshot (stream unavailable)" + version,

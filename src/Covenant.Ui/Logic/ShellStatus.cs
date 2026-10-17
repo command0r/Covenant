@@ -14,30 +14,23 @@ public static class ShellStatus
 {
     public const string ModeNotReported = "Mode not reported";
 
-    /// <summary>Maps the status/config <c>mode</c> value onto the badge. Accepts the v2 spellings
-    /// (local-only | hybrid | legacy-cloud), the enum names (LocalOnly | Hybrid | LegacyCloud) and the pre-v2
-    /// "cloud". Anything else — including null — is "Mode not reported", never a guess.</summary>
-    public static ModeBadge Mode(string? mode)
-    {
-        var key = Normalize(mode);
-        return key switch
-        {
-            "localonly" or "local" => new("Local-only", "local",
-                "Only in-perimeter (local) connections can execute; cloud configuration cannot run."),
-            "hybrid" => new("Hybrid", "hybrid",
-                "Local and approved cloud routes; PII/PHI never route to cloud destinations."),
-            "legacycloud" or "cloud" => new("Legacy cloud", "legacy",
-                "Imported pre-v2 routing (cloud default). Review the effective rules before relying on it."),
-            _ => new(ModeNotReported, "unknown", "The Host did not report a provider mode."),
-        };
-    }
+    public const string LocalOnly = "local-only";
+    public const string Hybrid = "hybrid";
+    public const string LegacyCloud = "legacy-cloud";
 
-    private static string Normalize(string? s)
+    /// <summary>Maps the status/catalog/config <c>mode</c> value onto the badge. Exactly the contract spellings
+    /// (docs/ui-api-contract.md "Wire spellings"): local-only | hybrid | legacy-cloud. Anything else — including null
+    /// — is "Mode not reported", never a guess.</summary>
+    public static ModeBadge Mode(string? mode) => mode switch
     {
-        if (string.IsNullOrWhiteSpace(s)) return "";
-        var chars = s.Trim().ToLowerInvariant().Where(c => c != '-' && c != '_' && c != ' ').ToArray();
-        return new string(chars);
-    }
+        LocalOnly => new("Local-only", "local",
+            "Only in-perimeter (local) connections can execute; cloud configuration cannot run."),
+        Hybrid => new("Hybrid", "hybrid",
+            "Local and approved cloud routes; PII/PHI never route to cloud destinations."),
+        LegacyCloud => new("Legacy cloud", "legacy",
+            "Imported pre-v2 routing (cloud default). Review the effective rules before relying on it."),
+        _ => new(ModeNotReported, "unknown", "The Host did not report a provider mode."),
+    };
 
     /// <summary>Freshness label for the header. Never a ticking seconds counter while live.</summary>
     public static FreshnessView Freshness(bool connected, bool stale, DateTimeOffset? lastUpdateUtc, DateTimeOffset nowUtc, string? feedError)

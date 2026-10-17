@@ -733,7 +733,7 @@ public sealed class LegacyAuditCompatibilityTests : IDisposable
         Assert.Equal("estimated_failed_call", entries[2].CostBasis);
 
         var ledger = new InMemorySpendLedger();
-        LedgerReplay.Rebuild(entries, ledger);
+        Covenant.Host.LedgerReplay.Rebuild(entries, ledger);
         Assert.Equal(0.002m + 0.01m + 0.0005m, ledger.GlobalSpendUsd);
         Assert.Equal(0.002m, ledger.TeamSpendUsd("legacy-team"));
         Assert.Equal(0.0105m, ledger.TeamSpendUsd("v2-team"));   // the estimated failed-call charge replays

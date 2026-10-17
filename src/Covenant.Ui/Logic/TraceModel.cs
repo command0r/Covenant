@@ -1,5 +1,3 @@
-using System.Globalization;
-using System.Text.Json;
 using Covenant.Ui.Models;
 
 namespace Covenant.Ui.Logic;
@@ -10,14 +8,20 @@ namespace Covenant.Ui.Logic;
 
 public enum TraceStepState { Pending, Running, Passed, Refused, Failed, Cancelled, Skipped, NotReported }
 
-/// <summary>One provider attempt (fallback is a second attempt, never a hidden retry).</summary>
+/// <summary>One provider attempt (fallback is a second attempt, never a hidden retry). The output bounds come from
+/// the attempt's trace events (review round 2, B12): requested = the request's own max_tokens, effective = the bound
+/// actually sent to the provider for this attempt. Null = not reported.</summary>
 public sealed record TraceAttemptView(
     int Number,
     string? AttemptId,
     TraceStepState State,
     string? Target,
     double? DurationMs,
-    string? ReasonCode);
+    string? ReasonCode)
+{
+    public int? RequestedMaxOutputTokens { get; init; }
+    public int? EffectiveMaxOutputTokens { get; init; }
+}
 
 /// <summary>One pipeline stage as reported. <see cref="Attempts"/> is non-empty only for the provider stage.</summary>
 public sealed record TraceStepView(
@@ -58,14 +62,14 @@ public static class TraceModel
         _ => stage,
     };
 
-    public static TraceStepState ParseState(string? state) => (state ?? "").Trim().ToLowerInvariant() switch
+    public static TraceStepState ParseState(string? state) => state switch
     {
         "pending" => TraceStepState.Pending,
         "running" => TraceStepState.Running,
         "passed" => TraceStepState.Passed,
         "refused" => TraceStepState.Refused,
         "failed" => TraceStepState.Failed,
-        "cancelled" or "canceled" => TraceStepState.Cancelled,
+        "cancelled" => TraceStepState.Cancelled,
         "skipped" => TraceStepState.Skipped,
         _ => TraceStepState.NotReported,
     };
@@ -165,7 +169,17 @@ public static class TraceModel
         foreach (var id in ids)
         {
             var r = ReduceStage("provider", byId[id]);
-            attempts.Add(new TraceAttemptView(attempts.Count + 1, id, r.State, r.Target, r.DurationMs, r.ReasonCode));
+            int? requested = null, effective = null;
+            foreach (var e in byId[id])
+            {
+                if (e.RequestedMaxOutputTokens is { } rq) requested = rq;
+                if (e.EffectiveMaxOutputTokens is { } ef) effective = ef;
+            }
+            attempts.Add(new TraceAttemptView(attempts.Count + 1, id, r.State, r.Target, r.DurationMs, r.ReasonCode)
+            {
+                RequestedMaxOutputTokens = requested,
+                EffectiveMaxOutputTokens = effective,
+            });
         }
         if (attempts.Count == 0 && stageLevel.Count > 0)
         {
@@ -194,44 +208,24 @@ public static class TraceModel
         return new TraceStepView("provider", Label("provider"), state, total, reason, lastAttempt?.Target, evs[0].TsUtc, attempts);
     }
 
-    /// <summary>Builds a view from the compact trace persisted on the audit record (audit v3 <c>Trace[]</c>) when the
-    /// live trace has expired. Accepts objects <c>{Stage, State, DurationMs}</c> or <c>"stage:state:ms"</c> strings;
-    /// anything else is ignored. Provider entries in order become attempts.</summary>
-    public static TraceView? FromAuditSummary(IReadOnlyList<JsonElement>? summary, IReadOnlyList<AuditAttemptView>? attempts = null, int? configVersion = null)
+    /// <summary>Builds a view from the compact trace persisted on the audit record (audit v3 <c>Trace[]</c>, Core
+    /// AuditTraceStep) when the live trace has expired. Provider steps carry their <c>AttemptId</c>; the matching
+    /// <c>Attempts[]</c> entry supplies the target.</summary>
+    public static TraceView? FromAuditSummary(IReadOnlyList<AuditTraceStepView>? summary, IReadOnlyList<AuditAttemptView>? attempts = null, int? configVersion = null)
     {
         if (summary is null || summary.Count == 0) return null;
-        var events = new List<TraceEventDto>();
+        var events = new List<TraceEventDto>(summary.Count);
         long seq = 0;
-        int providerIndex = 0;
-        foreach (var el in summary)
+        foreach (var step in summary)
         {
-            string? stage = null, state = null;
-            double? ms = null;
-            if (el.ValueKind == JsonValueKind.Object)
-            {
-                stage = Str(el, "Stage") ?? Str(el, "stage");
-                state = Str(el, "State") ?? Str(el, "state");
-                ms = Num(el, "DurationMs") ?? Num(el, "duration_ms");
-            }
-            else if (el.ValueKind == JsonValueKind.String && el.GetString() is { } text)
-            {
-                var parts = text.Split(':');
-                if (parts.Length >= 2) { stage = parts[0]; state = parts[1]; }
-                if (parts.Length >= 3 && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var d)) ms = d;
-            }
-            if (string.IsNullOrWhiteSpace(stage) || string.IsNullOrWhiteSpace(state)) continue;
-
-            string? attemptId = null, target = null;
-            if (string.Equals(stage, "provider", StringComparison.OrdinalIgnoreCase))
-            {
-                providerIndex++;
-                var a = attempts is not null && providerIndex <= attempts.Count ? attempts[providerIndex - 1] : null;
-                attemptId = a?.AttemptId ?? ("attempt-" + providerIndex.ToString(CultureInfo.InvariantCulture));
-                target = a is null ? null : Target(a);
-            }
+            if (string.IsNullOrWhiteSpace(step.Stage) || string.IsNullOrWhiteSpace(step.State)) continue;
+            string? target = null;
+            if (step.AttemptId is { Length: > 0 } aid && attempts?.FirstOrDefault(a => string.Equals(a.AttemptId, aid, StringComparison.Ordinal)) is { } attempt)
+                target = Target(attempt);
             events.Add(new TraceEventDto
             {
-                Seq = ++seq, Stage = stage, State = state, DurationMs = ms, AttemptId = attemptId, Target = target,
+                Seq = ++seq, Stage = step.Stage, State = step.State, DurationMs = step.DurationMs,
+                AttemptId = step.AttemptId, ReasonCode = step.ReasonCode, Target = target,
             });
         }
         return events.Count == 0 ? null : Reduce(events, complete: true, configVersion, source: "audit summary");
@@ -245,12 +239,6 @@ public static class TraceModel
         if (c is null && m is null) return null;
         return c is null ? m : m is null ? c : c + "/" + m;
     }
-
-    private static string? Str(JsonElement el, string name)
-        => el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-
-    private static double? Num(JsonElement el, string name)
-        => el.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var d) ? d : null;
 }
 
 /// <summary>Collects trace events for one request as they arrive (live stream, replay after reconnect, snapshot)

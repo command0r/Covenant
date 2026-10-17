@@ -7,9 +7,11 @@
 <PageTitle>Policies · Covenant</PageTitle>
 
 @*
-  T08. Routing policies from the versioned configuration (ADR-0013): a coloured route view (classification/profile →
-  primary → approved fallbacks, Local/Cloud, state, strategy) and a compact editable list (targets, order, pause/resume
-  route and policy, retry), Preview impact → Save & apply via ConfigEditor. Simulator = real engine, dry run.
+  T08 + review round 2 (U4). Routing policies from the versioned configuration (ADR-0013): a coloured route view
+  (classification/profile → primary → approved fallbacks, Local/Cloud, state, strategy) and an editable list: create a
+  policy, remove one (impact shown first), edit classification/profile applicability, targets, order, pause/resume, retry,
+  and "Split this policy" (Public → cloud + local fallback; Internal/PII/PHI → local). Every change edits the DRAFT only;
+  Preview impact → Save & apply via ConfigEditor. Cloud targets are never offered for PII/PHI. Simulator = dry run.
 *@
 
 <div class="page">
@@ -132,7 +134,91 @@
                 <div class="panel-head">
                     <h2 id="pl-h">Policies</h2>
                     <span class="panel-sub">@(Editing ? "Editing the draft" : "Read-only — choose Edit above")</span>
+                    @if (Editing && _newPolicy is null)
+                    {
+                        <span class="grow"></span>
+                        <button type="button" class="btn sm" id="pol-create" @onclick="() => StartCreate(cfg)"><span>Create policy…</span></button>
+                    }
                 </div>
+                @if (Editing && _newPolicy is { } np)
+                {
+                    var npOptions = PolicyEditing.TargetOptions(np.Classifications, cfg);
+                    var npProblems = PolicyEditing.Problems(np, cfg);
+                    <div class="policy-create pad" role="group" aria-labelledby="pc-h">
+                        <h3 id="pc-h">New policy (draft)</h3>
+                        <div class="form-grid">
+                            <div class="field">
+                                <label for="pc-id">Policy id</label>
+                                <input id="pc-id" class="input mono" @bind="np.Id" @bind:event="oninput" spellcheck="false" />
+                            </div>
+                            <div class="field">
+                                <label for="pc-name">Name</label>
+                                <input id="pc-name" class="input" @bind="np.Name" @bind:event="oninput" />
+                            </div>
+                            <div class="field">
+                                <label for="pc-st">Strategy</label>
+                                <select id="pc-st" class="input" @bind="np.Strategy">
+                                    <option value="fixed">Fixed + fallback</option>
+                                    <option value="length-heuristic">Length-based heuristic</option>
+                                </select>
+                            </div>
+                        </div>
+                        <fieldset class="inline-fieldset">
+                            <legend class="field-label">Classifications it applies to</legend>
+                            @foreach (var c in PolicyEditing.AllClassifications)
+                            {
+                                var cls = c;
+                                <label class="switch"><input type="checkbox" checked="@np.Classifications.Contains(cls)" @onchange="@(e => ToggleNew(np.Classifications, cls, e))" /> @PolicyText.ClassificationLabel(cls)</label>
+                            }
+                        </fieldset>
+                        <fieldset class="inline-fieldset">
+                            <legend class="field-label">Workload profiles (optional — none checked = every profile)</legend>
+                            @foreach (var pr in cfg.Profiles)
+                            {
+                                var prof = pr;
+                                <label class="switch"><input type="checkbox" checked="@np.Profiles.Contains(prof.Id)" @onchange="@(e => ToggleNew(np.Profiles, prof.Id, e))" /> @(prof.Name ?? prof.Id) <span class="subtle">(@PolicyText.ClassificationLabel(prof.Baseline))</span></label>
+                            }
+                        </fieldset>
+                        <div class="field-row">
+                            <div class="field">
+                                <label for="pc-add">Approved targets in order (primary first)</label>
+                                <select id="pc-add" class="input mono" value="@_newTargetPick" @onchange="@(e => _newTargetPick = e.Value?.ToString() ?? "")">
+                                    <option value="">Choose a permitted model…</option>
+                                    @foreach (var o in npOptions.Where(o => !np.Targets.Contains(o.Value)))
+                                    {
+                                        <option value="@o.Value" disabled="@(o.DisabledReason is not null)">@(o.Label + (o.DisabledReason is { } dr ? " — " + dr : ""))</option>
+                                    }
+                                </select>
+                            </div>
+                            <button type="button" class="btn form" disabled="@(string.IsNullOrEmpty(_newTargetPick))" @onclick="() => AddNewTarget(np, npOptions)">Add target</button>
+                        </div>
+                        @if (np.Targets.Count > 0)
+                        {
+                            <ol class="plain-list secondary">
+                                @foreach (var (t, ti) in np.Targets.Select((x, n) => (x, n)))
+                                {
+                                    var key = t;
+                                    <li><span class="subtle">@PolicyRoutes.RoleLabel(ti)</span> <span class="mono wrap-any">@key</span>
+                                        <button type="button" class="btn ghost sm" @onclick="() => { np.Targets.Remove(key); }" aria-label="@("Remove " + key)">Remove</button></li>
+                                }
+                            </ol>
+                        }
+                        @if (np.Classifications.Any(PolicyText.IsSensitive))
+                        {
+                            <span class="note">@PolicyText.SensitiveNeverCloud Cloud models are not offered.</span>
+                        }
+                        @if (npProblems.Count > 0)
+                        {
+                            <ul class="plain-list secondary warn-text" aria-live="polite">
+                                @foreach (var pp in npProblems) { <li>@pp</li> }
+                            </ul>
+                        }
+                        <div class="btn-row">
+                            <button type="button" class="btn primary" disabled="@(npProblems.Count > 0)" @onclick="() => AddPolicyAsync(np)">Add to draft and preview impact</button>
+                            <button type="button" class="btn" @onclick="CancelCreate">Cancel</button>
+                        </div>
+                    </div>
+                }
                 <div class="pause-explain secondary">
                     <span><strong>Pause policy:</strong> @PolicyText.PausedPolicyExplained</span>
                     <span><strong>Pause route:</strong> @PolicyText.PausedRouteExplained</span>
@@ -156,9 +242,79 @@
                                     <button type="button" class="btn sm" @onclick="() => TogglePolicyPause(pol)" aria-describedby="@("pph-" + pol.Id)">
                                         <Icon Name="@(pol.Paused ? "play" : "pause")" Size="16" /><span>@(pol.Paused ? "Resume policy" : "Pause policy")</span>
                                     </button>
+                                    <button type="button" class="btn ghost sm" @onclick="() => AskRemove(pol)">Remove policy…</button>
+                                }
+                                @if (PolicyEditing.CanSplit(pol))
+                                {
+                                    <button type="button" class="btn sm" disabled="@(!Editing && !CanStartEdit)" @onclick="() => AskSplit(pol)">Split this policy…</button>
                                 }
                             </div>
                             <span id="@("pph-" + pol.Id)" class="visually-hidden">@PolicyText.PausedPolicyExplained</span>
+                            @if (Editing && _removeAsk == pol.Id)
+                            {
+                                <div class="alert warn" role="alertdialog" aria-labelledby="@("rm-h-" + pol.Id)">
+                                    <div class="alert-text">
+                                        <strong id="@("rm-h-" + pol.Id)">Remove policy @pol.Id from the draft?</strong>
+                                        <ul class="plain-list secondary">
+                                            @foreach (var line in PolicyEditing.RemovalImpact(pol, cfg)) { <li>@line</li> }
+                                        </ul>
+                                        <span class="alert-body">The Host's impact preview runs right after; nothing is applied until Save &amp; apply.</span>
+                                    </div>
+                                    <div class="btn-row">
+                                        <button type="button" class="btn primary" @onclick="() => RemovePolicyAsync(pol)">Remove and preview impact</button>
+                                        <button type="button" class="btn" @onclick="() => _removeAsk = null">Keep</button>
+                                    </div>
+                                </div>
+                            }
+                            @if (_splitAsk == pol.Id)
+                            {
+                                var plan = PolicyEditing.PlanSplit(pol, cfg);
+                                <div class="alert info" role="alertdialog" aria-labelledby="@("sp-h-" + pol.Id)">
+                                    <div class="alert-text">
+                                        <strong id="@("sp-h-" + pol.Id)">Split @pol.Id into two draft policies</strong>
+                                        @if (plan.Problem is { } spProblem)
+                                        {
+                                            <span class="alert-body warn-text">@spProblem</span>
+                                        }
+                                        else if (plan.PublicPolicy is { } pp && plan.RestrictedPolicy is { } rp)
+                                        {
+                                            <ul class="plain-list secondary">
+                                                <li><span class="mono">@pp.Id</span> — @PolicyText.Applicability(pp) → <span class="mono wrap-any">@(string.Join(" → ", pp.Targets.Select(PolicyRoutes.Key)))</span></li>
+                                                <li><span class="mono">@rp.Id</span> — @PolicyText.Applicability(rp) → <span class="mono wrap-any">@(string.Join(" → ", rp.Targets.Select(PolicyRoutes.Key)))</span> (local only)</li>
+                                                @foreach (var n in plan.Notes) { <li class="subtle">@n</li> }
+                                            </ul>
+                                            <span class="alert-body">@PolicyText.SensitiveNeverCloud The impact preview runs right after; nothing is applied until Save &amp; apply.</span>
+                                        }
+                                    </div>
+                                    <div class="btn-row">
+                                        <button type="button" class="btn primary" disabled="@(plan.Problem is not null)" @onclick="() => SplitAsync(pol)">Split and preview impact</button>
+                                        <button type="button" class="btn" @onclick="() => _splitAsk = null">Cancel</button>
+                                    </div>
+                                </div>
+                            }
+                            @if (Editing)
+                            {
+                                <fieldset class="inline-fieldset">
+                                    <legend class="field-label">Applies to classifications</legend>
+                                    @foreach (var c in PolicyEditing.AllClassifications)
+                                    {
+                                        var cls = c;
+                                        <label class="switch"><input type="checkbox" checked="@pol.Classifications.Contains(cls)" @onchange="@(e => ToggleClassification(pol, cls, e))" /> @PolicyText.ClassificationLabel(cls)</label>
+                                    }
+                                </fieldset>
+                                <fieldset class="inline-fieldset">
+                                    <legend class="field-label">Workload profiles (none checked = every profile)</legend>
+                                    @foreach (var pr in cfg.Profiles)
+                                    {
+                                        var prof = pr;
+                                        <label class="switch"><input type="checkbox" checked="@pol.Profiles.Contains(prof.Id)" @onchange="@(e => ToggleProfile(pol, prof.Id, e))" /> @(prof.Name ?? prof.Id)</label>
+                                    }
+                                </fieldset>
+                                @if (_applicabilityError.TryGetValue(pol.Id, out var apErr))
+                                {
+                                    <span class="note bad" role="status">@apErr</span>
+                                }
+                            }
                             <table class="target-table secondary">
                                 <thead><tr><th scope="col">Order</th><th scope="col">Target</th><th scope="col">State</th>@if (Editing) { <th scope="col"><span class="visually-hidden">Actions</span></th> }</tr></thead>
                                 <tbody>
@@ -285,7 +441,12 @@
     private static readonly string[] DefaultRetryOn = ["connect", "timeout", "429", "5xx"];
 
     private readonly Dictionary<string, string> _add = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _applicabilityError = new(StringComparer.Ordinal);
     private string? _hybridProblem;
+    private NewPolicyForm? _newPolicy;
+    private string _newTargetPick = "";
+    private string? _removeAsk;
+    private string? _splitAsk;
 
     private bool Editing => Editor.Editing && Editor.Owner == "policies";
     private bool CanStartEdit => Editor.Applied is not null && !Editor.Saving && (!Editor.IsDirty || Editor.Owner == "policies");
@@ -338,6 +499,100 @@
         }
         Editor.Touch();
         await Editor.ValidateAsync();
+    }
+
+    private void StartCreate(CovenantConfigDto cfg)
+    {
+        _newPolicy = new NewPolicyForm { Id = PolicyEditing.UniqueId("policy", cfg), Name = "", Classifications = ["Public"] };
+        _newTargetPick = "";
+    }
+
+    private void CancelCreate()
+    {
+        _newPolicy = null;
+        _newTargetPick = "";
+    }
+
+    private static void ToggleNew(List<string> list, string value, ChangeEventArgs e)
+    {
+        list.Remove(value);
+        if (e.Value is bool b && b) list.Add(value);
+    }
+
+    private void AddNewTarget(NewPolicyForm f, IReadOnlyList<TargetOption> options)
+    {
+        var o = options.FirstOrDefault(x => x.Value == _newTargetPick && x.DisabledReason is null);
+        if (o is not null && !f.Targets.Contains(o.Value)) f.Targets.Add(o.Value);
+        _newTargetPick = "";
+    }
+
+    private async Task AddPolicyAsync(NewPolicyForm f)
+    {
+        if (!Editing || Editor.Draft is not { } d) return;
+        if (PolicyEditing.Add(d, f).Count > 0) return;
+        _newPolicy = null;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void AskRemove(PolicyDto p)
+    {
+        _removeAsk = p.Id;
+        _splitAsk = null;
+    }
+
+    private async Task RemovePolicyAsync(PolicyDto p)
+    {
+        _removeAsk = null;
+        if (!Editing || Editor.Draft is not { } d || !PolicyEditing.Remove(d, p.Id)) return;
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void AskSplit(PolicyDto p)
+    {
+        // The split edits the draft: start editing here when nobody else holds an unsaved draft.
+        if (!Editing && !Editor.BeginEdit("policies")) return;
+        _splitAsk = p.Id;
+        _removeAsk = null;
+    }
+
+    private async Task SplitAsync(PolicyDto p)
+    {
+        _splitAsk = null;
+        if (!Editing || Editor.Draft is not { } d) return;
+        var problem = PolicyEditing.ApplySplit(d, p.Id);
+        if (problem is not null)
+        {
+            _applicabilityError[p.Id] = problem;
+            return;
+        }
+        Editor.Touch();
+        await Editor.ValidateAsync();
+    }
+
+    private void ToggleClassification(PolicyDto p, string cls, ChangeEventArgs e)
+    {
+        var next = p.Classifications.Where(c => c != cls).ToList();
+        if (e.Value is bool b && b) next.Add(cls);
+        ApplyApplicability(p, Editor.Draft is { } d ? PolicyEditing.SetClassifications(p, next, d) : "Not editing.");
+    }
+
+    private void ToggleProfile(PolicyDto p, string profile, ChangeEventArgs e)
+    {
+        var next = p.Profiles.Where(x => x != profile).ToList();
+        if (e.Value is bool b && b) next.Add(profile);
+        ApplyApplicability(p, Editor.Draft is { } d ? PolicyEditing.SetProfiles(p, next, d) : "Not editing.");
+    }
+
+    private void ApplyApplicability(PolicyDto p, string? error)
+    {
+        if (error is null)
+        {
+            _applicabilityError.Remove(p.Id);
+            Editor.Touch();
+        }
+        else _applicabilityError[p.Id] = error;
     }
 
     private void TogglePolicyPause(PolicyDto p)

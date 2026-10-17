@@ -400,11 +400,15 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .ov-top { display: grid; grid-template-columns: minmax(300px, 4fr) minmax(380px, 7fr); gap: 16px; align-items: start; }
 .ov-top > section { min-width: 0; }
 .check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
-.check { display: grid; grid-template-columns: auto 8.5em minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: var(--text-secondary); }
+/* Setup checks (review round 2, U5): short status values that never break mid-word; only ids may wrap anywhere. */
+.check { display: grid; grid-template-columns: auto minmax(6.5em, auto) minmax(0, 1fr) auto; gap: 4px 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: var(--text-secondary); }
 .check:last-child { border-bottom: 0; }
-.check-name { color: var(--muted); }
-.check-value { overflow-wrap: anywhere; }
-.check-action { white-space: nowrap; }
+.check > .dot { align-self: center; }
+.check-name { color: var(--muted); white-space: nowrap; }
+.check-value { overflow-wrap: normal; word-break: normal; hyphens: none; min-width: 0; }
+.check-status { white-space: nowrap; }
+.check-id { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; word-break: normal; }
+.check-action { white-space: nowrap; justify-self: end; }
 .ov-result { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); padding-top: 12px; }
 .row-main { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
 
@@ -480,8 +484,9 @@ details.tech[open] > summary { margin-bottom: 6px; }
 }
 @media (max-width: 640px) {
   .composer-grid, .composer-grid.three { grid-template-columns: minmax(0, 1fr); }
-  .check { grid-template-columns: auto minmax(0, 1fr); }
-  .check .check-value, .check .check-action { grid-column: 2; }
+  .check { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .check .check-value { grid-column: 2 / span 2; }
+  .check .check-action { grid-column: 3; grid-row: 1; }
 }
 
 @media (max-width: 900px) {
@@ -591,3 +596,7 @@ details.panel > summary { cursor: pointer; font-weight: 600; min-height: 32px; d
   .route-row { grid-template-columns: minmax(0, 1fr); grid-template-areas: "scope" "targets" "meta"; }
   .route-arrow { display: none; }
 }
+
+/* Policies: create-policy form (review round 2, U4). */
+.policy-create { display: flex; flex-direction: column; gap: 10px; border-bottom: 1px solid var(--border); }
+.policy-create h3 { margin: 0; font-size: var(--text-body, 14px); }

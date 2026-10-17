@@ -32,22 +32,28 @@
                 <section class="panel" aria-labelledby="checks-h">
                     <div class="panel-head">
                         <h2 id="checks-h">Setup checks</h2>
-                        <span class="panel-sub">Individual checks — not a readiness verdict</span>
+                        <span class="panel-sub">Each check stands alone</span>
                     </div>
                     <ul class="check-list">
                         @foreach (var c in Checks(s))
                         {
-                            <li class="check @c.Tone">
+                            <li class="check @c.Tone" title="@c.Title">
                                 <span class="dot @c.Tone" aria-hidden="true"></span>
                                 <span class="check-name">@c.Name</span>
-                                <span class="check-value">@c.Value</span>
+                                <span class="check-value">
+                                    <span class="check-status">@c.Value</span>
+                                    @if (c.Id is { Length: > 0 } cid)
+                                    {
+                                        <span class="check-id mono">@cid</span>
+                                    }
+                                </span>
                                 @if (c.ActionText is not null && c.Href is not null)
                                 {
-                                    <a class="check-action" href="@c.Href">@c.ActionText</a>
+                                    <a class="check-action" href="@c.Href" aria-label="@(c.ActionText + " — " + c.Name)">@c.ActionText</a>
                                 }
                                 else if (c.ActionText is not null && c.Resume)
                                 {
-                                    <button type="button" class="btn sm" disabled="@_busy" @onclick="ResumeAsync"><Icon Name="play" Size="14" /><span>@c.ActionText</span></button>
+                                    <button type="button" class="btn sm check-action" disabled="@_busy" @onclick="ResumeAsync" aria-label="Resume provider calls"><Icon Name="play" Size="14" /><span>@c.ActionText</span></button>
                                 }
                             </li>
                         }
@@ -184,7 +190,10 @@
 </div>
 
 @code {
-    private sealed record Check(string Name, string Value, string Tone, string? ActionText = null, string? Href = null, bool Resume = false);
+    /// <summary>One setup check. <see cref="Value"/> is a short status (no ids); <see cref="Id"/> (a scope or connection id)
+    /// is rendered separately and is the only part allowed to break anywhere; <see cref="Title"/> holds the long form.</summary>
+    private sealed record Check(string Name, string Value, string Tone, string? ActionText = null, string? Href = null, bool Resume = false,
+        string? Id = null, string? Title = null);
 
     private bool _busy;
 
@@ -200,44 +209,44 @@
     {
         var fresh = ShellStatus.Freshness(State.Connected, State.IsStale, State.LastUpdatedUtc, DateTimeOffset.UtcNow, State.FeedError);
         yield return fresh.Stale
-            ? new Check("Console", "Connected · status " + fresh.Label.ToLowerInvariant() + " (retrying)", "warn")
-            : new Check("Console", "Connected · live status", "ok");
+            ? new Check("Console", "Status " + fresh.Label.ToLowerInvariant(), "warn", Title: "Connected; the status feed is stale and retrying")
+            : new Check("Console", "Live", "ok", Title: "Connected · live status");
 
         var mode = ShellStatus.Mode(s.Mode);
         yield return mode.Tone == "unknown"
-            ? new Check("Mode", ShellStatus.ModeNotReported, "warn", "Models & connections", "connections")
-            : new Check("Mode", mode.Label, mode.Tone == "legacy" ? "warn" : "ok", mode.Tone == "legacy" ? "Review policies" : null, mode.Tone == "legacy" ? "policies" : null);
+            ? new Check("Mode", "Not reported", "warn", "Open", "connections", Title: ShellStatus.ModeNotReported)
+            : new Check("Mode", mode.Label, mode.Tone == "legacy" ? "warn" : "ok", mode.Tone == "legacy" ? "Review" : null, mode.Tone == "legacy" ? "policies" : null, Title: mode.Description);
 
-        var local = RouteHealth.LocalRoute(State.Catalog, DateTimeOffset.UtcNow);
+        var local = RouteHealth.LocalRoute(State.Catalog, State.LastStatus, DateTimeOffset.UtcNow);
         yield return local.State switch
         {
-            LocalRouteState.Ready => new Check("Local route", "Ready", "ok"),
-            LocalRouteState.Degraded => new Check("Local route", "Degraded — last call or probe failed", "warn", "Review connection", "connections"),
-            LocalRouteState.NotRegistered => new Check("Local route", "Configured, not registered", "bad", "Fix connection", "connections"),
-            LocalRouteState.NotConfigured => new Check("Local route", "Not configured — sensitive requests will be refused", "warn", "Add a local connection", "connections"),
-            LocalRouteState.NotObserved => new Check("Local route", "Registered, not yet observed", "hollow", "Test connection", "connections"),
-            _ => new Check("Local route", State.CatalogError is { } ce ? "Unknown — " + ce : "Unknown (catalog not loaded)", "hollow", "Models & connections", "connections"),
+            LocalRouteState.Ready => new Check("Local route", "Ready", "ok", Id: local.Target, Title: local.Text),
+            LocalRouteState.Degraded => new Check("Local route", "Degraded", "warn", "Review", "connections", Id: local.Target, Title: local.Text + (local.LastError is { Length: > 0 } le ? " · " + le : "")),
+            LocalRouteState.NotRegistered => new Check("Local route", "Not registered", "bad", "Fix", "connections", Id: local.Target, Title: local.Text),
+            LocalRouteState.NotConfigured => new Check("Local route", "Not configured", "warn", "Add", "connections", Title: "No local connection — sensitive requests will be refused"),
+            LocalRouteState.NotObserved => new Check("Local route", "Not yet observed", "hollow", "Test", "connections", Id: local.Target, Title: local.Text),
+            _ => new Check("Local route", "Unknown", "hollow", "Open", "connections", Title: State.CatalogError ?? local.Text),
         };
 
         yield return State.Paused
-            ? new Check("Provider calls", "Paused" + (string.IsNullOrWhiteSpace(s.KillSwitch.Reason) ? "" : " — " + s.KillSwitch.Reason), "warn", "Resume provider calls", Resume: true)
+            ? new Check("Provider calls", "Paused", "warn", "Resume", Resume: true, Title: string.IsNullOrWhiteSpace(s.KillSwitch.Reason) ? "Paused" : "Paused — " + s.KillSwitch.Reason)
             : new Check("Provider calls", "Accepted", "ok");
 
         yield return BudgetCheck(s);
 
         if (Ws.ApplicationsError is { } ae)
-            yield return new Check("Test applications", ae, "warn");
+            yield return new Check("Test applications", "Unavailable", "warn", Title: ae);
         else if (Ws.Applications is { } apps)
         {
             int testable = apps.Count(a => ComposerRules.WhyNotSelectable(a) is null);
             yield return testable == 0
-                ? new Check("Test applications", "None enabled for console testing", "warn", "Settings", "settings")
-                : new Check("Test applications", testable.ToString(System.Globalization.CultureInfo.InvariantCulture) + " available to run as", "ok");
+                ? new Check("Test applications", "None testable", "warn", "Settings", "settings", Title: "No application is enabled for console testing")
+                : new Check("Test applications", testable.ToString(System.Globalization.CultureInfo.InvariantCulture) + " available", "ok", Title: "Applications the console can run as");
         }
 
         yield return s.ChainValid
-            ? new Check("Audit chain", "Verifies (current segment)", "ok")
-            : new Check("Audit chain", "Verification failed", "bad", "Open audit & evidence", "evidence");
+            ? new Check("Audit chain", "Verifies", "ok", Title: "The current segment's hash chain verifies")
+            : new Check("Audit chain", "Fails", "bad", "Open", "evidence", Title: "The current segment's hash chain does not verify");
     }
 
     private Check BudgetCheck(StatusReport s)
@@ -247,17 +256,20 @@
             var worst = budgets.FirstOrDefault(b => string.Equals(b.Warning, "exceeded", StringComparison.OrdinalIgnoreCase))
                         ?? budgets.FirstOrDefault(b => string.Equals(b.Warning, "critical", StringComparison.OrdinalIgnoreCase))
                         ?? budgets.FirstOrDefault(b => string.Equals(b.Warning, "warn", StringComparison.OrdinalIgnoreCase));
-            if (worst is null) return new Check("Budgets", "No budget warning", "ok");
-            var tone = string.Equals(worst.Warning, "warn", StringComparison.OrdinalIgnoreCase) ? "warn" : "bad";
-            return new Check("Budgets", worst.Scope + ": " + worst.Warning + " · " + Fmt.Usd(worst.SpentUsd) + " of " + Fmt.UsdTotal(worst.CapUsd), tone, "Open budgets", "budgets");
+            if (worst is null) return new Check("Budgets", "No warning", "ok", Title: "No budget has reached a warning threshold");
+            var tone = string.Equals(worst.Warning, "warn", StringComparison.Ordinal) ? "warn" : "bad";
+            return new Check("Budgets", worst.Warning + " · " + Fmt.Percent(worst.SpentUsd, worst.CapUsd), tone, "Open", "budgets", Id: worst.Scope,
+                Title: worst.Scope + ": " + worst.Warning + " · " + Fmt.Usd(worst.SpentUsd) + " of " + Fmt.UsdTotal(worst.CapUsd));
         }
         var pct = Fmt.PercentClamped(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd);
-        if (s.Budget.GlobalCapUsd <= 0) return new Check("Budgets", "No global cap reported", "hollow", "Open budgets", "budgets");
+        if (s.Budget.GlobalCapUsd <= 0) return new Check("Budgets", "No global cap", "hollow", "Open", "budgets");
+        var used = Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " of global";
+        var title = Fmt.Usd(s.Budget.GlobalSpendUsd) + " of " + Fmt.UsdTotal(s.Budget.GlobalCapUsd);
         return pct >= 95
-            ? new Check("Budgets", "Global cap " + Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " used", "bad", "Open budgets", "budgets")
+            ? new Check("Budgets", used, "bad", "Open", "budgets", Title: title)
             : pct >= 80
-                ? new Check("Budgets", "Global cap " + Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " used", "warn", "Open budgets", "budgets")
-                : new Check("Budgets", "Global cap " + Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " used", "ok");
+                ? new Check("Budgets", used, "warn", "Open", "budgets", Title: title)
+                : new Check("Budgets", used, "ok", Title: title);
     }
 
     private static int Pct(int value, int peak) => peak <= 0 ? 0 : (int)Math.Round(value * 100.0 / peak);

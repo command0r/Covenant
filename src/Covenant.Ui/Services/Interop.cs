@@ -25,6 +25,13 @@ public sealed class Interop(IJSRuntime js)
     public ValueTask TrapFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "trapFocus", containerId);
     public ValueTask ReleaseFocusAsync(string containerId) => js.InvokeVoidAsync(Prefix + "releaseFocus", containerId);
 
+    /// <summary>Document-level Escape listener (presentation mode): calls <paramref name="method"/> on
+    /// <paramref name="target"/>. Returns a watch id for <see cref="UnwatchEscapeAsync"/>.</summary>
+    public ValueTask<string> WatchEscapeAsync<T>(DotNetObjectReference<T> target, string method) where T : class
+        => js.InvokeAsync<string>(Prefix + "watchEscape", target, method);
+
+    public ValueTask UnwatchEscapeAsync(string watchId) => js.InvokeVoidAsync(Prefix + "unwatchEscape", watchId);
+
     /// <summary>Copies text the operator explicitly chose to copy (a request id or the response shown on screen —
     /// never a credential) to the clipboard. Returns false if the browser refused.</summary>
     public ValueTask<bool> CopyTextAsync(string text) => js.InvokeAsync<bool>(Prefix + "copyText", text);

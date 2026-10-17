@@ -5,11 +5,12 @@ using Covenant.Ui.Models;
 
 namespace Covenant.Ui.Services;
 
-/// <summary>A failed admin call, with the HTTP status and the server's reason when it sent one. The message is
-/// safe to render: it never includes the token or the request body.</summary>
-public sealed class ApiException(HttpStatusCode? status, string message) : Exception(message)
+/// <summary>A failed admin call, with the HTTP status, the server's error code (<c>error</c>, e.g. "cursor_expired") and
+/// its reason when it sent one. The message is safe to render: it never includes the token or the request body.</summary>
+public sealed class ApiException(HttpStatusCode? status, string message, string? errorCode = null) : Exception(message)
 {
     public HttpStatusCode? Status { get; } = status;
+    public string? ErrorCode { get; } = errorCode;
 }
 
 /// <summary>Status, body text and ETag of a raw admin call (body never contains a secret: config payloads carry
@@ -123,10 +124,21 @@ public sealed class AdminApi(HttpClient http, AppState state)
     public Task<SimulateResponseDto> SimulateAsync(SimulateRequestDto body, CancellationToken ct = default)
         => PostAsync("/admin/policies/simulate", body, UiJsonContext.Default.SimulateRequestDto, UiJsonContext.Default.SimulateResponseDto, ct);
 
-    /// <summary>GET /admin/budgets/{id}/requests as raw JSON (parsed leniently by Logic/BudgetRequests).</summary>
-    public Task<string> GetBudgetRequestsJsonAsync(string budgetId, int limit = 100, CancellationToken ct = default)
-        => GetTextAsync("/admin/budgets/" + Uri.EscapeDataString(budgetId) + "/requests?limit="
-                        + limit.ToString(System.Globalization.CultureInfo.InvariantCulture), ct);
+    /// <summary>GET /admin/budgets/{id}/requests — settled contributions of the budget's scope in its current period.</summary>
+    public Task<BudgetRequestsDto> GetBudgetRequestsAsync(string budgetId, int limit = 100, CancellationToken ct = default)
+        => GetAsync("/admin/budgets/" + Uri.EscapeDataString(budgetId) + "/requests?limit="
+                    + limit.ToString(System.Globalization.CultureInfo.InvariantCulture), UiJsonContext.Default.BudgetRequestsDto, ct);
+
+    /// <summary>GET /admin/playground/submissions/{client_request_id} (review round 2, B7). Returns the HTTP status and,
+    /// on 200, the submission (request id + running|completed). 404 = not registered yet / expired. A 401 raises
+    /// <see cref="Unauthorized"/> like every admin call. Transport failures throw.</summary>
+    public async Task<(int Status, PlaygroundSubmissionDto? Submission)> GetPlaygroundSubmissionAsync(string clientRequestId, CancellationToken ct = default)
+    {
+        var raw = await SendRawAsync(HttpMethod.Get, "/admin/playground/submissions/" + Uri.EscapeDataString(clientRequestId), null, null, ct);
+        if (raw.Status != 200) return (raw.Status, null);
+        try { return (raw.Status, JsonSerializer.Deserialize(raw.Body, UiJsonContext.Default.PlaygroundSubmissionDto)); }
+        catch (JsonException) { return (raw.Status, null); }
+    }
 
     /// <summary>GET /admin/audit/segments — the current segment plus archived siblings (ids only).</summary>
     public Task<List<AuditSegmentDto>> GetSegmentsAsync(CancellationToken ct = default)
@@ -249,12 +261,14 @@ public sealed class AdminApi(HttpClient http, AppState state)
         }
 
         string? reason = null;
+        string? code = null;
         try
         {
             var text = await response.Content.ReadAsStringAsync(ct);
             if (text.Length > 0)
             {
                 var err = JsonSerializer.Deserialize(text, UiJsonContext.Default.ErrorResponse);
+                code = err?.Error;
                 reason = err?.Reason ?? err?.Error;
                 if (err?.Error == "not_found" && err.Scanned is { } scanned)
                     reason = $"not found (scanned {scanned} records)";
@@ -263,6 +277,6 @@ public sealed class AdminApi(HttpClient http, AppState state)
         catch (JsonException) { /* non-JSON error body: fall through to the status line */ }
 
         throw new ApiException(response.StatusCode,
-            reason is { Length: > 0 } ? $"{(int)response.StatusCode}: {reason}" : $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
+            reason is { Length: > 0 } ? $"{(int)response.StatusCode}: {reason}" : $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}", code);
     }
 }

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using Covenant.Ui.Logic;
+using Covenant.Ui.Models;
 
 namespace Covenant.Ui.Services;
 
@@ -14,8 +15,11 @@ public sealed class PlaygroundRun(RequestSnapshot snapshot)
     public bool InFlight { get; internal set; } = true;
     public InferenceResult? Result { get; internal set; }
     public EvidenceStatus Evidence { get; internal set; } = EvidenceStatus.Idle;
-    /// <summary>Request id as soon as it is known (streaming: at the response headers).</summary>
+    /// <summary>Request id as soon as it is known: from GET /admin/playground/submissions/{client_request_id} while the
+    /// request is still running (review round 2, B7), or from the response as a backstop.</summary>
     public string? RequestId { get; internal set; }
+    /// <summary>Locates the request id of this run before the first response byte (polled every 250 ms).</summary>
+    public SubmissionPoll Submission { get; } = new(snapshot.ClientRequestId);
     /// <summary>Elapsed client wall time while in flight, final once done.</summary>
     public Stopwatch Clock { get; } = Stopwatch.StartNew();
 
@@ -56,6 +60,7 @@ public sealed class PlaygroundState : IDisposable
     public const int MaxHistory = 30;
 
     private readonly AppState _state;
+    private readonly AdminApi _admin;
     private readonly ConsoleInferenceApi _inference;
     private readonly EvidenceTracker _evidence;
     private readonly CatalogState _catalog;
@@ -65,10 +70,11 @@ public sealed class PlaygroundState : IDisposable
     private CancellationTokenSource? _runCts;
     private int _sequence;
 
-    public PlaygroundState(AppState state, ConsoleInferenceApi inference, EvidenceTracker evidence, CatalogState catalog,
+    public PlaygroundState(AppState state, AdminApi admin, ConsoleInferenceApi inference, EvidenceTracker evidence, CatalogState catalog,
         TraceClient traces, WorkspaceConfig workspace)
     {
         _state = state;
+        _admin = admin;
         _inference = inference;
         _evidence = evidence;
         _catalog = catalog;
@@ -163,15 +169,24 @@ public sealed class PlaygroundState : IDisposable
         Selected = run;
         var cts = new CancellationTokenSource();
         _runCts = cts;
+        run.TraceState = TraceFeedState.Locating;
         Notify();
 
+        // Start the POST, then — concurrently — locate its request id via the submission lookup so the live trace
+        // (provider "running" while it waits) is followed before the first response byte (review round 2, B7).
+        var bg = run.Background!.Token;
+        using var pollCts = CancellationTokenSource.CreateLinkedTokenSource(bg);
         InferenceResult result;
         try
         {
-            result = await _inference.SendAsync(snapshot,
+            var send = _inference.SendAsync(snapshot,
                 delta => { run.Append(delta); Notify(); },
-                id => { run.RequestId = id; StartTrace(run); Notify(); },
+                id => OnResponseRequestId(run, id),
                 cts.Token);
+            var poll = PollSubmissionAsync(run, send, pollCts.Token);
+            result = await send;
+            pollCts.Cancel();
+            await poll;
         }
         finally
         {
@@ -180,7 +195,10 @@ public sealed class PlaygroundState : IDisposable
         }
         run.Clock.Stop();
         run.Result = result;
+        if (run.Submission.OnSendCompleted(result.RequestId) == SubmissionPollAction.Subscribe)
+            run.RequestId ??= run.Submission.RequestId;
         run.RequestId ??= result.RequestId;
+        if (run.TraceState == TraceFeedState.Locating) run.TraceState = TraceFeedState.Idle;
         run.InFlight = false;
         Notify();
 
@@ -217,6 +235,52 @@ public sealed class PlaygroundState : IDisposable
         foreach (var r in _runs) StopBackground(r);
         _runs.Clear();
         Selected = null;
+        Notify();
+    }
+
+    /// <summary>Polls GET /admin/playground/submissions/{client_request_id} every 250 ms while the POST runs, until the
+    /// Host reports the request id (404 = not registered yet), then subscribes to the live trace. Never throws.</summary>
+    private async Task PollSubmissionAsync(PlaygroundRun run, Task<InferenceResult> send, CancellationToken ct)
+    {
+        var poll = run.Submission;
+        while (poll.ShouldPoll && !ct.IsCancellationRequested && !send.IsCompleted)
+        {
+            int? status;
+            PlaygroundSubmissionDto? body;
+            try
+            {
+                var answer = await _admin.GetPlaygroundSubmissionAsync(poll.ClientRequestId, ct);
+                status = answer.Status;
+                body = answer.Submission;
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception) { status = null; body = null; }   // transient: bounded retry
+            if (ct.IsCancellationRequested) return;
+
+            var action = poll.OnPollResult(status, body);
+            if (action == SubmissionPollAction.Subscribe)
+            {
+                OnRequestIdKnown(run, poll.RequestId);
+                return;
+            }
+            if (action == SubmissionPollAction.Stop) return;
+            try { await Task.Delay(SubmissionPoll.Interval, ct); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    /// <summary>Backstop: the response (headers or error body) carried the request id before polling found it.</summary>
+    private void OnResponseRequestId(PlaygroundRun run, string id)
+    {
+        if (run.RequestId is not null) return;
+        OnRequestIdKnown(run, id);
+    }
+
+    private void OnRequestIdKnown(PlaygroundRun run, string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id) || run.RequestId is not null) return;
+        run.RequestId = id;
+        StartTrace(run);
         Notify();
     }
 

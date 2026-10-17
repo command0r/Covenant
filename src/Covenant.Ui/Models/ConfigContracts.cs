@@ -6,9 +6,10 @@ namespace Covenant.Ui.Models;
 // src/Covenant.Core/Configuration.cs as console DTOs. Plain C#: linked into tests/Covenant.Tests, so no Blazor types.
 //
 // Naming: every type ends in "Dto" so nothing collides with Covenant.Core's ApplicationConfig/ConnectionConfig/…
-// when both namespaces are imported (the tests do). Enums travel as strings ("local-only", "Public", …) and are
-// kept as strings here: an older or newer Host with an unexpected value must still deserialize, and the console
-// renders unknown values verbatim rather than guessing. Like Contracts.cs, nothing is `required`.
+// when both namespaces are imported (the tests do). Enums travel as strings in EXACTLY the contract spellings
+// (docs/ui-api-contract.md "Wire spellings": "local-only", "length-heuristic", "warn-only", "Public", "Local", …);
+// the console compares against those spellings only — there is no alternative-spelling fallback. One shape per
+// endpoint; tests/Covenant.Tests/ContractRoundTripTests.cs pins every one against the Host serializer.
 
 // ---- Configuration (ADR-0011) ----
 
@@ -281,6 +282,10 @@ public sealed class TraceEventDto
     [JsonPropertyName("duration_ms")] public double? DurationMs { get; set; }
     [JsonPropertyName("reason_code")] public string? ReasonCode { get; set; }
     [JsonPropertyName("target")] public string? Target { get; set; }
+    /// <summary>Provider attempt events only: the request's own max_tokens (absent when the caller sent none).</summary>
+    [JsonPropertyName("requested_max_output_tokens")] public int? RequestedMaxOutputTokens { get; set; }
+    /// <summary>Provider attempt events only: the bound actually sent to the provider for this attempt.</summary>
+    [JsonPropertyName("effective_max_output_tokens")] public int? EffectiveMaxOutputTokens { get; set; }
 }
 
 public sealed class TraceSnapshotDto
@@ -288,7 +293,19 @@ public sealed class TraceSnapshotDto
     [JsonPropertyName("request_id")] public string? RequestId { get; set; }
     [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
     [JsonPropertyName("complete")] public bool Complete { get; set; }
+    /// <summary>More than the per-request bound of events was emitted; later ones were dropped by the Host.</summary>
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
     [JsonPropertyName("events")] public List<TraceEventDto> Events { get; set; } = [];
+}
+
+/// <summary>GET /admin/playground/submissions/{client_request_id} (review round 2, B7): the server request id of a
+/// console submission, known BEFORE the first response byte. 404 = not registered (yet), or expired.</summary>
+public sealed class PlaygroundSubmissionDto
+{
+    [JsonPropertyName("client_request_id")] public string ClientRequestId { get; set; } = "";
+    [JsonPropertyName("request_id")] public string RequestId { get; set; } = "";
+    /// <summary>running | completed</summary>
+    [JsonPropertyName("state")] public string State { get; set; } = "";
 }
 
 // ---- Budgets (ADR-0014) and the policy simulator — read-only shapes ----
@@ -348,35 +365,70 @@ public sealed class SimulateResponseDto
     [JsonPropertyName("explanation")] public string? Explanation { get; set; }
 }
 
-// ---- Budget drill-down and audit archive (ADR-0014, spec §5) — integration pending on the backend ----
+// ---- Budget drill-down and audit archive (ADR-0014, spec §5) ----
 
-/// <summary>One settled contribution to a budget (GET /admin/budgets/{id}/requests → <c>{budget_id, scope, period_id,
-/// items:[{request_id, attempt_id, kind, amount_usd, ts_utc, overrun}]}</c>). Parsed leniently by Logic/BudgetRequests
-/// (also a bare array and a few alternative field names) so a naming difference degrades to "Not reported".</summary>
-public sealed class BudgetRequestDto
+/// <summary>GET /admin/budgets/{id}/requests (Host BudgetRequestsView, CovenantJsonContext).</summary>
+public sealed class BudgetRequestsDto
 {
-    public string RequestId { get; set; } = "";
-    public string? AttemptId { get; set; }
-    public decimal? AmountUsd { get; set; }
-    public DateTimeOffset? TimestampUtc { get; set; }
-    public string? Scope { get; set; }
-    /// <summary>settle | settle-recovered | legacy-import.</summary>
-    public string? Kind { get; set; }
-    /// <summary>Reported charge exceeded the reservation (settled in full, never truncated).</summary>
-    public bool Overrun { get; set; }
+    [JsonPropertyName("budget_id")] public string BudgetId { get; set; } = "";
+    [JsonPropertyName("scope")] public string Scope { get; set; } = "";
+    [JsonPropertyName("period_id")] public string PeriodId { get; set; } = "";
+    [JsonPropertyName("items")] public List<BudgetContributionDto> Items { get; set; } = [];
 }
 
-/// <summary>GET /admin/audit/segments row: the current segment plus archived siblings (ids only, never paths).</summary>
+/// <summary>One settled contribution to a budget's scope (Host BudgetContributionView), newest first.</summary>
+public sealed class BudgetContributionDto
+{
+    [JsonPropertyName("request_id")] public string RequestId { get; set; } = "";
+    [JsonPropertyName("attempt_id")] public string AttemptId { get; set; } = "";
+    /// <summary>settle | settle-recovered | legacy-import.</summary>
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+    [JsonPropertyName("amount_usd")] public decimal AmountUsd { get; set; }
+    [JsonPropertyName("ts_utc")] public DateTimeOffset TsUtc { get; set; }
+    /// <summary>Reported charge exceeded the reservation (settled in full, never truncated).</summary>
+    [JsonPropertyName("overrun")] public bool Overrun { get; set; }
+}
+
+/// <summary>GET /admin/audit/segments row (Host SegmentView): the current segment plus archived siblings (ids only,
+/// never paths). <see cref="Current"/> is always present — the console never infers which segment is current.</summary>
 public sealed class AuditSegmentDto
 {
     [JsonPropertyName("id")] public string Id { get; set; } = "";
-    [JsonPropertyName("label")] public string? Label { get; set; }
-    [JsonPropertyName("entries")] public int? Entries { get; set; }
+    [JsonPropertyName("label")] public string Label { get; set; } = "";
+    [JsonPropertyName("current")] public bool Current { get; set; }
+    [JsonPropertyName("entries")] public int Entries { get; set; }
+    [JsonPropertyName("events")] public int Events { get; set; }
     [JsonPropertyName("first_utc")] public DateTimeOffset? FirstUtc { get; set; }
     [JsonPropertyName("last_utc")] public DateTimeOffset? LastUtc { get; set; }
-    [JsonPropertyName("chain_valid")] public bool? ChainValid { get; set; }
-    [JsonPropertyName("events")] public int? Events { get; set; }
+    [JsonPropertyName("chain_valid")] public bool ChainValid { get; set; }
     [JsonPropertyName("archived_utc")] public DateTimeOffset? ArchivedUtc { get; set; }
-    /// <summary>Optional explicit flag; when absent the console treats id "current" (else the first row) as current.</summary>
-    [JsonPropertyName("current")] public bool? Current { get; set; }
+}
+
+/// <summary>GET /admin/requests/{id}/export (Host RequestExport, AuditJsonContext): one request's evidence — never prompt
+/// or response content. The console downloads the server's bytes verbatim; this typed view is what it may show.</summary>
+public sealed class RequestExportDto
+{
+    [JsonPropertyName("exported_utc")] public DateTimeOffset ExportedUtc { get; set; }
+    [JsonPropertyName("request_id")] public string RequestId { get; set; } = "";
+    [JsonPropertyName("segment")] public AuditSegmentDto Segment { get; set; } = new();
+    [JsonPropertyName("config_version")] public int? ConfigVersion { get; set; }
+    [JsonPropertyName("record")] public AuditEntryView Record { get; set; } = new();
+    [JsonPropertyName("attempts")] public List<AuditAttemptView>? Attempts { get; set; }
+    [JsonPropertyName("trace")] public List<AuditTraceStepView>? Trace { get; set; }
+    [JsonPropertyName("integrity")] public ExportIntegrityDto Integrity { get; set; } = new();
+    [JsonPropertyName("content_included")] public bool ContentIncluded { get; set; }
+}
+
+public sealed class ExportIntegrityDto
+{
+    [JsonPropertyName("segment_id")] public string SegmentId { get; set; } = "";
+    [JsonPropertyName("chain_valid")] public bool ChainValid { get; set; }
+    [JsonPropertyName("chain_failure")] public string? ChainFailure { get; set; }
+    /// <summary>1-based line of the record in its segment.</summary>
+    [JsonPropertyName("line")] public int? Line { get; set; }
+    [JsonPropertyName("previous_hash")] public string? PreviousHash { get; set; }
+    [JsonPropertyName("entry_hash")] public string? EntryHash { get; set; }
+    [JsonPropertyName("anchor_configured")] public bool AnchorConfigured { get; set; }
+    /// <summary>verified | unverified</summary>
+    [JsonPropertyName("status")] public string Status { get; set; } = "";
 }
