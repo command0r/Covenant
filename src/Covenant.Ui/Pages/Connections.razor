@@ -45,6 +45,27 @@
         }
         else
         {
+            <details class="panel cloud-setup">
+                <summary>
+                    <span>Set up cloud models for Public requests</span>
+                    <span class="pill @(cfg.Mode == "hybrid" ? "served" : "paused")">@(cfg.Mode == "hybrid" ? "Hybrid enabled" : "Cloud calls are off")</span>
+                </summary>
+                @if (cfg.Mode != "hybrid")
+                {
+                    <p class="secondary">Your current mode keeps inference local. Adding a cloud connection alone does not activate it. Switch to <strong>Hybrid</strong> in Policies when you are ready to permit cloud calls.</p>
+                }
+                <ol class="setup-steps">
+                    <li><strong>Connect</strong><span>Add OpenAI, Anthropic or an approved compatible provider. Select its server credential, exact model and prices.</span><button class="btn sm" type="button" disabled="@(!CanEdit)" @onclick="AddCloud"><Icon Name="plus" Size="16" />Add cloud model</button></li>
+                    <li><strong>Route Public traffic</strong><span>In Policies, enable Hybrid and add the model to a Public-only policy. Keep sensitive routes local. Preview, then save.</span><a class="btn sm" href="policies">Open Policies</a></li>
+                    <li><strong>Run and verify</strong><span>Choose a granted Public workload profile in Playground. The result shows the actual model, cost and decision.</span><a class="btn sm" href="playground">Open Playground</a></li>
+                </ol>
+                <details class="tech">
+                    <summary>Where do I enter the provider API key?</summary>
+                    <p class="secondary">Set <code>OpenAI__ApiKey</code> or <code>Anthropic__ApiKey</code> in the Covenant server's environment and restart that instance. This console selects the credential by name; it never receives the key itself. An Open WebUI connection does not automatically configure Covenant.</p>
+                    <p class="secondary">With the isolated demo launcher, export the server variable before starting it. Existing saved policies remain unchanged after restart. Prices are entered per model in this page; Covenant does not guess current prices.</p>
+                    <p class="secondary">If the form says the destination is not approved, add <code>api.openai.com:443</code> or <code>api.anthropic.com:443</code> to <code>Providers__ProbeAllowList</code>, keeping your other approved hosts, then restart. Changing the provider's permission to leave the server is an explicit setup step.</p>
+                </details>
+            </details>
             if (State.CatalogError is { } ce)
             {
                 <ErrorBanner Title="Health unavailable" Message="@("Catalog: " + ce + " — connections are listed from the configuration; observed health is unknown.")" OnRetry="RefreshAsync" />

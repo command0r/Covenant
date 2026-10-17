@@ -30,7 +30,15 @@ public sealed record InferenceRequest(
     int? MaxOutputTokens = null,
     string? UnsupportedFeature = null,    // set by ingress when the wire carried something governance cannot see (images, tools) → denied in-pipeline, audited
     string? RequestId = null,             // server-generated correlation id (ADR-0009); never caller-supplied
-    string? RequestedProfile = null);     // workload profile asked for (X-Covenant-Profile / console); must be granted (ADR-0012)
+    string? RequestedProfile = null,      // workload profile asked for (X-Covenant-Profile / console); must be granted (ADR-0012)
+    WebSearchRequest? WebSearch = null);  // console only (ADR-0015); null ⇒ Off. /v1 never sets it
+
+/// <summary>Web sources mode requested by the console (ADR-0015).</summary>
+public enum WebSearchMode { Off, Auto, Required }
+
+/// <summary>What the console asked for: the mode and an optional explicit location (e.g. a city for weather). Request
+/// data only — whether a search may happen is decided by the search stage against the bound configuration.</summary>
+public sealed record WebSearchRequest(WebSearchMode Mode, string? Location = null);
 
 /// <summary>An application identity resolved by the Host itself (console inference, ADR-0012) — never
 /// taken from a client header or body. Deliberately NOT a member of <see cref="InferenceRequest"/> (the canonical

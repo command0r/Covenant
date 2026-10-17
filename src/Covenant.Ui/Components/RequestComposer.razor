@@ -18,7 +18,7 @@
                 <option value="" disabled>@(Ws.Applications is null ? (Ws.Loading ? "Loading applications…" : "Applications unavailable") : "Choose an application…")</option>
                 @foreach (var c in ComposerRules.Applications(Ws.Applications))
                 {
-                    <option value="@c.App.Id" disabled="@(!c.Selectable)">@c.Label</option>
+                    <option value="@c.App.Id" disabled="@(!c.Selectable)">@(c.Selectable ? c.App.Id : c.Label)</option>
                 }
             </select>
             @if (AppHelp is { } ah)
@@ -31,32 +31,20 @@
             @{ var app = ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId); var granted = ComposerRules.GrantedProfiles(app); }
             <select id="@(IdPrefix + "-profile")" class="input" value="@(Pg.Form.ProfileId ?? "")" @onchange="OnProfile"
                     disabled="@(Pg.Running || app is null || granted.Count == 0)"
-                    title="Trusted baseline set by the server; detection can only escalate it.">
+                    title="@(ComposerRules.ProfileLabel(Ws.Profiles, Pg.Form.ProfileId ?? "") + " — detection can only raise this classification.")">
                 @if (granted.Count == 0)
                 {
                     <option value="">@(app is null ? "Choose an application first" : "No profile granted — server default")</option>
                 }
                 @foreach (var p in granted)
                 {
-                    <option value="@p">@ComposerRules.ProfileLabel(Ws.Profiles, p)</option>
+                    <option value="@p">@(ComposerRules.Profile(Ws.Profiles, p)?.Name ?? p)</option>
                 }
             </select>
         </div>
     </div>
-    @if (!Compact)
-    {
-        @* Review round 3: identity/retention explanations live here (and in tooltips), not as repeated lines in the flow. *@
-        <details class="about">
-            <summary>About this</summary>
-            <ul class="plain-list secondary">
-                <li>Identity and team come from the selected application; its credential never reaches the browser. The admin token runs the request as that application.</li>
-                <li>Only profiles granted to the application are offered. Each profile's baseline is a trusted, server-side classification; detection can only escalate it. There is no client-side classification control.</li>
-                <li>Response text is console-only: kept in this tab's memory, never persisted. The audit record holds a prompt fingerprint, not the response.</li>
-                <li>Grants, defaults and baselines are edited under Policies → Applications &amp; workload profiles.</li>
-            </ul>
-        </details>
-    }
-
+    <details class="demo-presets">
+        <summary>Demo presets</summary>
     <div class="preset-row" role="group" aria-label="Scenario presets — fill the composer; only Run sends">
         <span class="preset-label">Presets</span>
         @foreach (var p in ScenarioPresets.All)
@@ -68,6 +56,7 @@
             </button>
         }
     </div>
+    </details>
     @if (CurrentPreset is { } cur)
     {
         <span class="note"><strong>Expected:</strong> @cur.Expectation</span>
@@ -79,7 +68,7 @@
 
     <div class="field">
         <label for="@(IdPrefix + "-prompt")">Prompt</label>
-        <textarea id="@(IdPrefix + "-prompt")" class="input textarea @(Compact ? "short" : "")" rows="@(Compact ? 3 : 6)"
+        <textarea id="@(IdPrefix + "-prompt")" class="input textarea @(Compact ? "short" : "")" rows="3"
                   @bind="Pg.Form.Prompt" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged"
                   disabled="@Pg.Running"></textarea>
         @if (Pg.Form.FreshNonce)
@@ -88,11 +77,48 @@
         }
     </div>
 
+    @* Search options stay visible in both composers; never silently reuse a hidden egress setting. *@
+        @* ADR-0015: governed web sources. The Host decides (cue, permissions, budget) and reports what actually happened. *@
+        <div class="composer-grid">
+            <div class="field">
+                <span id="@(IdPrefix + "-ws-l")" class="field-label">Web sources</span>
+                <div class="seg" role="radiogroup" aria-labelledby="@(IdPrefix + "-ws-l")" aria-describedby="@(IdPrefix + "-ws-help")">
+                    @foreach (var m in new[] { WebSourcesMode.Off, WebSourcesMode.Auto, WebSourcesMode.Required })
+                    {
+                        var mode = m;
+                        <button type="button" role="radio" aria-checked="@(Pg.Form.WebSources == mode ? "true" : "false")" disabled="@Pg.Running"
+                                @onclick="() => SetWebSources(mode)">@WebSourcesText.Label(mode)</button>
+                    }
+                </div>
+                <span id="@(IdPrefix + "-ws-help")" class="help">@WebSourcesText.Help(Pg.Form.WebSources)</span>
+            </div>
+            @if (Pg.Form.WebSources != WebSourcesMode.Off)
+            {
+                <div class="field">
+                    <label for="@(IdPrefix + "-loc")">Location (optional)</label>
+                    <input id="@(IdPrefix + "-loc")" class="input" type="text" maxlength="@WebSourcesText.MaxLocationChars" placeholder="e.g. Toronto"
+                           @bind="Pg.Form.Location" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running"
+                           aria-describedby="@(IdPrefix + "-loc-help")" autocomplete="off" />
+                    <span id="@(IdPrefix + "-loc-help")" class="help">@WebSourcesText.LocationHelp</span>
+                </div>
+            }
+        </div>
+
     @if (!Compact)
     {
         <details class="advanced">
             <summary>Advanced</summary>
             <div class="advanced-body">
+        <details class="about">
+            <summary>About this</summary>
+            <ul class="plain-list secondary">
+                <li>Identity and team come from the selected application; its credential never reaches the browser. The admin token runs the request as that application.</li>
+                <li>Only profiles granted to the application are offered. Each profile's baseline is a trusted, server-side classification; detection can only escalate it. There is no client-side classification control.</li>
+                <li>Response text is console-only: kept in this tab's memory, never persisted. The audit record holds a prompt fingerprint, not the response.</li>
+                <li>Grants, defaults and baselines are edited under Policies → Applications &amp; workload profiles.</li>
+            </ul>
+        </details>
+
                 <div class="field">
                     <span id="@(IdPrefix + "-route-l")" class="field-label">Model</span>
                     <div class="seg" role="radiogroup" aria-labelledby="@(IdPrefix + "-route-l")">
@@ -233,6 +259,12 @@
         Pg.Form.Mode = mode;
         if (mode == RouteMode.Catalog && (string.IsNullOrWhiteSpace(Pg.Form.CatalogModel) || Overrides.All(o => o.Value != Pg.Form.CatalogModel)) && Overrides.Count > 0)
             Pg.Form.CatalogModel = Overrides[0].Value;
+        Pg.NotifyFormChanged();
+    }
+
+    private void SetWebSources(WebSourcesMode mode)
+    {
+        Pg.Form.WebSources = mode;
         Pg.NotifyFormChanged();
     }
 

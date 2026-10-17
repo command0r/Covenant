@@ -21,7 +21,8 @@ public sealed record ScenarioPreset(
         => form.Scenario == Letter
            && string.Equals(form.Prompt, Prompt, StringComparison.Ordinal)
            && form.Mode == RouteMode.Policy
-           && form.FreshNonce == FreshNonce;
+           && form.FreshNonce == FreshNonce
+           && form.WebSources == WebSourcesMode.Off;
 }
 
 /// <summary>What applying a preset did. <see cref="Note"/> explains anything the operator still has to choose.</summary>
@@ -86,6 +87,8 @@ public static class ScenarioPresets
         form.Prompt = preset.Prompt;
         form.Mode = RouteMode.Policy;
         form.FreshNonce = preset.FreshNonce;
+        form.WebSources = WebSourcesMode.Off;
+        form.Location = "";
 
         if (apps is null) return new PresetApplyResult(null);
 

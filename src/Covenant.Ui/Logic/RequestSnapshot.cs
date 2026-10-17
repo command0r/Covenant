@@ -32,6 +32,13 @@ public sealed class PlaygroundForm
     public string UseCase { get; set; } = DefaultUseCase;
     /// <summary>Scenario D: append a fresh nonce on every run so the request can never be a cache hit.</summary>
     public bool FreshNonce { get; set; }
+    /// <summary>ADR-0015 web sources: Off (default) / Auto / Required. The Host decides and enforces.</summary>
+    public WebSourcesMode WebSources { get; set; } = WebSourcesMode.Off;
+    /// <summary>Explicit place for weather-type questions. Never inferred; sent only when web sources are on.</summary>
+    public string Location { get; set; } = "";
+
+    /// <summary>The location the request will carry (null when web sources are off or the field is blank).</summary>
+    public string? RequestedLocation => WebSources == WebSourcesMode.Off ? null : Blank(Location);
 
     /// <summary>The model the request will ask for, or null to let policy choose.</summary>
     public string? RequestedModel => Mode switch
@@ -51,6 +58,7 @@ public sealed class PlaygroundForm
             if (Mode == RouteMode.Catalog && Blank(CatalogModel) is null) return "Choose an eligible model, or let policy choose.";
             if (Mode == RouteMode.Explicit && Blank(ExplicitModel) is null) return "Enter a model id, or let policy choose.";
             if (MaxTokens is <= 0) return "Max output tokens must be a positive number (or empty for the application's bound).";
+            if (WebSources != WebSourcesMode.Off && WebSourcesText.LocationProblem(Blank(Location)) is { } lp) return lp;
             return null;
         }
     }
@@ -70,6 +78,8 @@ public sealed class PlaygroundForm
         Workflow = DefaultWorkflow;
         UseCase = DefaultUseCase;
         FreshNonce = false;
+        WebSources = WebSourcesMode.Off;
+        Location = "";
     }
 
     internal static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
@@ -95,7 +105,9 @@ public sealed record RequestSnapshot(
     string? UseCase,
     bool FreshNonce,
     string ClientRequestId,
-    DateTimeOffset SubmittedUtc)
+    DateTimeOffset SubmittedUtc,
+    WebSourcesMode WebSources = WebSourcesMode.Off,
+    string? Location = null)
 {
     public const string PolicyChooses = "Let policy choose";
 
@@ -131,7 +143,9 @@ public sealed record RequestSnapshot(
             UseCase: PlaygroundForm.Blank(form.UseCase),
             FreshNonce: form.FreshNonce,
             ClientRequestId: clientRequestId ?? NewClientRequestId(),
-            SubmittedUtc: nowUtc);
+            SubmittedUtc: nowUtc,
+            WebSources: form.WebSources,
+            Location: form.RequestedLocation);
     }
 
     /// <summary>True while the form still describes this request; false → "Previous request — the form has
@@ -145,7 +159,9 @@ public sealed record RequestSnapshot(
            && MaxTokens == form.MaxTokens
            && string.Equals(Workflow, PlaygroundForm.Blank(form.Workflow), StringComparison.Ordinal)
            && string.Equals(UseCase, PlaygroundForm.Blank(form.UseCase), StringComparison.Ordinal)
-           && FreshNonce == form.FreshNonce;
+           && FreshNonce == form.FreshNonce
+           && WebSources == form.WebSources
+           && string.Equals(Location, form.RequestedLocation, StringComparison.Ordinal);
 }
 
 /// <summary>An application as the "Run as" select shows it: disabled ones stay visible with the reason.</summary>

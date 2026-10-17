@@ -59,6 +59,20 @@
       try { window.localStorage.setItem("covenant.pref." + name, String(value)); return true; } catch (e) { return false; }
     },
 
+    // Desktop scrolls #main, mobile scrolls the document. A new route must not inherit
+    // the previous page's scroll offset and hide its heading or primary actions.
+    resetPageScroll: function (fragment) {
+      var main = document.getElementById("main");
+      if (main) main.scrollTo({ top: 0, left: 0, behavior: "instant" });
+      window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+      if (fragment && fragment.length > 1) {
+        var id;
+        try { id = decodeURIComponent(fragment.slice(1)); } catch (e) { return; }
+        var target = document.getElementById(id);
+        if (target) target.scrollIntoView({ block: "start", behavior: "instant" });
+      }
+    },
+
     focusElement: function (id) {
       var el = document.getElementById(id);
       if (el && typeof el.focus === "function") { el.focus(); return true; }

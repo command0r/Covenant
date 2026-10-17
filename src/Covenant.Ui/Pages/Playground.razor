@@ -63,6 +63,7 @@
                         {
                             <span class="changed-flag">Previous result — the prompt has changed since. Run to update.</span>
                         }
+                        <WebSourcesPanel Run="prun" />
                         <RunSummary Run="prun" Large="true" />
                     }
                     else
@@ -139,6 +140,7 @@ else
                         <div class="response md @(run.Text.Length == 0 ? "empty" : "")" tabindex="0" aria-label="Response text" aria-busy="@(run.InFlight ? "true" : "false")">
                             @ResponseBody(run)
                         </div>
+                        <WebSourcesPanel Run="run" />
                         <RunSummary Run="run" OnDetails="OpenDetails" DetailsButtonId="pg-details-open" />
                         <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" />
                     }

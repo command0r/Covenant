@@ -45,6 +45,19 @@ public static class TraceReasons
     /// been emitted; never continued by another provider).</summary>
     public const string IncompleteStream = "incomplete_stream";
 
+    // Governed web search (ADR-0015) — search stage reason codes.
+    public const string SearchOff = "search_off";
+    public const string SearchNotTriggered = "search_not_triggered";
+    public const string LocationRequired = "location_required";
+    public const string SearchNotPermitted = "search_not_permitted";
+    public const string SearchSensitive = "search_sensitive";
+    public const string SearchFailed = "search_failed";
+    public const string SearchTimeout = "search_timeout";
+    public const string SearchRateLimited = "search_rate_limited";
+    public const string SearchEmpty = "search_empty";
+    /// <summary>Cache stage: a triggered web-search request never reads or writes the exact cache.</summary>
+    public const string WebSearchBypass = "web_search_bypass";
+
     /// <summary>Default code of a denial when the denying stage did not name a finer one.</summary>
     public static string ForDenial(DenialKind kind) => kind switch
     {
@@ -103,6 +116,20 @@ public sealed class AttemptRecord
 public static class CostBases
 {
     public const string Mixed = "mixed";
+
+    /// <summary>Over provider attempts AND tool calls (ADR-0015): the request total mixes both charges.</summary>
+    public static string? Aggregate(IReadOnlyList<AttemptRecord> attempts, IReadOnlyList<ToolCallRecord> toolCalls, string? current)
+    {
+        string? single = null;
+        bool any = false;
+        foreach (var (cost, basis) in attempts.Select(a => (a.CostUsd, a.CostBasis)).Concat(toolCalls.Select(t => (t.CostUsd, t.CostBasis))))
+        {
+            if (cost is not > 0m || basis is null) continue;
+            if (!any) { single = basis; any = true; }
+            else if (!string.Equals(single, basis, StringComparison.Ordinal)) return Mixed;
+        }
+        return any ? single : current;
+    }
 
     public static string? Aggregate(IReadOnlyList<AttemptRecord> attempts, string? current)
     {

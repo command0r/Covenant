@@ -37,6 +37,10 @@ public sealed class ValidationEnvironment
     /// <summary>Endpoint authorities ("host:port") the operator declared in-perimeter at startup
     /// (Providers:LocalEndpoints ∪ the legacy Local:Endpoint). Only these may carry Boundary.Local.</summary>
     public IReadOnlySet<string> LocalEndpoints { get; init; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>ADR-0015: is the server-side secret <c>Tavily:ApiKey</c> configured (never its value). It is not a
+    /// connection secret reference and cannot be selected by a connection.</summary>
+    public bool SearchKeyAvailable { get; init; }
 }
 
 /// <summary>Pure configuration validator (ADR-0011/0013/0014). Codes are part of the API contract
@@ -385,6 +389,33 @@ public static class ConfigValidator
                 Warn("policies", "no_route_for_classification", $"no enabled policy covers {cls}: such requests are refused");
         }
 
+        // ---- web search (ADR-0015) ----
+        foreach (var (pr, i) in c.Profiles.Select((pr, i) => (pr, i)))
+            if (pr.WebSearchAllowed && pr.Baseline != DataClassification.Public)
+                Err($"profiles[{i}].web_search_allowed", "search_profile_not_public",
+                    $"profile '{pr.Id}' has baseline {pr.Baseline}: only a Public-baseline profile may use web search");
+        if (c.WebSearch is { } ws)
+        {
+            if (ws.MaxResults is < 1 or > 3) Err("web_search.max_results", "invalid_setting", "must be 1–3");
+            if (ws.TimeoutSeconds is < 1 or > 30) Err("web_search.timeout_seconds", "invalid_setting", "must be 1–30 seconds");
+            if (ws.PricePerCreditUsd is < 0m) Err("web_search.price_per_credit_usd", "invalid_setting", "must be ≥ 0");
+            if (ws.PriceBasis is { Length: > 200 }) Err("web_search.price_basis", "invalid_setting", "at most 200 characters");
+            if (ws.Enabled)
+            {
+                if (c.Mode != ProviderMode.Hybrid)
+                    Err("web_search.enabled", "search_requires_hybrid", "web search needs Hybrid mode — Local-only makes no external calls");
+                if (ws.PricePerCreditUsd is null)
+                    Err("web_search.price_per_credit_usd", "search_unpriced", "set the price per Tavily credit — an unknown price is not $0");
+                if (!env.SearchKeyAvailable)
+                    Err("web_search.enabled", "secret_unavailable", "Tavily:ApiKey is not configured on the server (set it in the server's secret store and restart)");
+                if (!env.EgressAllowList.Contains(WebSearchEgress.Authority))
+                    Err("web_search.enabled", "search_egress_not_approved",
+                        $"{WebSearchEgress.Authority} is not on the startup egress allow-list (Providers:ProbeAllowList); enabling search never widens egress");
+                if (!c.Profiles.Any(p => p.WebSearchAllowed))
+                    Warn("web_search.enabled", "search_no_profile", "no workload profile is permitted to search yet");
+            }
+        }
+
         // ---- settings ----
         var s = c.Settings;
         if (s.CacheTtlSeconds < 0) Err("settings.cache_ttl_seconds", "invalid_setting", "must be ≥ 0");
@@ -485,4 +516,12 @@ public static class ImpactAnalyzer
 
         return new ConfigImpact(rows, apps, unavailable.ToList(), gaps.ToList(), newlyRefused);
     }
+}
+
+/// <summary>The one approved web-search destination (ADR-0015). Fixed: not configurable from the console.</summary>
+public static class WebSearchEgress
+{
+    public const string Endpoint = "https://api.tavily.com/search";
+    public const string Authority = "api.tavily.com:443";
+    public const string SecretKey = "Tavily:ApiKey";
 }

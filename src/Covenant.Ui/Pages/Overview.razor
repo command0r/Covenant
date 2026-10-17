@@ -70,7 +70,19 @@
                     {
                         <div class="ov-result">
                             <span class="secondary subtle">@run.Snapshot.Title</span>
-                            <RunSummary Run="run" />
+                            @if (run.Text.Length > 0)
+                            {
+                                <div class="ov-response" aria-label="Response text">@run.Text</div>
+                            }
+                            else if (run.InFlight)
+                            {
+                                <span role="status">Waiting for the response…</span>
+                            }
+                            <WebSourcesPanel Run="run" />
+                            <details class="tech" open="@(run.Text.Length == 0 && !run.InFlight)">
+                                <summary>Request outcome and cost</summary>
+                                <RunSummary Run="run" />
+                            </details>
                             <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" Compact="true" />
                             <a class="secondary" href="playground">See the response and details in Playground</a>
                         </div>

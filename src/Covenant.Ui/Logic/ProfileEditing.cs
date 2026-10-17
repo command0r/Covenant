@@ -121,9 +121,24 @@ public static class ProfileEditing
     public static string? SetBaseline(WorkloadProfileDto profile, string? baseline)
     {
         if (!IsBaseline(baseline)) return "Choose a baseline: Public, Internal, PII or PHI.";
+        if (profile.WebSearchAllowed && !string.Equals(baseline, "Public", StringComparison.Ordinal))
+            return "Turn off web search for this profile first — only a Public-baseline profile may search (ADR-0015).";
         profile.Baseline = baseline;
         return null;
     }
+
+    /// <summary>ADR-0015: web search permission. Only a Public-baseline profile may carry it (the Host validates too);
+    /// turning it off is always allowed.</summary>
+    public static string? SetWebSearch(WorkloadProfileDto profile, bool allowed)
+    {
+        if (allowed && !string.Equals(profile.Baseline, "Public", StringComparison.Ordinal))
+            return "Only a Public-baseline profile may use web search — Internal, PII and PHI requests are never searched.";
+        profile.WebSearchAllowed = allowed;
+        return null;
+    }
+
+    public const string WebSearchExplained =
+        "Web search sends a bounded query to Tavily for Public requests only, and only when web search is enabled in Settings. The search is charged to your budgets.";
 
     /// <summary>Why the profile cannot be removed from the draft (empty = removable). Removal is refused while it is an
     /// application's default (choose another default first), and while a policy is scoped to it ALONE — dropping the

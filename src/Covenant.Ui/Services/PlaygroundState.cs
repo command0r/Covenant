@@ -29,6 +29,14 @@ public sealed class PlaygroundRun(RequestSnapshot snapshot)
     internal bool TraceStarted { get; set; }
     internal CancellationTokenSource? Background { get; set; }
 
+    /// <summary>ADR-0015: what the Host ACTUALLY retrieved for this run (GET /admin/requests/{id}/search) — shown
+    /// separately from any citations the model wrote. Null until looked up, or when web sources were off.</summary>
+    public RequestSearchDto? Search { get; internal set; }
+    /// <summary>HTTP status of the search lookup (null = not looked up yet).</summary>
+    public int? SearchLookupStatus { get; internal set; }
+
+    public string WebSourcesStatus => WebSourcesText.Status(Snapshot.WebSources, Search, SearchLookupStatus);
+
     public string Text => Result is { Text.Length: > 0 } r && !InFlight ? r.Text : _text.ToString();
 
     internal void Append(string delta) => _text.Append(delta);
@@ -215,7 +223,13 @@ public sealed class PlaygroundState : IDisposable
         if (run.RequestId is { Length: > 0 } && result.HttpStatus is not null && !IsPreGovernance(result))
         {
             StartTrace(run);
+            if (run.Snapshot.WebSources != WebSourcesMode.Off) await LoadSearchAsync(run);
             await TrackEvidenceAsync(run);
+        }
+        else if (run.Snapshot.WebSources != WebSourcesMode.Off)
+        {
+            run.SearchLookupStatus = 404;   // refused before governance: no search stage ran
+            Notify();
         }
 
         // The backend records success/failure from real calls: re-read shared health after any provider attempt.
@@ -320,6 +334,21 @@ public sealed class PlaygroundState : IDisposable
             Notify();
         }
         catch (OperationCanceledException) { /* run forgotten */ }
+    }
+
+    /// <summary>One lookup of the retrieved sources (the Host attaches them before the response completes). Never throws.</summary>
+    private async Task LoadSearchAsync(PlaygroundRun run)
+    {
+        if (run.RequestId is not { Length: > 0 } id || run.Background is not { } bg) return;
+        try
+        {
+            var (status, search) = await _admin.GetRequestSearchAsync(id, bg.Token);
+            run.SearchLookupStatus = status;
+            run.Search = search;
+        }
+        catch (OperationCanceledException) { return; }
+        catch (Exception) { run.SearchLookupStatus = 0; }
+        Notify();
     }
 
     private async Task TrackEvidenceAsync(PlaygroundRun run)

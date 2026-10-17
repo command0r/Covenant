@@ -94,6 +94,7 @@
     protected override async Task OnInitializedAsync()
     {
         State.Changed += OnChanged;
+        Interop.ThemeChanged += OnThemeChanged;
         // Re-render once a second ONLY while stale, so "Stale · n s" counts; nothing ticks while live.
         _timer = new System.Threading.Timer(_ => { if (State.Connected && State.IsStale) OnChanged(); }, null, 1000, 1000);
         try { _theme = await Interop.GetThemeAsync(); } catch (JSException) { _theme = "dark"; }
@@ -148,11 +149,14 @@
         try { _theme = await Interop.SetThemeAsync(next); } catch (JSException) { /* keep current */ }
     }
 
+    private void OnThemeChanged(string theme) { _theme = theme; _ = InvokeAsync(StateHasChanged); }
+
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
 
     public void Dispose()
     {
         State.Changed -= OnChanged;
+        Interop.ThemeChanged -= OnThemeChanged;
         _timer?.Dispose();
     }
 }

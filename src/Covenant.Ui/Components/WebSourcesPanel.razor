@@ -1,0 +1,45 @@
+@* ADR-0015: what the Host ACTUALLY retrieved for this run (GET /admin/requests/{id}/search), shown separately from the
+   model's answer. The answer's [n] citations are the model's claims; this list is the evidence. Links are rendered only
+   when they pass WebSourcesText.SafeHref (absolute http/https, no credentials); anything else is plain text. Snippets are
+   never shown here — they are untrusted data given to the model, not content for the operator. *@
+
+@if (Run.Snapshot.WebSources != WebSourcesMode.Off)
+{
+    <div class="web-sources" role="region" aria-label="Web sources retrieved by Covenant">
+        <span class="note @(Tone)">@Run.WebSourcesStatus</span>
+        @if (Run.Search is { Outcome: "passed", Sources.Count: > 0 } s)
+        {
+            <ol class="plain-list secondary">
+                @foreach (var src in s.Sources)
+                {
+                    var href = WebSourcesText.SafeHref(src.Url);
+                    <li>
+                        @if (href is not null)
+                        {
+                            <a href="@href" target="_blank" rel="noopener noreferrer nofollow" referrerpolicy="no-referrer">@(string.IsNullOrWhiteSpace(src.Title) ? href : src.Title)</a>
+                            <span class="subtle mono"> · @WebSourcesText.Host(href)</span>
+                        }
+                        else
+                        {
+                            <span>@(src.Title ?? "Untitled source")</span>
+                            <span class="subtle"> · link not shown (unsafe URL)</span>
+                        }
+                    </li>
+                }
+            </ol>
+            <span class="help">These are the sources Covenant retrieved and gave the model as untrusted data. Citations like [1] in the answer are the model's own and are not verified. Live information such as weather may be inaccurate.</span>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public PlaygroundRun Run { get; set; } = default!;
+
+    private string Tone => Run.Search?.Outcome switch
+    {
+        "passed" => "",
+        "skipped" => "",
+        null => "",
+        _ => "warn",
+    };
+}

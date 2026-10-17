@@ -39,6 +39,27 @@ public sealed record CovenantConfig
     public required OperationalSettings Settings { get; init; }
     /// <summary>Optional counterfactual for "Estimated provider charge avoided"; hidden when null.</summary>
     public ModelRef? SavingsBaseline { get; init; }
+
+    /// <summary>Governed web search (ADR-0015). Null (every pre-0015 version) = disabled.</summary>
+    public WebSearchSettings? WebSearch { get; init; }
+}
+
+/// <summary>Global web-search settings (ADR-0015), versioned with the rest of the configuration. The endpoint is a fixed
+/// constant (api.tavily.com) and must be on the startup egress allow-list; the key is the server-side secret
+/// <c>Tavily:ApiKey</c>, never stored here. Only Hybrid mode and Public-baseline profiles with
+/// <see cref="WorkloadProfileConfig.WebSearchAllowed"/> may search.</summary>
+public sealed record WebSearchSettings
+{
+    public bool Enabled { get; init; }
+    /// <summary>1–3 results per search.</summary>
+    public int MaxResults { get; init; } = 3;
+    /// <summary>Per-call deadline, 1–30 s. No retries.</summary>
+    public int TimeoutSeconds { get; init; } = 10;
+    /// <summary>USD per Tavily credit (a basic search = 1 credit). Null = unknown ⇒ search is not allowed (never $0).</summary>
+    public decimal? PricePerCreditUsd { get; init; }
+    /// <summary>Source of the price (e.g. "Tavily pay-as-you-go list price").</summary>
+    public string? PriceBasis { get; init; }
+    public DateOnly? PriceEffectiveDate { get; init; }
 }
 
 /// <summary>Model identity is connection-scoped: bare model names are not globally unique.</summary>
@@ -105,6 +126,9 @@ public sealed record WorkloadProfileConfig
     /// <summary>Trusted baseline: detection may escalate above it, never below.</summary>
     public required DataClassification Baseline { get; init; }
     public string? Description { get; init; }
+    /// <summary>May requests under this profile use governed web search (ADR-0015)? Default false. Only a Public-baseline
+    /// profile may carry it (validation error otherwise).</summary>
+    public bool WebSearchAllowed { get; init; }
 }
 
 public sealed record PolicyConfigV2
