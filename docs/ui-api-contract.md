@@ -359,3 +359,19 @@ model-invoked tool. `/v1` is unchanged (always `web_search` off).
   reservation), `estimated_unreported` (succeeded without usage: the reservation), `no_call` (never sent: $0, released).
   `Usage.CostUsd`/`SettledUsd` include tool charges; the request-level `CostBasis` aggregates attempts and tool calls
   (`mixed` when they differ).
+
+# Console demo clarity (2026-10-17, additive)
+
+- `config.applications[].display_name` (≤ 100) and `description` (≤ 300): optional, display only, null by default. They
+  are never used for authorization or routing. `GET /admin/applications` rows add `display_name`, `description` and
+  `budgets` (the ids of the budgets that apply: global, `team:<team>`, `application:<id>`).
+- Audit record (nullable, absent on older records ⇒ Not recorded):
+  - `PolicyId`: the policy that decided the route; null when no policy matched or the request stopped earlier.
+  - `CacheOutcome`: one of `hit`, `miss`, `bypass_web_search`, `disabled`, `not_reached`.
+- Trace `cache` stage:
+  - `passed` with `reason_code` `cache_miss` (looked up, no entry) or `cache_hit`;
+  - `skipped` with `cache_disabled` (TTL 0, no lookup) or `web_search_bypass`.
+  - A disabled cache no longer reports `passed`.
+- Console wording only (wire names unchanged): stage `auth` is shown as "Identify caller" (assigns application, team
+  and workload before anything runs); stage `attribution` is shown as "Finalize cost" (prices usage after the provider
+  answered; a refused request shows "No usage" and is still attributed).

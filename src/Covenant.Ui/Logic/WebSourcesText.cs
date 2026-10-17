@@ -69,7 +69,7 @@ public static class WebSourcesText
         "search_off" => "Web sources were off.",
         "search_not_triggered" => "Auto: the prompt did not ask for current information, so no search was made.",
         "location_required" => "A weather question needs a location. Add one in the Location field (or name the place in the prompt) and run again. Nothing was sent externally.",
-        "search_not_permitted" => "Web search is not permitted for this request (disabled, not Hybrid, profile not allowed, no price or key). Nothing was sent externally.",
+        "search_not_permitted" => "Web search is not set up for this request; the server's reason is below. Nothing was sent externally.",
         "search_sensitive" => "Refused: only Public requests may be searched, and the query or location must not contain sensitive data. Nothing was sent externally.",
         "search_failed" => "The search failed. No answer was given without sources.",
         "search_timeout" => "The search timed out. No answer was given without sources.",
@@ -102,6 +102,84 @@ public static class WebSourcesText
         };
     }
 
+    /// <summary>Which kind of problem a search reason code is — so the console never presents a setup gap as a provider
+    /// failure, or a missing city as a policy refusal.</summary>
+    public static SearchProblemKind Kind(string? code) => code switch
+    {
+        "location_required" => SearchProblemKind.MissingLocation,
+        "search_not_permitted" => SearchProblemKind.Setup,
+        "search_sensitive" or "budget_exceeded" => SearchProblemKind.PolicyRefusal,
+        "search_failed" or "search_timeout" or "search_rate_limited" or "search_empty" => SearchProblemKind.ProviderFailure,
+        _ => SearchProblemKind.None,
+    };
+
+    public static string KindLabel(SearchProblemKind kind) => kind switch
+    {
+        SearchProblemKind.Setup => "Setup",
+        SearchProblemKind.MissingLocation => "Needs a location",
+        SearchProblemKind.PolicyRefusal => "Refused by policy",
+        SearchProblemKind.ProviderFailure => "Search provider failed",
+        _ => "",
+    };
+
+    /// <summary>Can the CURRENT composer selection search, according to the applied configuration and the Host's
+    /// readiness report? Returns ONE cause — the most fundamental one — with one fix. Never changes the form: a profile
+    /// switch is only offered (<see cref="SearchReadiness.SwitchToProfile"/>), never applied. The Host's runtime check stays
+    /// authoritative and fail-closed; this only avoids offering a control that is guaranteed to be refused.</summary>
+    public static SearchReadiness Readiness(WebSearchStatusDto? status, string? statusError, CovenantConfigDto? config,
+        ApplicationSummaryDto? app, string? profileId)
+    {
+        if (status is null)
+            return SearchReadiness.Unknown(statusError ?? "Web search status has not been loaded yet.");
+        if (!status.KeyConfigured)
+            return SearchReadiness.Blocked("The server has no Tavily API key.",
+                "Set Tavily__ApiKey (or Tavily:ApiKey in the server's secret store) and restart Covenant. The key is never entered in the console.",
+                "settings#ws-h", "Web search settings");
+        if (!status.EgressApproved)
+            return SearchReadiness.Blocked("api.tavily.com:443 is not on the startup egress allow-list.",
+                "Add api.tavily.com:443 to Providers:ProbeAllowList and restart Covenant. The console cannot widen egress.",
+                "settings#ws-h", "Web search settings");
+        if (!status.ModeAllowsSearch)
+            return SearchReadiness.Blocked("The configuration is Local-only, which makes no external calls.",
+                "Switch the mode to Hybrid on the Policies page to allow approved external calls.", "policies", "Policies → mode");
+        if (!status.Enabled)
+            return SearchReadiness.Blocked("Web search is disabled in the active configuration.",
+                "Enable it under Settings → Web search, then Save & apply.", "settings#ws-h", "Enable web search");
+        if (!status.PriceConfigured)
+            return SearchReadiness.Blocked("No price per Tavily credit is configured (an unknown price is never $0).",
+                "Enter the price from your Tavily plan under Settings → Web search.", "settings#ws-h", "Set the price");
+        var profile = config is null || profileId is null ? null : config.Profiles.FirstOrDefault(p => p.Id == profileId);
+        bool allowed = profileId is not null && (profile?.WebSearchAllowed ?? status.ProfilesAllowed.Contains(profileId, StringComparer.Ordinal));
+        if (!allowed)
+        {
+            var alternative = app is null ? null
+                : ComposerRules.GrantedProfiles(app).FirstOrDefault(g => status.ProfilesAllowed.Contains(g, StringComparer.Ordinal));
+            var name = profile?.Name ?? profileId ?? "the selected profile";
+            return alternative is not null
+                ? SearchReadiness.Blocked("Workload profile '" + name + "' is not allowed to use web search.",
+                    "Switch to an allowed Public profile, or allow this one under Policies → Applications & workload profiles.",
+                    "policies#applications", "Profile permissions", alternative)
+                : SearchReadiness.Blocked("No workload profile granted to this application may use web search.",
+                    "Allow web search on a Public-baseline profile and grant it to this application.",
+                    "policies#applications", "Profile permissions");
+        }
+        if (profile is not null && !string.Equals(profile.Baseline, "Public", StringComparison.Ordinal))
+            return SearchReadiness.Blocked("Only Public requests may be searched; this profile's baseline is " + profile.Baseline + ".",
+                "Use a Public-baseline profile for research with web sources.", "policies#applications", "Profile permissions");
+        return SearchReadiness.Ok;
+    }
+
+    /// <summary>The readiness to SHOW for the configuration shown. A failed fetch shows no readiness (never an old Ready);
+    /// readiness computed for a different configuration version than the one shown is discarded (Mismatch ⇒ refetch).</summary>
+    public static (WebSearchStatusDto? Status, string? Error, bool Mismatch) Reconcile(int? shownConfigVersion, WebSearchStatusDto? fetched, string? fetchError)
+    {
+        if (fetched is null) return (null, fetchError ?? "Web search status is not available.", false);
+        if (shownConfigVersion is { } cv && fetched.ConfigVersion is { } rv && rv != cv)
+            return (null, "Web search readiness was reported for configuration v" + rv.ToString(CultureInfo.InvariantCulture)
+                          + " while v" + cv.ToString(CultureInfo.InvariantCulture) + " is shown — refreshing.", true);
+        return (fetched, fetchError, false);
+    }
+
     public static string Count(int n) => n.ToString(CultureInfo.InvariantCulture) + (n == 1 ? " source" : " sources");
 
     /// <summary>Readiness checklist of GET /admin/web-search, in the order an operator fixes it.</summary>
@@ -114,4 +192,17 @@ public static class WebSourcesText
         ("Web search enabled in configuration", s.Enabled),
         ("At least one Public profile allowed to search", s.ProfilesAllowed.Count > 0),
     ];
+}
+
+public enum SearchProblemKind { None, Setup, MissingLocation, PolicyRefusal, ProviderFailure }
+
+/// <summary>One readiness verdict for the composer. <see cref="Possible"/> false ⇒ Auto/Required are not offered as if
+/// they would work; the cause and its single fix are shown instead. <see cref="Known"/> false ⇒ the status could not be
+/// read; the controls stay usable and the Host decides.</summary>
+public sealed record SearchReadiness(bool Possible, bool Known, string? Cause, string? Fix, string? Href, string? HrefLabel, string? SwitchToProfile)
+{
+    public static readonly SearchReadiness Ok = new(true, true, null, null, null, null, null);
+    public static SearchReadiness Unknown(string why) => new(true, false, why, "The Host still checks every search request.", null, null, null);
+    public static SearchReadiness Blocked(string cause, string fix, string href, string hrefLabel, string? switchTo = null)
+        => new(false, true, cause, fix, href, hrefLabel, switchTo);
 }

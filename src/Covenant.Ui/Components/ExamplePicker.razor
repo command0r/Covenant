@@ -1,0 +1,93 @@
+@inject PlaygroundState Pg
+@inject WorkspaceConfig Ws
+@inject Interop Interop
+
+@* Demo examples as a COMPACT selector (browser review: seven open cards buried the prompt at 1280×720). One row: pick an
+   example by title (readiness in the option text), then "Use example" fills the composer and moves focus to the filled
+   prompt. Only the selected example shows a one-line expectation; its full explanation, route, payer and any missing
+   prerequisites (with links) are behind "Details". Nothing runs and nothing changes configuration. *@
+
+<div class="examples">
+    <div class="example-bar">
+        <label for="@(IdPrefix + "-ex")" class="field-label">Example</label>
+        <select id="@(IdPrefix + "-ex")" class="input" value="@(_selected ?? "")" @onchange="OnSelect" disabled="@Pg.Running">
+            <option value="">Write your own, or choose an example…</option>
+            @foreach (var r in Pg.Examples)
+            {
+                <option value="@r.Example.Id">@(r.Example.Title + (r.Ready ? "" : " — needs setup"))</option>
+            }
+        </select>
+        @if (Selected is { } sel)
+        {
+            <button type="button" class="btn sm @(sel.Ready ? "primary" : "")" disabled="@(Pg.Running || !sel.Ready)" @onclick="() => UseAsync(sel)">
+                @(IsActive(sel) ? "Fill again" : "Use example")
+            </button>
+        }
+    </div>
+    @if (Selected is { } s)
+    {
+        <div class="example-summary">
+            <span class="secondary">@(s.Ready ? "Expect: " + s.Example.Expected : "Needs setup: " + (s.Missing.FirstOrDefault()?.Text ?? "prerequisites missing."))</span>
+            <details class="tech">
+                <summary>Details</summary>
+                <span class="secondary">@s.Example.Teaches</span>
+                @if (s.Ready)
+                {
+                    <dl class="facts compact">
+                        <dt>Runs as</dt><dd>@AppName(s.ApplicationId) · workload @ProfileName(s.ProfileId)</dd>
+                        <dt>Route now</dt><dd class="mono wrap-any">@s.ConfiguredRoute</dd>
+                        <dt>Pays</dt><dd>@s.Payer</dd>
+                        <dt>Observe</dt><dd>@s.Example.Observe</dd>
+                    </dl>
+                    @if (s.OutputNote is { } on)
+                    {
+                        <span class="note @(on.Contains("cut short", StringComparison.Ordinal) ? "warn" : "")">@on</span>
+                    }
+                }
+                else
+                {
+                    <ul class="plain-list secondary missing-list">
+                        @foreach (var m in s.Missing)
+                        {
+                            <li>@m.Text@(m.Href is null ? "" : " ")@if (m.Href is { } href) { <a href="@href">@(m.HrefLabel ?? "Fix")</a> }</li>
+                        }
+                    </ul>
+                }
+            </details>
+        </div>
+    }
+</div>
+
+@code {
+    /// <summary>Element-id prefix of the composer (the prompt is "&lt;prefix&gt;-prompt").</summary>
+    [Parameter] public string IdPrefix { get; set; } = "cmp";
+
+    private string? _selected;
+
+    private ExampleResolution? Selected
+        => (_selected ?? Pg.Form.ExampleId) is { Length: > 0 } id ? Pg.Examples.FirstOrDefault(e => e.Example.Id == id) : null;
+
+    private bool IsActive(ExampleResolution r)
+        => string.Equals(Pg.Form.ExampleId, r.Example.Id, StringComparison.Ordinal) && DemoExamples.StillMatches(r.Example, Pg.Form);
+
+    private void OnSelect(ChangeEventArgs e)
+    {
+        var v = e.Value?.ToString();
+        _selected = string.IsNullOrEmpty(v) ? null : v;
+    }
+
+    private async Task UseAsync(ExampleResolution r)
+    {
+        if (!r.Ready || Pg.Running) return;
+        _selected = r.Example.Id;
+        var preview = Pg.ApplyExampleAsync(r);      // fills synchronously, then previews the route
+        try { await Interop.FocusElementAsync(IdPrefix + "-prompt"); } catch (JSException) { /* focus is a convenience */ }
+        await preview;
+    }
+
+    private string AppName(string? id)
+        => ComposerRules.Find(Ws.Applications, id) is { } app ? ComposerRules.ApplicationName(app) + " (team " + app.Team + ")" : id ?? "—";
+
+    private string ProfileName(string? id)
+        => ComposerRules.Profile(Ws.Profiles, id) is { } p ? (p.Name ?? p.Id) + " (" + p.Baseline + ")" : id ?? "—";
+}

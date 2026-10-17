@@ -49,7 +49,7 @@ public static class TraceModel
 
     public static string Label(string stage) => stage switch
     {
-        "auth" => "Auth",
+        "auth" => "Identify caller",
         "shape" => "Shape",
         "classify" => "Classify",
         "policy" => "Policy",
@@ -59,8 +59,62 @@ public static class TraceModel
         "budget" => "Budget",
         "search" => "Web search",
         "provider" => "Provider",
-        "attribution" => "Attribution",
+        "attribution" => "Finalize cost",
         _ => stage,
+    };
+
+    /// <summary>What each stage does, in plain words (popover). Wire names stay stable; only the wording is descriptive.</summary>
+    public static string Explain(string stage) => stage switch
+    {
+        "auth" => "Resolves the calling application, its team (who pays) and the workload profile — BEFORE anything else runs, so even a refused request is attributed.",
+        "shape" => "Checks the request is well-formed and within bounds.",
+        "classify" => "Starts from the profile's trusted baseline; the detector can only raise it (e.g. an SSN pattern → PII).",
+        "policy" => "Finds the one policy for this workload profile and classification, and its eligible targets in order.",
+        "cache" => "Exact-match cache: a hit answers at $0 with no provider call; web-search requests bypass it.",
+        "rate_limit" => "Per-minute limits for all traffic and per team.",
+        "pause" => "Refuses new provider calls while an operator has paused them.",
+        "budget" => "Reserves the worst-case cost against every applicable budget before the call; refuses if it does not fit.",
+        "search" => "Optional governed web search: one bounded Tavily call, charged as a separate tool call.",
+        "provider" => "Calls the routed model; an approved fallback is a second attempt, never a hidden retry.",
+        "attribution" => "AFTER the provider answered: prices the reported (or estimated) usage. Budget settlement and the audit record happen for every request, refused ones included.",
+        _ => "",
+    };
+
+    /// <summary>Server-measured duration text. Positive sub-millisecond values are "&lt;1 ms" (never a fabricated 0 ms);
+    /// unknown stays null; a measured 0 is "0 ms".</summary>
+    public static string? DurationText(double? ms)
+    {
+        if (ms is not { } d || double.IsNaN(d) || d < 0) return null;
+        if (d > 0 && d < 1) return "<1 ms";
+        return d < 1000 ? d.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " ms"
+            : (d / 1000).ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + " s";
+    }
+
+    /// <summary>Chip state text that says the OUTCOME where "Passed/Skipped" would hide it (cache hit/miss/off, search
+    /// off/not needed, cost not needed because nothing was called).</summary>
+    public static string OutcomeText(TraceStepView s) => (s.Stage, s.State, s.ReasonCode) switch
+    {
+        ("cache", TraceStepState.Passed, "cache_hit") => "Hit",
+        ("cache", TraceStepState.Passed, "cache_miss") => "Miss",
+        ("cache", TraceStepState.Skipped, "cache_disabled") => "Off",
+        ("cache", TraceStepState.Skipped, "web_search_bypass") => "Bypassed",
+        ("search", TraceStepState.Skipped, "search_off") => "Off",
+        ("search", TraceStepState.Skipped, "search_not_triggered") => "Not needed",
+        ("attribution", TraceStepState.Skipped, _) => "No usage",
+        (_, TraceStepState.Skipped, "cache_hit") => "Not needed",
+        _ => StateText(s.State),
+    };
+
+    /// <summary>A sentence for the popover when the step's state alone would mislead.</summary>
+    public static string? OutcomeNote(TraceStepView s) => (s.Stage, s.State, s.ReasonCode) switch
+    {
+        ("attribution", TraceStepState.Skipped, _) => "No provider answer to price. The request is still recorded with its application, team and workload; any reservation was released or settled by the budget stage.",
+        ("cache", TraceStepState.Skipped, "cache_disabled") => "The exact cache is disabled (TTL 0): no lookup was made.",
+        ("cache", TraceStepState.Passed, "cache_miss") => "Looked up; no identical recent request — continued to the provider.",
+        ("cache", TraceStepState.Passed, "cache_hit") => "Answered from the exact cache at $0; no provider call.",
+        (_, TraceStepState.Skipped, "cache_hit") => "Not needed: the cache answered.",
+        (_, TraceStepState.Skipped, "not_reached") => "Not reached: an earlier stage ended the request.",
+        _ => null,
     };
 
     public static TraceStepState ParseState(string? state) => state switch
@@ -214,7 +268,14 @@ public static class TraceModel
     /// <c>Attempts[]</c> entry supplies the target.</summary>
     public static TraceView? FromAuditSummary(IReadOnlyList<AuditTraceStepView>? summary, IReadOnlyList<AuditAttemptView>? attempts = null, int? configVersion = null)
     {
-        if (summary is null || summary.Count == 0) return null;
+        var events = EventsFromAuditSummary(summary, attempts);
+        return events.Count == 0 ? null : Reduce(events, complete: true, configVersion, source: "audit summary");
+    }
+
+    /// <summary>The compact persisted trace as terminal events in recorded order (for display and replay).</summary>
+    public static IReadOnlyList<TraceEventDto> EventsFromAuditSummary(IReadOnlyList<AuditTraceStepView>? summary, IReadOnlyList<AuditAttemptView>? attempts = null)
+    {
+        if (summary is null || summary.Count == 0) return [];
         var events = new List<TraceEventDto>(summary.Count);
         long seq = 0;
         foreach (var step in summary)
@@ -229,7 +290,7 @@ public static class TraceModel
                 AttemptId = step.AttemptId, ReasonCode = step.ReasonCode, Target = target,
             });
         }
-        return events.Count == 0 ? null : Reduce(events, complete: true, configVersion, source: "audit summary");
+        return events;
     }
 
     /// <summary>"connection/model" for an attempt, or whichever half is recorded.</summary>
@@ -251,6 +312,9 @@ public sealed class TraceAccumulator
 
     public bool Complete { get; private set; }
     public bool Expired { get; private set; }
+
+    /// <summary>Every recorded event in seq order (replay input; never mutated by a replay).</summary>
+    public IReadOnlyList<TraceEventDto> Events => _events.Values.OrderBy(e => e.Seq).ToList();
     public int? ConfigVersion { get; private set; }
     public long LastSeq { get; private set; }
     public int Count => _events.Count;
@@ -322,5 +386,48 @@ public sealed class SseParser
                 break;
         }
         return null;
+    }
+}
+
+/// <summary>Replay of a RECORDED trace (§7): reveals the real events one at a time at a pedagogical pace. It never calls a
+/// provider, never changes a record and never re-runs a request; durations and the final outcome shown are exactly the
+/// recorded ones — only the pacing between reveals is chosen by the presenter, and the view says so.</summary>
+public static class TraceReplay
+{
+    public const int BaseStepMs = 650;
+
+    public static readonly IReadOnlyList<(string Label, double Speed)> Speeds = [("Slow", 0.5), ("Normal", 1.0), ("Fast", 2.0)];
+
+    /// <summary>Delay between reveals for a speed factor (clamped 0.25–4).</summary>
+    public static int DelayMs(double speed) => (int)Math.Round(BaseStepMs / Math.Clamp(speed, 0.25, 4.0));
+
+    /// <summary>Events in seq order, duplicates dropped. A trace that only has terminal events (the compact audit summary)
+    /// gets a "running" reveal before each terminal event, so every stage visibly enters and finishes; that inserted step
+    /// carries no duration and is pacing only.</summary>
+    public static IReadOnlyList<TraceEventDto> Script(IEnumerable<TraceEventDto> events)
+    {
+        var ordered = events.Where(e => e is not null && !string.IsNullOrWhiteSpace(e.Stage))
+            .GroupBy(e => e.Seq).Select(g => g.First()).OrderBy(e => e.Seq).ToList();
+        if (ordered.Any(e => e.State == "running")) return ordered;
+        var script = new List<TraceEventDto>(ordered.Count * 2);
+        long seq = 0;
+        foreach (var e in ordered)
+        {
+            script.Add(new TraceEventDto { Seq = ++seq, Stage = e.Stage, State = "running", AttemptId = e.AttemptId, Target = e.Target });
+            script.Add(new TraceEventDto
+            {
+                Seq = ++seq, Stage = e.Stage, State = e.State, DurationMs = e.DurationMs, ReasonCode = e.ReasonCode,
+                AttemptId = e.AttemptId, Target = e.Target, TsUtc = e.TsUtc,
+                RequestedMaxOutputTokens = e.RequestedMaxOutputTokens, EffectiveMaxOutputTokens = e.EffectiveMaxOutputTokens,
+            });
+        }
+        return script;
+    }
+
+    /// <summary>The view after the first <paramref name="revealed"/> script events. The last frame equals the recorded trace.</summary>
+    public static TraceView Frame(IReadOnlyList<TraceEventDto> script, int revealed, int? configVersion)
+    {
+        var n = Math.Clamp(revealed, 0, script.Count);
+        return TraceModel.Reduce(script.Take(n), complete: n >= script.Count, configVersion, source: "replay");
     }
 }

@@ -9,16 +9,21 @@
    with its scope, and the theme switch. The ticking element is NOT a live region; one visually hidden polite
    region announces state changes only (connected / paused / stale). *@
 <header class="status-header">
-    <span class="env" title="Environment">@(State.Connected ? State.EnvironmentLabel : "—")</span>
-
     @if (State.Connected)
     {
-        var mode = ShellStatus.Mode(State.LastStatus?.Mode);
-        <span class="mode-badge @mode.Tone" title="@mode.Description">
+        var st = State.LastStatus;
+        var mode = ShellStatus.Mode(st?.Mode);
+        <span class="mode-badge @mode.Tone" title="@(mode.Description + " (active configuration)")">
             @if (mode.Tone == "local") { <Icon Name="local" Size="16" /> }
             else if (mode.Tone is "hybrid" or "legacy") { <Icon Name="cloud" Size="16" /> }
-            <span>@mode.Label</span>
+            <span>@ShellStatus.ModeWithVersion(st?.Mode, st?.ConfigVersion)</span>
         </span>
+        var env = ShellStatus.Environment(st?.Environment, st?.ConfigVersion, st?.Version, st?.StartedUtc);
+        <a class="env" href="settings#diag-h" title="@env.Details"><span class="subtle">Environment</span> @env.Label</a>
+    }
+    else
+    {
+        <span class="env">Not connected</span>
     }
 
     @{ var fresh = ShellStatus.Freshness(State.Connected, State.IsStale, State.LastUpdatedUtc, DateTimeOffset.UtcNow, State.FeedError); }

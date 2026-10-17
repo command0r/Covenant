@@ -113,6 +113,9 @@ public sealed class ApplicationDto
     [JsonPropertyName("granted_profiles")] public List<string> GrantedProfiles { get; set; } = [];
     [JsonPropertyName("default_profile")] public string? DefaultProfile { get; set; }
     [JsonPropertyName("max_output_tokens")] public int? MaxOutputTokens { get; set; }
+    /// <summary>Human name of the calling system (optional, display only; null ⇒ show the id).</summary>
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("description")] public string? Description { get; set; }
 }
 
 public sealed class WorkloadProfileDto
@@ -270,6 +273,10 @@ public sealed class ApplicationSummaryDto
     [JsonPropertyName("console_testing")] public bool ConsoleTesting { get; set; }
     [JsonPropertyName("granted_profiles")] public List<string> GrantedProfiles { get; set; } = [];
     [JsonPropertyName("default_profile")] public string? DefaultProfile { get; set; }
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    /// <summary>Budget ids that apply to this application's requests (global, team, application).</summary>
+    [JsonPropertyName("budgets")] public List<string> Budgets { get; set; } = [];
 }
 
 /// <summary>POST /admin/playground/requests body (admin token; same response contract as /v1/chat/completions).</summary>

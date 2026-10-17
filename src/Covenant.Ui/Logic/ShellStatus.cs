@@ -7,6 +7,8 @@ public sealed record ModeBadge(string Label, string Tone, string Description);
 
 /// <summary>Header freshness: "Live" while fresh; "Stale · 12 s" only when stale. <see cref="Title"/> carries the
 /// exact last-update time for the tooltip/details. <see cref="Tone"/>: ok | warn | bad.</summary>
+public sealed record EnvironmentView(string Label, string? Raw, string Details);
+
 public sealed record FreshnessView(string Label, string Tone, string Title, bool Stale);
 
 /// <summary>Pure header logic (mode badge, live/stale label, the one polite announcement).</summary>
@@ -31,6 +33,35 @@ public static class ShellStatus
             "Imported pre-v2 routing (cloud default). Review the effective rules before relying on it."),
         _ => new(ModeNotReported, "unknown", "The Host did not report a provider mode."),
     };
+
+    /// <summary>Header environment chip (deployment identity — NOT the routing mode). Launch profile names that look like
+    /// a routing mode ("demo-local-only", "demo-hybrid") are shown as "Demo instance" so the header never contradicts the
+    /// ACTIVE configuration's mode; the raw value stays in the tooltip/details.</summary>
+    public static EnvironmentView Environment(string? environment, int? configVersion, string? version, DateTimeOffset? startedUtc)
+    {
+        var raw = string.IsNullOrWhiteSpace(environment) ? null : environment.Trim();
+        var label = raw is null ? "Environment not reported"
+            : LooksLikeRoutingMode(raw) ? "Demo instance"
+            : raw;
+        var details = new List<string> { "Environment (Covenant:Environment): " + (raw ?? "not reported") };
+        if (raw is not null && LooksLikeRoutingMode(raw))
+            details.Add("This is the launch profile name, not the routing mode — the mode badge shows the active configuration.");
+        if (configVersion is { } v) details.Add("Active configuration: v" + v.ToString(CultureInfo.InvariantCulture));
+        if (!string.IsNullOrWhiteSpace(version)) details.Add("Build: " + version);
+        if (startedUtc is { } st) details.Add("Started: " + st.UtcDateTime.ToString("yyyy-MM-dd HH:mm 'UTC'", CultureInfo.InvariantCulture));
+        return new EnvironmentView(label, raw, string.Join("\n", details));
+    }
+
+    private static bool LooksLikeRoutingMode(string env)
+    {
+        var e = env.ToLowerInvariant();
+        return e.EndsWith("local-only", StringComparison.Ordinal) || e.EndsWith("-hybrid", StringComparison.Ordinal)
+            || e is "hybrid" or "local" or "legacy-cloud";
+    }
+
+    /// <summary>"Hybrid · v7" — the ACTIVE configuration's mode and version.</summary>
+    public static string ModeWithVersion(string? mode, int? configVersion)
+        => Mode(mode).Label + (configVersion is { } v ? " · v" + v.ToString(CultureInfo.InvariantCulture) : "");
 
     /// <summary>Freshness label for the header. Never a ticking seconds counter while live.</summary>
     public static FreshnessView Freshness(bool connected, bool stale, DateTimeOffset? lastUpdateUtc, DateTimeOffset nowUtc, string? feedError)

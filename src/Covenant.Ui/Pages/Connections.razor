@@ -120,7 +120,8 @@
                                         <ul class="inline-list">
                                             @foreach (var m in conn.Models)
                                             {
-                                                <li><span class="mono wrap-any">@m.ModelId</span> <span class="subtle">· @Money.Price(m.Price?.InputPer1M, m.Price?.OutputPer1M)@(m.Price?.Basis is { Length: > 0 } b ? " (" + b + ")" : "")</span>@RegisteredNote(cat, m.ModelId)</li>
+                                                <li><span class="mono wrap-any">@m.ModelId</span> <span class="subtle">· @Money.Price(m.Price?.InputPer1M, m.Price?.OutputPer1M)@(m.Price?.Basis is { Length: > 0 } b ? " (" + b + ")" : "")</span>@RegisteredNote(cat, m.ModelId)
+                                                    <WorkloadRouteAction Connection="conn" ModelId="@m.ModelId" /></li>
                                             }
                                         </ul>
                                     }

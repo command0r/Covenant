@@ -71,7 +71,9 @@ public sealed class TraceTests : IDisposable
         {
             Assert.Contains(data, e => e.Data.GetProperty("stage").GetString() == stage && e.Data.GetProperty("state").GetString() == "running");
             var terminal = data.Last(e => e.Data.GetProperty("stage").GetString() == stage && e.Data.GetProperty("state").GetString() != "running");
-            Assert.Equal(stage == "search" ? "skipped" : "passed", terminal.Data.GetProperty("state").GetString());
+            // The demo seed disables the exact cache (TTL 0): the cache stage reports "skipped · cache_disabled", never a
+            // Passed that would imply a lookup happened. Web search is off on this request.
+            Assert.Equal(stage is "search" or "cache" ? "skipped" : "passed", terminal.Data.GetProperty("state").GetString());
             Assert.True(terminal.Data.GetProperty("duration_ms").GetDouble() >= 0);
         }
         var attempt = data.First(e => e.Data.TryGetProperty("attempt_id", out _));
@@ -90,7 +92,9 @@ public sealed class TraceTests : IDisposable
         // Durable compact summary in the audit record.
         var audit = await CorrelationTestKit.LookupAsync(_client, id);
         Assert.NotNull(audit.Trace);
-        Assert.All(Stages.Where(s => s is not ("provider" or "search")), s => Assert.Contains(audit.Trace!, t => t.Stage == s && t.State == "passed"));
+        Assert.All(Stages.Where(s => s is not ("provider" or "search" or "cache")), s => Assert.Contains(audit.Trace!, t => t.Stage == s && t.State == "passed"));
+        Assert.Contains(audit.Trace!, t => t.Stage == "cache" && t.State == "skipped" && t.ReasonCode == "cache_disabled");
+        Assert.Equal("disabled", audit.CacheOutcome);
         Assert.Contains(audit.Trace!, t => t.Stage == "provider" && t.AttemptId == "att_1" && t.State == "passed");
         Assert.Contains(audit.Trace!, t => t.Stage == "search" && t.State == "skipped" && t.ReasonCode == "search_off");
     }

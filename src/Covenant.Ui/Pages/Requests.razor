@@ -162,7 +162,7 @@
                         <thead>
                             <tr>
                                 <th scope="col">Time (UTC)</th>
-                                <th scope="col">Application / team</th>
+                                <th scope="col">Application / team / workload</th>
                                 <th scope="col">Outcome</th>
                                 <th scope="col">Selected → served</th>
                                 <th scope="col" class="num">Duration</th>
@@ -178,7 +178,7 @@
                                 var model = ModelFacts.SelectedToServed(r);
                                 <tr class="clickable @(r.Id == View.SelectedId ? "selected" : "")" @onclick="() => Open(r)">
                                     <td class="mono"><span class="cell" title="@Fmt.Utc(r.TimestampUtc)">@(r.TimestampUtc.UtcDateTime.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture))</span><span class="cell subtle">@(r.TimestampUtc.UtcDateTime.ToString("MM-dd", System.Globalization.CultureInfo.InvariantCulture))</span></td>
-                                    <td><span class="cell" title="@(Who(r))">@(r.ApplicationId ?? r.Principal)</span><span class="cell subtle" title="@r.Tags.Team">@r.Tags.Team</span></td>
+                                    <td><span class="cell" title="@(Who(r))">@(r.ApplicationId ?? r.Principal)</span><span class="cell subtle" title="@r.Tags.Team">@r.Tags.Team</span><span class="cell subtle" title="@("Workload " + (r.ProfileId ?? "not recorded") + (r.PolicyId is { } pol ? " · policy " + pol : ""))">@(r.ProfileId ?? "")@(r.PolicyId is { } pol2 ? " · " + pol2 : "")</span></td>
                                     <td><span class="cell" title="@o.Title"><StatusPill Kind="@o.PillKind" Text="@OutcomeModel.Label(o.Outcome)" /></span></td>
                                     <td class="mono"><span class="cell" title="@model">@model@(r.Attempts is { Count: > 1 } at ? " (" + at.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + " attempts)" : "")</span></td>
                                     <td class="num mono">@Fmt.Ms(r.DurationMs)</td>
@@ -284,6 +284,7 @@
                         <dt>Operator</dt><dd class="mono">@(rec.EntryPoint == "console" ? Fmt.OrNotRecorded(rec.OperatorRef) + " (shared console operator)" : rec.OperatorRef ?? "— (application key)")</dd>
                         <dt>Workload profile</dt><dd class="mono">@Fmt.OrNotRecorded(rec.ProfileId)</dd>
                         <dt>Config version</dt><dd class="mono">@(rec.ConfigVersion is { } cv ? "v" + cv.ToString(System.Globalization.CultureInfo.InvariantCulture) : ModelFacts.NotRecorded)</dd>
+                        <dt>Policy</dt><dd class="mono">@(rec.PolicyId ?? (ModelFacts.IsV2(rec) && rec.ConfigVersion is not null ? "None decided" : ModelFacts.NotRecorded))</dd>
                         <dt>Workflow / use case</dt><dd class="mono">@Fmt.OrNotRecorded(rec.Tags.Workflow) · @Fmt.OrNotRecorded(rec.Tags.UseCase)</dd>
                         <dt>Stopped at</dt><dd>@StoppedText(rec)</dd>
                         <dt>Recorded reason</dt><dd class="wrap-any">@Fmt.OrNotRecorded(rec.Reason)</dd>
@@ -354,7 +355,8 @@
                     <h3>Trace summary</h3>
                     @if (trace is not null)
                     {
-                        <TraceBar Trace="@trace" FeedState="TraceFeedState.Complete" Compact="true" />
+                        <TraceWithReplay Trace="@trace" FeedState="TraceFeedState.Complete" Compact="true"
+                                         Events="@(() => TraceModel.EventsFromAuditSummary(rec.Trace, rec.Attempts))" RequestKey="@rec.Id" />
                     }
                     else
                     {
@@ -374,7 +376,8 @@
                         {
                             <dt>Reserved / settled</dt><dd class="mono">@Money.Usd(res) / @Money.Usd(rec.SettledUsd)</dd>
                         }
-                        <dt>Cache</dt><dd>@(rec.CacheHit ? "Hit — response reused, no provider call" : "Not served from cache")</dd>
+                        <dt>Cache</dt><dd>@Ownership.Cache(rec)</dd>
+                        <dt>Charged (after execution)</dt><dd>@Ownership.Finalized(rec)</dd>
                         <dt>Duration</dt><dd class="mono">@Fmt.Ms(rec.DurationMs) (recorded by Covenant)</dd>
                     </dl>
                 </section>

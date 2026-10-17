@@ -282,8 +282,8 @@ public sealed class WebSearchStageTests
         { "disabled", Weather, null, TraceReasons.SearchNotPermitted },
         { "local-only", Weather, null, TraceReasons.SearchNotPermitted },
         { "internal-profile", Weather, null, TraceReasons.SearchNotPermitted },
-        { "pii-in-request", "What's the weather in Toronto today for 078-05-1120?", null, TraceReasons.SearchSensitive },
-        { "pii-in-location", "What's the weather today?", "078-05-1120", TraceReasons.SearchSensitive },
+        { "pii-in-request", "What's the weather in Toronto today for 000-12-3456?", null, TraceReasons.SearchSensitive },
+        { "pii-in-location", "What's the weather today?", "000-12-3456", TraceReasons.SearchSensitive },
         { "unknown-price", Weather, null, TraceReasons.SearchNotPermitted },
         { "missing-key", Weather, null, TraceReasons.SearchNotPermitted },
     };

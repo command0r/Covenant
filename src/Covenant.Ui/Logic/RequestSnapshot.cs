@@ -17,6 +17,8 @@ public sealed class PlaygroundForm
 
     /// <summary>Preset letter the form was last filled from (A–D), or null for a custom request.</summary>
     public char? Scenario { get; set; }
+    /// <summary>Demo example the form was last filled from (<see cref="DemoExamples"/>), or null.</summary>
+    public string? ExampleId { get; set; }
     /// <summary>"Run as" application (GET /admin/applications id). The console never holds its credential.</summary>
     public string? ApplicationId { get; set; }
     /// <summary>Workload profile; only profiles granted to the application are selectable. Null = the server uses
@@ -67,6 +69,7 @@ public sealed class PlaygroundForm
     public void Clear()
     {
         Scenario = null;
+        ExampleId = null;
         ApplicationId = null;
         ProfileId = null;
         Prompt = "";
@@ -127,9 +130,11 @@ public sealed record RequestSnapshot(
         var prompt = form.FreshNonce ? basePrompt + (nonce ?? ScenarioPresets.NewNonce()) : basePrompt;
         var preset = ScenarioPresets.Find(form.Scenario);
         var matches = preset is not null && preset.StillMatches(form);
+        var example = DemoExamples.Find(form.ExampleId);
+        var exampleMatches = example is not null && DemoExamples.StillMatches(example, form);
         return new RequestSnapshot(
             Sequence: sequence,
-            ScenarioLabel: matches ? "Scenario " + preset!.Letter + " · " + preset.Title : "Custom",
+            ScenarioLabel: exampleMatches ? "Example · " + example!.Title : matches ? "Scenario " + preset!.Letter + " · " + preset.Title : "Custom",
             Scenario: matches ? preset!.Letter : null,
             ApplicationId: PlaygroundForm.Blank(form.ApplicationId),
             ProfileId: PlaygroundForm.Blank(form.ProfileId),
@@ -167,7 +172,9 @@ public sealed record RequestSnapshot(
 /// <summary>An application as the "Run as" select shows it: disabled ones stay visible with the reason.</summary>
 public sealed record ApplicationChoice(ApplicationSummaryDto App, bool Selectable, string? Reason)
 {
-    public string Label => App.Id + (string.IsNullOrWhiteSpace(App.Team) ? "" : " · team " + App.Team) + (Reason is null ? "" : " — " + Reason);
+    /// <summary>Short option text: the friendly name (id when none), plus why it cannot be chosen. Team and id are shown in
+    /// the helper text under the select, so the selected value stays readable in a narrow pane.</summary>
+    public string Label => ComposerRules.ApplicationName(App) + (Reason is null ? "" : " — " + Reason);
 }
 
 /// <summary>A model-override option. <see cref="Boundary"/> is "Local", "Cloud" or null (not reported).</summary>
@@ -192,6 +199,32 @@ public static class ComposerRules
             .ThenBy(a => a.Id, StringComparer.Ordinal)
             .Select(a => new ApplicationChoice(a, WhyNotSelectable(a) is null, WhyNotSelectable(a)))
             .ToList();
+    }
+
+    /// <summary>"Support portal", or the id when no display name is configured.</summary>
+    public static string ApplicationName(ApplicationSummaryDto app) => string.IsNullOrWhiteSpace(app.DisplayName) ? app.Id : app.DisplayName.Trim();
+
+    /// <summary>Who pays for a run as this application: its team and the budgets that apply (ids).</summary>
+    public static string PayerText(ApplicationSummaryDto app)
+        => "Team " + (string.IsNullOrWhiteSpace(app.Team) ? "not set" : app.Team)
+           + (app.Budgets.Count > 0 ? " pays · budgets " + string.Join(", ", app.Budgets) : " pays");
+
+    /// <summary>The application the composer starts with: the first selectable one whose applicable hard budget is NOT
+    /// exhausted (so an isolated budget-demo application that sorts first is not the default), else the first selectable
+    /// one. Every application stays in the dropdown and can still be chosen explicitly; the budget example picks its own.</summary>
+    public static ApplicationSummaryDto? DefaultApplication(IReadOnlyList<ApplicationSummaryDto>? apps, IReadOnlyList<BudgetStateDto>? budgets)
+    {
+        var selectable = Applications(apps).Where(c => c.Selectable).Select(c => c.App).ToList();
+        return selectable.FirstOrDefault(a => DemoExamples.ExhaustedBudget(a, budgets) is null) ?? selectable.FirstOrDefault();
+    }
+
+    /// <summary>True when exactly one application can run console requests — the composer then states it instead of
+    /// showing an unexplained one-item dropdown.</summary>
+    public static ApplicationSummaryDto? OnlySelectable(IReadOnlyList<ApplicationSummaryDto>? apps)
+    {
+        if (apps is null) return null;
+        var selectable = apps.Where(a => WhyNotSelectable(a) is null).ToList();
+        return selectable.Count == 1 ? selectable[0] : null;
     }
 
     public static ApplicationSummaryDto? Find(IReadOnlyList<ApplicationSummaryDto>? apps, string? id)

@@ -1,0 +1,47 @@
+@inject PlaygroundState Pg
+
+@* BEFORE the run: the Host's dry-run route (POST /admin/policies/simulate) — which policy matches the application's
+   workload profile and final classification, the primary target, approved fallbacks, and excluded targets with the
+   reason. Real engine, no provider call, no record, no spend. AFTER the run, the run summary shows what actually
+   happened from evidence. The user's prompt is sent exactly as typed. *@
+
+<div class="route-preview" aria-live="polite">
+    <div class="btn-row">
+        <button type="button" class="btn sm" disabled="@(Pg.Running || string.IsNullOrWhiteSpace(Pg.Form.ApplicationId) || string.IsNullOrWhiteSpace(Pg.Form.Prompt))"
+                @onclick="Pg.PreviewRouteAsync">Preview route (dry run)</button>
+        <span class="secondary subtle">Asks the policy engine where this request would go — no model is called.</span>
+    </div>
+    @if (Pg.Preview is { } pv)
+    {
+        if (pv.Loading)
+        {
+            <span class="secondary muted">Checking the route…</span>
+        }
+        else if (pv.Error is { } err)
+        {
+            <span class="note warn">@err</span>
+        }
+        else if (pv.Result is { } r)
+        {
+            <div class="route-result @(r.Decision == "route" ? "ok" : "refused") @(pv.IsCurrent(Pg.Form) ? "" : "stale")">
+                <strong>@RoutePreview.Summary(r)</strong>
+                <span class="secondary">@RoutePreview.Classification(r)</span>
+                @if (r.Eligible.Count > 0)
+                {
+                    <ul class="plain-list secondary">
+                        @foreach (var e in r.Eligible)
+                        {
+                            <li><span class="mono">@e.Target</span> @(e.Boundary is { Length: > 0 } b ? "· " + b : "") @(e.ExcludedReason is { Length: > 0 } why ? "— excluded: " + why : "— eligible")</li>
+                        }
+                    </ul>
+                }
+                @if (!string.IsNullOrWhiteSpace(r.Explanation)) { <span class="subtle secondary">@r.Explanation</span> }
+                @if (!pv.IsCurrent(Pg.Form))
+                {
+                    <span class="note warn">This preview is for a previous form — preview again after changing application, profile, model or prompt.</span>
+                }
+                <span class="subtle secondary">Dry run on configuration v@(r.ConfigVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?") — runtime checks (pause, rate limit, budget, provider health) still apply when you Run.</span>
+            </div>
+        }
+    }
+</div>

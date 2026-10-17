@@ -30,7 +30,8 @@ public static class Fmt
 
     public static string UtcShort(DateTimeOffset t) => t.UtcDateTime.ToString("HH:mm:ss", Inv);
 
-    public static string Ms(double ms) => ms < 1000 ? ms.ToString("F0", Inv) + " ms" : (ms / 1000).ToString("F2", Inv) + " s";
+    /// <summary>Positive sub-millisecond values render as "&lt;1 ms", never a rounded "0 ms" (Logic/TraceModel.DurationText).</summary>
+    public static string Ms(double ms) => Covenant.Ui.Logic.TraceModel.DurationText(ms) ?? "Not reported";
 
     public static string Ago(DateTimeOffset? t, DateTimeOffset now)
     {

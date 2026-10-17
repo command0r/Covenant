@@ -88,7 +88,11 @@ public sealed record AuditEntry(
     // ---- v3 continued (ADR-0015, additive, nullable): governed web search metadata (no query/snippets) and
     // non-inference tool calls with their own charges, separate from provider Attempts.
     AuditWebSearch? WebSearch = null,
-    IReadOnlyList<AuditToolCall>? ToolCalls = null);
+    IReadOnlyList<AuditToolCall>? ToolCalls = null,
+    // ---- v3 continued (console demo clarity, additive, nullable): WHICH policy decided the route, and what the exact
+    // cache did (hit | miss | bypass_web_search | disabled | not_reached). Absent on older records ⇒ "Not recorded".
+    string? PolicyId = null,
+    string? CacheOutcome = null);
 
 /// <summary>One provider attempt in an audit v3 record (ADR-0013): which connection/model was called, how it ended,
 /// the bounded error class, its measured duration and its charge (ADR-0014). Outcome ∈ served | failed | cancelled.

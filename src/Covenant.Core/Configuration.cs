@@ -117,6 +117,11 @@ public sealed record ApplicationConfig
     public string? DefaultProfile { get; init; }
     /// <summary>Enforced output bound used for reservation and sent to the provider (ADR-0014).</summary>
     public int MaxOutputTokens { get; init; } = 1024;
+    /// <summary>Human name of the calling system ("Support portal"). Optional; null ⇒ the console shows the id. Display only —
+    /// never used for authorization or routing.</summary>
+    public string? DisplayName { get; init; }
+    /// <summary>Plain-language purpose of the calling system. Optional, display only.</summary>
+    public string? Description { get; init; }
 }
 
 public sealed record WorkloadProfileConfig

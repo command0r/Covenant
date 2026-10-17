@@ -82,6 +82,8 @@ public sealed class InferenceContext(InferenceRequest request)
 
     /// <summary>Set by the cache stage on a hit: served without any provider call, cost $0.</summary>
     public bool ServedFromCache { get; set; }
+    /// <summary>What the exact cache did for this request (<see cref="CacheOutcomes"/>); null = cache stage not reached.</summary>
+    public string? CacheOutcome { get; set; }
 
     public bool IsDenied => DenialReason is not null;
 
@@ -185,6 +187,19 @@ public sealed class InferenceContext(InferenceRequest request)
     /// <summary>The running stage declares it had nothing to do (bounded reason code): the pipeline reports it as
     /// "skipped" instead of "passed" when it hands over or returns.</summary>
     public void MarkCurrentStageSkipped(string reasonCode) => _pendingStageSkip = reasonCode;
+
+    /// <summary>The current stage passed with a specific outcome worth showing (e.g. cache "cache_miss"); emitted as the
+    /// reason code of its "passed" event instead of a bare Passed.</summary>
+    public void MarkCurrentStagePassed(string reasonCode) => _pendingStagePass = reasonCode;
+
+    private string? _pendingStagePass;
+
+    internal string? TakeStagePass()
+    {
+        var s = _pendingStagePass;
+        _pendingStagePass = null;
+        return s;
+    }
 
     internal string? TakeStageSkip()
     {

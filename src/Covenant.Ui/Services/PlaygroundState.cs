@@ -35,6 +35,10 @@ public sealed class PlaygroundRun(RequestSnapshot snapshot)
     /// <summary>HTTP status of the search lookup (null = not looked up yet).</summary>
     public int? SearchLookupStatus { get; internal set; }
 
+    /// <summary>The recorded events of this run for a replay: the live/snapshot events, else the audit summary.</summary>
+    public IReadOnlyList<TraceEventDto> RecordedEvents()
+        => Trace.Count > 0 ? Trace.Events : TraceModel.EventsFromAuditSummary(Evidence.Record?.Trace, Evidence.Record?.Attempts);
+
     public string WebSourcesStatus => WebSourcesText.Status(Snapshot.WebSources, Search, SearchLookupStatus);
 
     public string Text => Result is { Text.Length: > 0 } r && !InFlight ? r.Text : _text.ToString();
@@ -113,7 +117,54 @@ public sealed class PlaygroundState : IDisposable
         Notify();
     }
 
-    public string? Problem => ComposerRules.Problem(Form, _workspace.Applications);
+    public string? Problem => ComposerRules.Problem(Form, _workspace.Applications)
+        ?? (Form.WebSources != WebSourcesMode.Off && SearchReadiness is { Known: true, Possible: false } r
+            ? "Web sources " + WebSourcesText.Label(Form.WebSources) + " cannot run: " + r.Cause + " Choose Off, or fix it first."
+            : null);
+
+    /// <summary>Can the current selection search (ONE cause when not)? From the applied configuration and the Host's
+    /// readiness report; the runtime check stays authoritative.</summary>
+    public SearchReadiness SearchReadiness => WebSourcesText.Readiness(_workspace.WebSearch, _workspace.WebSearchError,
+        _workspace.Config?.Config, ComposerRules.Find(_workspace.Applications, Form.ApplicationId), Form.ProfileId);
+
+    /// <summary>Examples resolved against the CURRENT applied configuration.</summary>
+    public IReadOnlyList<ExampleResolution> Examples => DemoExamples.All
+        .Select(e => DemoExamples.Resolve(e, _workspace.Config?.Config, _workspace.Applications, _workspace.Budgets, _workspace.WebSearch, Form.ApplicationId))
+        .ToList();
+
+    /// <summary>Host dry run (POST /admin/policies/simulate) for the form as it was when previewed: chosen policy, primary,
+    /// approved fallbacks, excluded targets and why. No provider call, no record, no spend.</summary>
+    public RoutePreview? Preview { get; private set; }
+
+    /// <summary>Fills the composer from a ready example (never runs) and previews its route.</summary>
+    public async Task ApplyExampleAsync(ExampleResolution resolution)
+    {
+        if (Running || !DemoExamples.ApplyTo(resolution, Form)) return;
+        PresetNote = null;
+        Notify();
+        await PreviewRouteAsync();
+    }
+
+    public async Task PreviewRouteAsync()
+    {
+        if (Running || string.IsNullOrWhiteSpace(Form.ApplicationId) || string.IsNullOrWhiteSpace(Form.Prompt)) return;
+        var key = RoutePreview.KeyOf(Form);
+        Preview = new RoutePreview(key, null, null, Loading: true);
+        Notify();
+        try
+        {
+            var result = await _admin.SimulateAsync(new SimulateRequestDto
+            {
+                ApplicationId = Form.ApplicationId!, ProfileId = Form.ProfileId, Prompt = Form.Prompt, Model = Form.RequestedModel,
+            });
+            Preview = new RoutePreview(key, result, null, Loading: false);
+        }
+        catch (Exception ex)
+        {
+            Preview = new RoutePreview(key, null, "Route preview unavailable: " + ex.Message, Loading: false);
+        }
+        Notify();
+    }
     public bool CanRun => !Running && Problem is null;
 
     /// <summary>Shows a stored run. Never resubmits.</summary>
@@ -137,8 +188,8 @@ public sealed class PlaygroundState : IDisposable
     {
         if (Running || _workspace.Applications is not { } apps) return;
         if (ComposerRules.Find(apps, Form.ApplicationId) is { } cur && ComposerRules.WhyNotSelectable(cur) is null) return;
-        var first = ComposerRules.Applications(apps).FirstOrDefault(c => c.Selectable);
-        if (first is not null && ComposerRules.SelectApplication(Form, apps, first.App.Id)) Notify();
+        var first = ComposerRules.DefaultApplication(apps, _workspace.Budgets);
+        if (first is not null && ComposerRules.SelectApplication(Form, apps, first.Id)) Notify();
     }
 
     public bool SelectApplication(string? id)
@@ -234,6 +285,8 @@ public sealed class PlaygroundState : IDisposable
 
         // The backend records success/failure from real calls: re-read shared health after any provider attempt.
         _ = _catalog.RefreshAsync();
+        // Spend and reservations changed: refresh budget facts (Budgets page, budget example readiness).
+        if (result.HttpStatus is not null) _ = _workspace.RefreshBudgetsAsync();
     }
 
     /// <summary>Stops waiting for the in-flight run. Not a rollback.</summary>
@@ -393,6 +446,7 @@ public sealed class PlaygroundState : IDisposable
         Form.Clear();
         Form.Streaming = StreamingDefault;
         PresetNote = null;
+        Preview = null;
         _sequence = 0;
         Notify();
     }

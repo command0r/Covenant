@@ -57,6 +57,10 @@ public static class TraceReasons
     public const string SearchEmpty = "search_empty";
     /// <summary>Cache stage: a triggered web-search request never reads or writes the exact cache.</summary>
     public const string WebSearchBypass = "web_search_bypass";
+    /// <summary>Cache stage: exact cache disabled in configuration (TTL 0).</summary>
+    public const string CacheDisabled = "cache_disabled";
+    /// <summary>Cache stage passed: looked up, no entry (the request continued to the provider).</summary>
+    public const string CacheMiss = "cache_miss";
 
     /// <summary>Default code of a denial when the denying stage did not name a finer one.</summary>
     public static string ForDenial(DenialKind kind) => kind switch
@@ -197,4 +201,14 @@ public static class RequestBounds
         if (cfg.FindModel(target.AdapterKey, target.ModelId)?.MaxOutputTokens is { } modelMax) bound = Math.Min(bound, modelMax);
         return Math.Max(1, bound);
     }
+}
+
+/// <summary>What the exact cache did for one request (audit <c>CacheOutcome</c>, console wording).</summary>
+public static class CacheOutcomes
+{
+    public const string Hit = "hit";
+    public const string Miss = "miss";
+    public const string BypassWebSearch = "bypass_web_search";
+    public const string Disabled = "disabled";
+    public const string NotReached = "not_reached";
 }

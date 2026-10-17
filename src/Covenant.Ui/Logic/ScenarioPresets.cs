@@ -35,12 +35,13 @@ public static class ScenarioPresets
         "Extract the priority from this ticket and answer only JSON {\"priority\":\"low|medium|high\"}: " +
         "'Printer on floor 3 is jammed again, not urgent.'";
 
-    /// <summary>The same ticket with a synthetic sensitive marker. 078-05-1120 is the published sample SSN (never
-    /// issued to a person); it matches RegexDataClassifier's US SSN rule, so detection escalates the Public
-    /// baseline to Pii — the request must then stay local, or be refused when no local destination is eligible.</summary>
+    /// <summary>The same ticket with a synthetic sensitive marker. 000-12-3456 is structurally invalid as an SSN (area
+    /// number 000 is never assigned), so it identifies no one; it still matches RegexDataClassifier's US SSN pattern, so
+    /// detection escalates the Public baseline to Pii — the request must then stay local, or be refused when no local
+    /// destination is eligible.</summary>
     public const string SensitiveTicketPrompt =
         "Extract the priority from this ticket and answer only JSON {\"priority\":\"low|medium|high\"}: " +
-        "'Printer on floor 3 is jammed again, not urgent. Reporter SSN 078-05-1120 (synthetic test marker).'";
+        "'Printer on floor 3 is jammed again, not urgent. Reporter SSN 000-12-3456 (synthetic test marker).'";
 
     public const string ExpectedLow = "{\"priority\":\"low\"}";
 

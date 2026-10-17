@@ -18,7 +18,7 @@ public static class CostText
 
     public const string MixedLabel = "Mixed (includes estimates)";
 
-    public static string Cost(AuditEntryView r) => ToolOnly(r) ? "≈ " + Usd(r.Usage.CostUsd) + " web-search charge (no provider call)" : r.CostBasis switch
+    public static string Cost(AuditEntryView r) => ToolOnly(r) ? "≈ " + Usd(r.Usage.CostUsd) + " web-search charge (no provider call)" : Split(r) ?? r.CostBasis switch
     {
         "estimated_unreported" => "≈ " + Usd(r.Usage.CostUsd) + " (includes an estimated web-search charge)",
         "reported" => Usd(r.Usage.CostUsd) + " (estimated provider charge)",
@@ -54,12 +54,33 @@ public static class CostText
         _ => NotReported,
     };
 
+    /// <summary>When a request has BOTH a tool charge (web search) and inference, the total split into its parts with each
+    /// part's own basis — never one "provider charge" label for a total that is mostly (or only) the search.</summary>
+    public static string? Split(AuditEntryView r)
+    {
+        if (r.ToolCalls is not { Count: > 0 } tools || ToolOnly(r)) return null;
+        decimal tool = tools.Sum(t => t.CostUsd ?? 0m);
+        decimal inference = Math.Max(0m, r.Usage.CostUsd - tool);
+        var attempts = r.Attempts ?? new List<AuditAttemptView>();
+        string inferenceBasis =
+            attempts.Count == 0 ? "no provider call"
+            : attempts.All(a => a.CostBasis == "zero_priced") ? "configured $0 local model, infrastructure excluded"
+            : attempts.Any(a => a.CostBasis is "estimated_from_text" or "estimated_failed_call") ? "includes estimates"
+            : attempts.Any(a => a.CostBasis is "unpriced" or "unknown_failed_call") ? "partly unknown"
+            : "reported usage × configured price";
+        string toolBasis = tools.All(t => t.CostBasis == "reported") ? "credits × configured price"
+            : tools.All(t => t.CostBasis == "no_call") ? "not sent"
+            : "reserved charge";
+        return Usd(r.Usage.CostUsd) + " total · web search " + Usd(tool) + " (" + toolBasis + ") · inference "
+               + Usd(inference) + " (" + inferenceBasis + ")";
+    }
+
     /// <summary>True when the request's only charge is a tool call (e.g. a failed search before any provider call).</summary>
     public static bool ToolOnly(AuditEntryView r)
         => r.ToolCalls is { Count: > 0 } && (r.Attempts is null || r.Attempts.Count == 0) && r.CostBasis is not "no_call";
 
     /// <summary>Short form for table cells (same rules, fewer words).</summary>
-    public static string CostShort(AuditEntryView r) => ToolOnly(r) ? "≈ " + Usd(r.Usage.CostUsd) + " search" : r.CostBasis switch
+    public static string CostShort(AuditEntryView r) => ToolOnly(r) ? "≈ " + Usd(r.Usage.CostUsd) + " search" : Split(r) is not null ? Usd(r.Usage.CostUsd) + " incl. search" : r.CostBasis switch
     {
         "estimated_unreported" => "≈ " + Usd(r.Usage.CostUsd),
         "reported" => Usd(r.Usage.CostUsd),
