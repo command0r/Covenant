@@ -2,14 +2,13 @@
 @inject AppState State
 @inject ConsoleSession Session
 @inject WorkspaceConfig Ws
-@inject PlaygroundState Pg
 @implements IDisposable
 
 <PageTitle>Overview · Covenant</PageTitle>
 
-@* T07 Overview: setup checks (each missing item links to the exact page/action — and none of them is a
-   "demo ready" verdict), spend/request metrics for the labelled audit segment, recent outcomes, a modest
-   activity chart, and the shared composer (same state as Playground; Run is explicit). *@
+@* Overview: the four totals for the labelled audit segment, setup checks (each missing item links to the exact page or
+   action — none is a "demo ready" verdict), a modest activity chart and compact recent outcomes. No composer here:
+   requests are run in the Playground (one place, one result view). *@
 
 <div class="page">
     <RequiresConnection>
@@ -25,10 +24,43 @@
                     <h1>Overview</h1>
                     <span class="lede">@SegmentLabel(s)</span>
                 </div>
-                <a class="btn" href="requests"><Icon Name="requests" Size="16" /><span>View requests</span></a>
+                <div class="btn-row tight">
+                    <a class="btn primary" href="playground"><Icon Name="playground" Size="16" /><span>Open Playground</span></a>
+                    <a class="btn" href="requests"><Icon Name="requests" Size="16" /><span>View requests</span></a>
+                </div>
             </div>
 
-            <div class="ov-top">
+            @* Layout (usability review): the four totals first; setup checks below left, activity below right; recent
+               outcomes compact and full width at the bottom. Running requests lives only in the Playground. *@
+            <dl class="summary-grid">
+                <div class="summary-card">
+                    <dt>Served</dt>
+                    <dd class="value">@Fmt.Int(f.Allowed)</dd>
+                    <dd class="hint">@(f.CacheHits > 0 ? $"Including {Fmt.Int(f.CacheHits)} from cache" : "Allowed and answered")</dd>
+                </div>
+                <div class="summary-card">
+                    <dt>Refused or failed</dt>
+                    <dd class="value">@Fmt.Int(f.Denied)</dd>
+                    <dd class="hint">Each one is an audit entry</dd>
+                </div>
+                <div class="summary-card">
+                    <dt>Estimated provider charges</dt>
+                    <dd class="value">@Fmt.Usd(f.TotalCostUsd)</dd>
+                    <dd class="hint">Infrastructure excluded</dd>
+                </div>
+                <div class="summary-card">
+                    <dt>Global budget used</dt>
+                    <dd class="value">@Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd)</dd>
+                    <dd class="hint">@Fmt.Usd(s.Budget.GlobalSpendUsd) of @Fmt.UsdTotal(s.Budget.GlobalCapUsd)</dd>
+                    <dd>
+                        <span class="meter @MeterTone(s)" role="img" aria-label="@(Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " of the global cap used")">
+                            <span style="width:@(Fmt.PercentClamped(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd))%"></span>
+                        </span>
+                    </dd>
+                </div>
+            </dl>
+
+            <div class="ov-split">
                 <section class="panel" aria-labelledby="checks-h">
                     <div class="panel-head">
                         <h2 id="checks-h">Setup checks</h2>
@@ -60,97 +92,7 @@
                     </ul>
                 </section>
 
-                <section class="panel" aria-labelledby="ov-run-h">
-                    <div class="panel-head">
-                        <h2 id="ov-run-h">Run a request</h2>
-                        <a class="secondary" href="playground">Open the full Playground</a>
-                    </div>
-                    <RequestComposer Compact="true" IdPrefix="ov" />
-                    @if (Pg.Selected is { } run)
-                    {
-                        <div class="ov-result">
-                            <span class="secondary subtle">@run.Snapshot.Title</span>
-                            @if (run.Text.Length > 0)
-                            {
-                                <div class="ov-response" aria-label="Response text">@run.Text</div>
-                            }
-                            else if (run.InFlight)
-                            {
-                                <span role="status">Waiting for the response…</span>
-                            }
-                            <WebSourcesPanel Run="run" />
-                            <details class="tech" open="@(run.Text.Length == 0 && !run.InFlight)">
-                                <summary>Request outcome and cost</summary>
-                                <RunSummary Run="run" />
-                            </details>
-                            <TraceBar Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage" Compact="true" />
-                            <a class="secondary" href="playground">See the response and details in Playground</a>
-                        </div>
-                    }
-                </section>
-            </div>
-
-            <dl class="summary-grid">
-                <div class="summary-card">
-                    <dt>Served</dt>
-                    <dd class="value">@Fmt.Int(f.Allowed)</dd>
-                    <dd class="hint">@(f.CacheHits > 0 ? $"Including {Fmt.Int(f.CacheHits)} from cache" : "Allowed and answered")</dd>
-                </div>
-                <div class="summary-card">
-                    <dt>Refused or failed</dt>
-                    <dd class="value">@Fmt.Int(f.Denied)</dd>
-                    <dd class="hint">Each one is an audit entry</dd>
-                </div>
-                <div class="summary-card">
-                    <dt>Estimated provider charges</dt>
-                    <dd class="value">@Fmt.Usd(f.TotalCostUsd)</dd>
-                    <dd class="hint">Infrastructure excluded</dd>
-                </div>
-                <div class="summary-card">
-                    <dt>Global budget used</dt>
-                    <dd class="value">@Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd)</dd>
-                    <dd class="hint">@Fmt.Usd(s.Budget.GlobalSpendUsd) of @Fmt.UsdTotal(s.Budget.GlobalCapUsd)</dd>
-                    <dd>
-                        <span class="meter @MeterTone(s)" role="img" aria-label="@(Fmt.Percent(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd) + " of the global cap used")">
-                            <span style="width:@(Fmt.PercentClamped(s.Budget.GlobalSpendUsd, s.Budget.GlobalCapUsd))%"></span>
-                        </span>
-                    </dd>
-                </div>
-            </dl>
-
-            <div class="two-col">
-                <section class="panel flush" aria-labelledby="recent-h" style="flex:1.3 1 420px">
-                    <div class="panel-head">
-                        <h2 id="recent-h">Recent outcomes</h2>
-                        <a href="requests" class="secondary">All requests</a>
-                    </div>
-                    @if (f.Recent.Count == 0)
-                    {
-                        <p class="secondary muted pad">No requests recorded in this segment yet.</p>
-                    }
-                    else
-                    {
-                        <ul class="row-list">
-                            @foreach (var r in f.Recent.Take(6))
-                            {
-                                <li>
-                                    <span class="mono secondary subtle">@Fmt.UtcShort(r.T)</span>
-                                    <StatusPill Kind="@StatusPill.KindFor(r.Effect, null)" />
-                                    <span class="secondary muted row-main">
-                                        <span class="mono">@(r.Model ?? "no model")</span> · <span class="mono">@r.Team</span>
-                                        @if (!string.Equals(r.Effect, "Allow", StringComparison.OrdinalIgnoreCase) && r.Reason.Length > 0)
-                                        {
-                                            <span> · @r.Reason</span>
-                                        }
-                                    </span>
-                                    <a class="mono secondary" href="@("requests/" + Uri.EscapeDataString(r.Id))" aria-label="@("Open request " + r.Id)">Open</a>
-                                </li>
-                            }
-                        </ul>
-                    }
-                </section>
-
-                <section class="panel" aria-labelledby="act-h" style="flex:1 1 340px">
+                <section class="panel" aria-labelledby="act-h">
                     <div class="panel-head">
                         <h2 id="act-h">Activity</h2>
                         <span class="panel-sub">@ActivityWindow(f)</span>
@@ -197,6 +139,37 @@
                     }
                 </section>
             </div>
+
+            <section class="panel flush ov-recent" aria-labelledby="recent-h">
+                <div class="panel-head">
+                    <h2 id="recent-h">Recent outcomes</h2>
+                    <a href="requests" class="secondary">All requests</a>
+                </div>
+                @if (f.Recent.Count == 0)
+                {
+                    <p class="secondary muted pad">No requests recorded in this segment yet. <a href="playground">Open the Playground</a> to run one.</p>
+                }
+                else
+                {
+                    <ul class="row-list compact">
+                        @foreach (var r in f.Recent.Take(5))
+                        {
+                            <li>
+                                <span class="mono secondary subtle">@Fmt.UtcShort(r.T)</span>
+                                <StatusPill Kind="@StatusPill.KindFor(r.Effect, null)" />
+                                <span class="secondary muted row-main">
+                                    <span class="mono">@(r.Model ?? "no model")</span> · <span class="mono">@r.Team</span>
+                                    @if (!string.Equals(r.Effect, "Allow", StringComparison.OrdinalIgnoreCase) && r.Reason.Length > 0)
+                                    {
+                                        <span> · @r.Reason</span>
+                                    }
+                                </span>
+                                <a class="mono secondary" href="@("requests/" + Uri.EscapeDataString(r.Id))" aria-label="@("Open request " + r.Id)">Open</a>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
         }
     </RequiresConnection>
 </div>
@@ -213,7 +186,6 @@
     {
         State.Changed += OnChanged;
         Ws.Changed += OnChanged;
-        Pg.Changed += OnChanged;
         await Ws.EnsureLoadedAsync();
     }
 
@@ -292,15 +264,10 @@
         return pct >= 100 ? "bad" : pct >= 80 ? "warn" : "";
     }
 
-    /// <summary>Totals cover the current audit segment. Its start is the oldest activity bucket when there is any
-    /// (the Host's segment first_utc is not in /admin/status); otherwise we say so rather than guess.</summary>
+    /// <summary>Totals cover the current history (audit segment). No start time is shown: the status feed does not report the
+    /// segment's first record, and the activity chart's first bucket is only the chart window, not the segment start.</summary>
     private static string SegmentLabel(StatusReport s)
-    {
-        var oldest = s.FinOps.Activity.Count > 0 ? s.FinOps.Activity[0].T : (DateTimeOffset?)null;
-        return oldest is null
-            ? "Totals cover the current audit segment (no entries yet). Opening this page never resets accounting."
-            : "Totals cover the current audit segment since " + Fmt.Utc(oldest) + ". Opening this page never resets accounting.";
-    }
+        => "Request totals cover the current history. Global budget usage follows its configured period.";
 
     private static string ActivityWindow(FinOpsSummary f)
     {
@@ -322,6 +289,5 @@
     {
         State.Changed -= OnChanged;
         Ws.Changed -= OnChanged;
-        Pg.Changed -= OnChanged;
     }
 }

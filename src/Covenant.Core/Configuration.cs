@@ -150,9 +150,22 @@ public sealed record PolicyConfigV2
     /// <summary>LengthHeuristic only: chars/4 estimate above this takes the LAST target.</summary>
     public int ThresholdTokens { get; init; } = 400;
     public RetrySettings Retry { get; init; } = new();
-    // No sensitive-cloud escape hatch (ADR-0013): a policy covering PII/PHI that lists a cloud target is a
-    // validation error, and the engine never makes a cloud target eligible for PII/PHI.
+    // ADR-0013: a policy covering PII/PHI that lists a cloud target is a validation error, and the engine never makes a
+    // cloud target eligible for PII/PHI — with ONE exception (ADR-0016): a profile-scoped, PII-only policy carrying
+    // <see cref="Redaction"/> authorizes cloud targets for a Covenant-sanitized payload only.
     public string? Explanation { get; init; }
+    /// <summary>ADR-0016 opt-in sanitized-payload egress. Null (default, every pre-0016 version) = none. Valid only on a
+    /// policy whose classifications are exactly [Pii] and that names at least one profile.</summary>
+    public RedactionPolicy? Redaction { get; init; }
+}
+
+/// <summary>ADR-0016: a request routed by this policy must be a <c>covenant.record.v1</c> structured record. Types = the
+/// identifier fields it may carry (replaced by placeholders; ⊆ <see cref="RedactionTypes.Supported"/>); Tasks = the fixed
+/// task ids it may ask for (⊆ the schema's tasks). Arbitrary prose is never eligible. Not anonymisation.</summary>
+public sealed record RedactionPolicy
+{
+    public IReadOnlyList<string> Types { get; init; } = [];
+    public IReadOnlyList<string> Tasks { get; init; } = [];
 }
 
 public sealed record PolicyTarget

@@ -142,8 +142,19 @@ public sealed class PolicyDto
     [JsonPropertyName("strategy")] public string? Strategy { get; set; }
     [JsonPropertyName("threshold_tokens")] public int? ThresholdTokens { get; set; }
     [JsonPropertyName("retry")] public RetrySettingsDto? Retry { get; set; }
-    // No "allow sensitive cloud" switch: PII/PHI never route to cloud destinations (the Host enforces it).
+    // No "allow sensitive cloud" switch: PII/PHI never route to cloud destinations (the Host enforces it) — except the
+    // ADR-0016 sanitized structured-record route below, valid only on a profile-scoped PII-only policy.
     [JsonPropertyName("explanation")] public string? Explanation { get; set; }
+    /// <summary>ADR-0016 opt-in sanitized-payload contract; null = none. Round-tripped so a save never drops it.</summary>
+    [JsonPropertyName("redaction")] public RedactionPolicyDto? Redaction { get; set; }
+}
+
+public sealed class RedactionPolicyDto
+{
+    /// <summary>Identifier types: email | phone | us_ssn.</summary>
+    [JsonPropertyName("types")] public List<string> Types { get; set; } = [];
+    /// <summary>Fixed task ids of covenant.record.v1.</summary>
+    [JsonPropertyName("tasks")] public List<string> Tasks { get; set; } = [];
 }
 
 public sealed class PolicyTargetDto
@@ -437,6 +448,55 @@ public sealed class SimulateResponseDto
     [JsonPropertyName("fallbacks")] public List<string> Fallbacks { get; set; } = [];
     [JsonPropertyName("reason")] public string? Reason { get; set; }
     [JsonPropertyName("explanation")] public string? Explanation { get; set; }
+    /// <summary>ADR-0016: the sanitized payload that WOULD be sent, or why it is refused. Never authorization.</summary>
+    [JsonPropertyName("redaction")] public SimulatedRedactionDto? Redaction { get; set; }
+}
+
+public sealed class SimulatedRedactionDto
+{
+    /// <summary>applied | refused</summary>
+    [JsonPropertyName("outcome")] public string? Outcome { get; set; }
+    [JsonPropertyName("reason_code")] public string? ReasonCode { get; set; }
+    [JsonPropertyName("reason")] public string? Reason { get; set; }
+    [JsonPropertyName("messages")] public List<SimulatedMessageDto> Messages { get; set; } = [];
+    [JsonPropertyName("counts")] public Dictionary<string, int> Counts { get; set; } = [];
+    [JsonPropertyName("transformed_classification")] public string? TransformedClassification { get; set; }
+    [JsonPropertyName("schema")] public RecordSchemaDto? Schema { get; set; }
+}
+
+public sealed class SimulatedMessageDto
+{
+    [JsonPropertyName("role")] public string? Role { get; set; }
+    [JsonPropertyName("content")] public string? Content { get; set; }
+}
+
+/// <summary>GET /admin/redaction/schema (Host RecordSchemaView): the covenant.record.v1 contract.</summary>
+public sealed class RecordSchemaDto
+{
+    [JsonPropertyName("id")] public string? Id { get; set; }
+    [JsonPropertyName("max_chars")] public int MaxChars { get; set; }
+    [JsonPropertyName("fields")] public List<RecordFieldDto> Fields { get; set; } = [];
+    [JsonPropertyName("tasks")] public List<RecordTaskDto> Tasks { get; set; } = [];
+    [JsonPropertyName("policy_types")] public List<string>? PolicyTypes { get; set; }
+    [JsonPropertyName("policy_tasks")] public List<string>? PolicyTasks { get; set; }
+    [JsonPropertyName("example")] public string? Example { get; set; }
+    [JsonPropertyName("limits")] public string? Limits { get; set; }
+}
+
+public sealed class RecordFieldDto
+{
+    [JsonPropertyName("name")] public string? Name { get; set; }
+    /// <summary>identifier | enum | integer | decimal</summary>
+    [JsonPropertyName("kind")] public string? Kind { get; set; }
+    [JsonPropertyName("redaction_type")] public string? RedactionType { get; set; }
+    [JsonPropertyName("allowed")] public List<string>? Allowed { get; set; }
+    [JsonPropertyName("range")] public string? Range { get; set; }
+}
+
+public sealed class RecordTaskDto
+{
+    [JsonPropertyName("id")] public string? Id { get; set; }
+    [JsonPropertyName("instruction")] public string? Instruction { get; set; }
 }
 
 // ---- Budget drill-down and audit archive (ADR-0014, spec §5) ----
@@ -505,4 +565,90 @@ public sealed class ExportIntegrityDto
     [JsonPropertyName("anchor_configured")] public bool AnchorConfigured { get; set; }
     /// <summary>verified | unverified</summary>
     [JsonPropertyName("status")] public string Status { get; set; } = "";
+}
+
+// ---- Demo journey iteration: model catalog discovery (ADR-0017) ----
+
+/// <summary>POST /admin/connections/discover-models (Host DiscoverModelsRequest, snake_case).</summary>
+public sealed class DiscoverModelsRequestDto
+{
+    /// <summary>Anthropic | OpenAi</summary>
+    [JsonPropertyName("kind")] public string? Kind { get; set; }
+    /// <summary>A secret REFERENCE (e.g. Anthropic:ApiKey); never a value.</summary>
+    [JsonPropertyName("secret_ref")] public string? SecretRef { get; set; }
+}
+
+public sealed class DiscoverModelsResponseDto
+{
+    [JsonPropertyName("kind")] public string? Kind { get; set; }
+    [JsonPropertyName("endpoint")] public string? Endpoint { get; set; }
+    [JsonPropertyName("ok")] public bool Ok { get; set; }
+    [JsonPropertyName("code")] public string? Code { get; set; }
+    [JsonPropertyName("message")] public string? Message { get; set; }
+    [JsonPropertyName("models")] public List<DiscoveredModelDto> Models { get; set; } = [];
+    [JsonPropertyName("truncated")] public bool Truncated { get; set; }
+    [JsonPropertyName("note")] public string? Note { get; set; }
+}
+
+public sealed class DiscoveredModelDto
+{
+    [JsonPropertyName("id")] public string Id { get; set; } = "";
+    [JsonPropertyName("display_name")] public string? DisplayName { get; set; }
+    [JsonPropertyName("created_utc")] public DateTimeOffset? CreatedUtc { get; set; }
+    [JsonPropertyName("owned_by")] public string? OwnedBy { get; set; }
+}
+
+// ---- Usage (GET /admin/usage, Host UsageReport, snake_case) ----
+
+public sealed class UsageReportDto
+{
+    [JsonPropertyName("generated_utc")] public DateTimeOffset GeneratedUtc { get; set; }
+    [JsonPropertyName("from")] public DateTimeOffset From { get; set; }
+    [JsonPropertyName("to")] public DateTimeOffset To { get; set; }
+    [JsonPropertyName("group_by")] public string GroupBy { get; set; } = "team";
+    [JsonPropertyName("segment_id")] public string? SegmentId { get; set; }
+    [JsonPropertyName("segment_label")] public string? SegmentLabel { get; set; }
+    [JsonPropertyName("chain_valid")] public bool ChainValid { get; set; }
+    [JsonPropertyName("segment_first_utc")] public DateTimeOffset? SegmentFirstUtc { get; set; }
+    [JsonPropertyName("segment_last_utc")] public DateTimeOffset? SegmentLastUtc { get; set; }
+    [JsonPropertyName("scanned_records")] public int ScannedRecords { get; set; }
+    [JsonPropertyName("segment_bytes")] public long SegmentBytes { get; set; }
+    [JsonPropertyName("unknown_version_records")] public int UnknownVersionRecords { get; set; }
+    [JsonPropertyName("totals")] public UsageRowDto Totals { get; set; } = new();
+    [JsonPropertyName("groups")] public List<UsageRowDto> Groups { get; set; } = [];
+    [JsonPropertyName("limitations")] public List<string> Limitations { get; set; } = [];
+}
+
+public sealed class UsageRowDto
+{
+    [JsonPropertyName("key")] public string Key { get; set; } = "";
+    [JsonPropertyName("requests")] public int Requests { get; set; }
+    [JsonPropertyName("served")] public int Served { get; set; }
+    [JsonPropertyName("refused")] public int Refused { get; set; }
+    [JsonPropertyName("failed")] public int Failed { get; set; }
+    [JsonPropertyName("cancelled")] public int Cancelled { get; set; }
+    [JsonPropertyName("cache_hits")] public int CacheHits { get; set; }
+    [JsonPropertyName("local_calls")] public int LocalCalls { get; set; }
+    [JsonPropertyName("external_calls")] public int ExternalCalls { get; set; }
+    [JsonPropertyName("unknown_boundary_calls")] public int UnknownBoundaryCalls { get; set; }
+    [JsonPropertyName("external_retrievals")] public int ExternalRetrievals { get; set; }
+    [JsonPropertyName("sensitive_detected")] public int SensitiveDetected { get; set; }
+    [JsonPropertyName("sensitive_baseline")] public int SensitiveBaseline { get; set; }
+    [JsonPropertyName("redactions_applied")] public int RedactionsApplied { get; set; }
+    [JsonPropertyName("redactions_refused")] public int RedactionsRefused { get; set; }
+    [JsonPropertyName("input_tokens")] public long InputTokens { get; set; }
+    [JsonPropertyName("output_tokens")] public long OutputTokens { get; set; }
+    [JsonPropertyName("inference_charge_usd")] public decimal InferenceChargeUsd { get; set; }
+    [JsonPropertyName("search_charge_usd")] public decimal SearchChargeUsd { get; set; }
+    [JsonPropertyName("total_charge_usd")] public decimal TotalChargeUsd { get; set; }
+    [JsonPropertyName("estimated_charge_requests")] public int EstimatedChargeRequests { get; set; }
+    [JsonPropertyName("unknown_charge_requests")] public int UnknownChargeRequests { get; set; }
+    [JsonPropertyName("daily")] public List<UsageDayDto> Daily { get; set; } = [];
+}
+
+public sealed class UsageDayDto
+{
+    [JsonPropertyName("date")] public string Date { get; set; } = "";
+    [JsonPropertyName("requests")] public int Requests { get; set; }
+    [JsonPropertyName("charge_usd")] public decimal ChargeUsd { get; set; }
 }

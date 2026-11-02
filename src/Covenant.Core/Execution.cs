@@ -62,6 +62,9 @@ public static class TraceReasons
     /// <summary>Cache stage passed: looked up, no entry (the request continued to the provider).</summary>
     public const string CacheMiss = "cache_miss";
 
+    /// <summary>Classify stage: local sensitive-data inspection could not complete (ADR-0018) — refused, nothing sent.</summary>
+    public const string InspectionIncomplete = "inspection_incomplete";
+
     /// <summary>Default code of a denial when the denying stage did not name a finer one.</summary>
     public static string ForDenial(DenialKind kind) => kind switch
     {

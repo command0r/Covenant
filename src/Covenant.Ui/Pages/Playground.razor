@@ -33,7 +33,7 @@
                     <span class="indicator"><span class="dot warn" aria-hidden="true"></span>New provider calls paused</span>
                 }
                 <span class="grow"></span>
-                <span class="subtle secondary">Run as <span class="mono">@(Pg.Form.ApplicationId ?? "—")</span>@(Pg.Form.ProfileId is { } pp ? " · " + ComposerRules.ProfileLabel(Ws.Profiles, pp) : "")</span>
+                <span class="subtle secondary">Sent as <span class="mono">@(Pg.Form.ApplicationId ?? "—")</span>@(Pg.Form.ProfileId is { } pp ? " · " + ComposerRules.ProfileLabel(Ws.Profiles, pp) : "")</span>
                 <button type="button" class="btn sm" id="pg-present-exit" @onclick="ExitPresent">Exit presentation <span class="subtle">(Esc)</span></button>
             </header>
 
@@ -63,8 +63,11 @@
                         {
                             <span class="changed-flag">Previous result — the prompt has changed since. Run to update.</span>
                         }
-                        <WebSourcesPanel Run="prun" />
+                        @* Governance facts first, sources as one collapsed line: at 1280×720 only the answer text scrolls.
+                           The Actual route comes from this run's snapshot and record only (never the live form). *@
+                        <RouteDiagram Compact="true" View="@RouteSchemes.Actual(prun.Snapshot, prun.Evidence.Record, prun.InFlight, Ws.Applications, Ws.Connections, Ws.Profiles)" />
                         <RunSummary Run="prun" Large="true" />
+                        <WebSourcesPanel Run="prun" Compact="true" />
                     }
                     else
                     {
@@ -142,7 +145,10 @@ else
                             @ResponseBody(run)
                         </div>
                         <WebSourcesPanel Run="run" />
+                        @* Actual route: from THIS run's snapshot and audit record only (never the live form). *@
+                        <RouteDiagram View="@RouteSchemes.Actual(run.Snapshot, run.Evidence.Record, run.InFlight, Ws.Applications, Ws.Connections, Ws.Profiles)" />
                         <RunSummary Run="run" OnDetails="OpenDetails" DetailsButtonId="pg-details-open" />
+                        <EscalationPanel Run="run" />
                         <TraceWithReplay Trace="run.CurrentTrace" FeedState="run.TraceState" Message="@run.TraceMessage"
                                          Events="run.RecordedEvents" RequestKey="@run.Snapshot.ClientRequestId" Busy="@(run.InFlight || Pg.Running)" />
                     }

@@ -1,0 +1,173 @@
+@page "/usage"
+@inject AdminApi Api
+
+<PageTitle>Usage · Covenant</PageTitle>
+
+@*
+  Usage from recorded evidence (GET /admin/usage): requests, outcomes, charges split into inference and web search, local vs
+  external calls, cache hits, sensitive detections vs sensitive workloads, sanitization — grouped by team, application or
+  workload over a chosen window of ONE audit segment. Read-only; no prompt content; unknown charges are never shown as $0.
+*@
+
+<div class="page">
+    <RequiresConnection>
+        <div class="page-head">
+            <div class="titles">
+                <h1>Usage</h1>
+                <span class="lede">Who used what, where it ran and what it cost — aggregated from the audit record. Charges are estimates from reported usage × configured prices.</span>
+            </div>
+            <Button Busy="@_loading" BusyText="Loading…" OnClick="LoadAsync">Refresh</Button>
+        </div>
+
+        <section class="panel usage-controls" aria-label="Usage filters">
+            <div class="field">
+                <label for="usage-window">Time window</label>
+                <select id="usage-window" class="input" value="@_window" @onchange="OnWindow">
+                    @foreach (var (value, label) in UsagePresentation.Windows) { <option value="@value">@label</option> }
+                </select>
+            </div>
+            <div class="field">
+                <label for="usage-group">Group by</label>
+                <select id="usage-group" class="input" value="@_group" @onchange="OnGroup">
+                    @foreach (var (value, label) in UsagePresentation.Groups) { <option value="@value">@label</option> }
+                </select>
+            </div>
+            @if (_segments is { Count: > 1 } segs)
+            {
+                <div class="field">
+                    <label for="usage-seg">Audit segment</label>
+                    <select id="usage-seg" class="input" value="@(_segment ?? "")" @onchange="OnSegment">
+                        @foreach (var s in segs) { <option value="@(s.Current ? "" : s.Id)">@(s.Label + (s.Current ? " (current)" : ""))</option> }
+                    </select>
+                </div>
+            }
+        </section>
+
+        <ErrorBanner Title="Usage unavailable" Message="@_error" OnRetry="LoadAsync" Busy="@_loading" />
+
+        @if (_report is null && _loading)
+        {
+            <section class="panel"><Skeleton Lines="4" Label="Loading usage" /></section>
+        }
+        else if (_report is { } rep)
+        {
+            <section class="panel" aria-label="Totals">
+                <div class="usage-scope secondary">
+                    <span>@UsagePresentation.Window(rep)</span>
+                    <span>· segment @rep.SegmentLabel</span>
+                    <span>· @rep.ScannedRecords.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) records scanned</span>
+                    <span class="indicator"><span class="dot @(rep.ChainValid ? "ok" : "bad")" aria-hidden="true"></span>@(rep.ChainValid ? "audit chain intact" : "audit chain BROKEN — figures untrusted")</span>
+                </div>
+                <ul class="usage-kpis">
+                    <li><span class="kpi-label">Requests</span><span class="kpi-value">@rep.Totals.Requests.ToString("N0", System.Globalization.CultureInfo.InvariantCulture)</span><span class="kpi-sub">@UsagePresentation.Outcomes(rep.Totals)</span></li>
+                    <li><span class="kpi-label">Estimated charge</span><span class="kpi-value">@Money.Usd(rep.Totals.TotalChargeUsd)</span><span class="kpi-sub">@UsagePresentation.Split(rep.Totals)@(rep.Totals.UnknownChargeRequests > 0 ? " · " + rep.Totals.UnknownChargeRequests + " unknown" : "")</span></li>
+                    <li><span class="kpi-label">Calls</span><span class="kpi-value"><BoundaryTag Boundary="Local" /> @rep.Totals.LocalCalls · <BoundaryTag Boundary="Cloud" /> @rep.Totals.ExternalCalls</span><span class="kpi-sub">@rep.Totals.CacheHits cache hits · @rep.Totals.ExternalRetrievals web retrievals</span></li>
+                    <li><span class="kpi-label">Sensitive</span><span class="kpi-value">@rep.Totals.SensitiveDetected detected</span><span class="kpi-sub">@UsagePresentation.Sensitive(rep.Totals)</span></li>
+                </ul>
+            </section>
+
+            @if (rep.Groups.Count == 0)
+            {
+                <EmptyState Title="No requests in this window" Body="Choose a longer window, or run a request in the Playground." />
+            }
+            else
+            {
+                <section class="panel" aria-label="@("Usage by " + UsagePresentation.GroupLabel(rep.GroupBy))">
+                    <h2>By @UsagePresentation.GroupLabel(rep.GroupBy).ToLowerInvariant()</h2>
+                    <div class="table-scroll">
+                        <table class="usage-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">@UsagePresentation.GroupLabel(rep.GroupBy)</th>
+                                    <th scope="col">Requests</th>
+                                    <th scope="col">Charge (est.)</th>
+                                    <th scope="col">Calls</th>
+                                    <th scope="col">Sensitive</th>
+                                    <th scope="col">Trend</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var g in rep.Groups)
+                                {
+                                    <tr>
+                                        <th scope="row" class="mono">@g.Key</th>
+                                        <td>@g.Requests<span class="cell-sub">@UsagePresentation.Outcomes(g) · @g.CacheHits cache</span></td>
+                                        <td>@UsagePresentation.ChargeLine(g)<span class="cell-sub">@UsagePresentation.Split(g)</span></td>
+                                        <td>@UsagePresentation.Calls(g)</td>
+                                        <td>@UsagePresentation.Sensitive(g)</td>
+                                        <td>
+                                            @{ var trend = UsagePresentation.Trend(g); }
+                                            @if (trend.Count == 0)
+                                            {
+                                                <span class="subtle">—</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="trend" role="img" aria-label="@("Requests per day: " + string.Join(", ", trend.Select(t => t.Date + " " + t.Requests)))">
+                                                    @foreach (var t in trend) { <span class="trend-bar" style="height:@(Math.Max(6, t.Height))%" title="@(t.Date + ": " + t.Requests)"></span> }
+                                                </span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            }
+
+            <details class="panel tech">
+                <summary>What these numbers are — and are not</summary>
+                <ul class="plain-list secondary">
+                    @foreach (var l in rep.Limitations) { <li>@l</li> }
+                </ul>
+            </details>
+        }
+    </RequiresConnection>
+</div>
+
+@code {
+    private string _window = "24h";
+    private string _group = "team";
+    private string? _segment;
+    private bool _loading;
+    private string? _error;
+    private UsageReportDto? _report;
+    private List<AuditSegmentDto>? _segments;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadAsync();
+        try { _segments = await Api.GetSegmentsAsync(); } catch (Exception) { /* the selector is optional */ }
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            _report = await Api.GetUsageAsync(_window, _group, _segment);
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _error = "This Host does not expose GET /admin/usage yet.";
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private Task OnWindow(ChangeEventArgs e) { _window = e.Value?.ToString() ?? "24h"; return LoadAsync(); }
+    private Task OnGroup(ChangeEventArgs e) { _group = e.Value?.ToString() ?? "team"; return LoadAsync(); }
+    private Task OnSegment(ChangeEventArgs e) { _segment = e.Value?.ToString() is { Length: > 0 } s ? s : null; return LoadAsync(); }
+}

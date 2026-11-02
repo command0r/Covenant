@@ -11,7 +11,10 @@ public enum RouteMode { Policy, Catalog, Explicit }
 /// <see cref="RequestSnapshot"/> frozen from it.</summary>
 public sealed class PlaygroundForm
 {
-    public const int DefaultMaxTokens = 256;
+    /// <summary>Default output bound for a new request. Grounded answers (web sources) and reasoning models need room:
+    /// 1024 is the Host's default application cap, so the default never asks for more than a default application allows.
+    /// An explicit edit is kept; the Host still enforces min(request, application cap, model cap).</summary>
+    public const int DefaultMaxTokens = 1024;
     public const string DefaultWorkflow = "playground";
     public const string DefaultUseCase = "console-test";
 
@@ -19,6 +22,15 @@ public sealed class PlaygroundForm
     public char? Scenario { get; set; }
     /// <summary>Demo example the form was last filled from (<see cref="DemoExamples"/>), or null.</summary>
     public string? ExampleId { get; set; }
+    /// <summary>Application and workload the example was filled for: the example label holds only while both still match.</summary>
+    public string? ExampleApplicationId { get; set; }
+    public string? ExampleProfileId { get; set; }
+    /// <summary>The model pin the example itself set (e.g. the explicit external attempt of the blocked-sensitive example).
+    /// Cleared — back to "Let policy choose" — when the workload or application changes; a pin the operator chose stays,
+    /// with a visible warning.</summary>
+    public bool PinnedByExample { get; set; }
+    /// <summary>Requested model as the example set it (null = policy chooses) — part of "still the example".</summary>
+    public string? ExampleModelPin { get; set; }
     /// <summary>"Run as" application (GET /admin/applications id). The console never holds its credential.</summary>
     public string? ApplicationId { get; set; }
     /// <summary>Workload profile; only profiles granted to the application are selectable. Null = the server uses
@@ -61,6 +73,7 @@ public sealed class PlaygroundForm
             if (Mode == RouteMode.Explicit && Blank(ExplicitModel) is null) return "Enter a model id, or let policy choose.";
             if (MaxTokens is <= 0) return "Max output tokens must be a positive number (or empty for the application's bound).";
             if (WebSources != WebSourcesMode.Off && WebSourcesText.LocationProblem(Blank(Location)) is { } lp) return lp;
+            if (SearchIntent.MissingLocation(WebSources, Prompt, Location) is { } missing) return missing;
             return null;
         }
     }
@@ -70,6 +83,10 @@ public sealed class PlaygroundForm
     {
         Scenario = null;
         ExampleId = null;
+        ExampleApplicationId = null;
+        ExampleProfileId = null;
+        PinnedByExample = false;
+        ExampleModelPin = null;
         ApplicationId = null;
         ProfileId = null;
         Prompt = "";
@@ -200,6 +217,49 @@ public static class ComposerRules
             .Select(a => new ApplicationChoice(a, WhyNotSelectable(a) is null, WhyNotSelectable(a)))
             .ToList();
     }
+
+    /// <summary>Icon for a workload profile, from its configuration (never from prompt content): a coding workload →
+    /// "code"; a Public profile allowed to search → "globe"; any other Public profile → "pen"; Internal/PII/PHI → "shield".</summary>
+    public static string WorkloadIcon(WorkloadProfileDto? p)
+    {
+        if (p is null) return "shield";
+        if (p.Id.Contains("cod", StringComparison.OrdinalIgnoreCase) || (p.Name ?? "").Contains("cod", StringComparison.OrdinalIgnoreCase)) return "code";
+        if (string.Equals(p.Baseline, "Public", StringComparison.Ordinal)) return p.WebSearchAllowed ? "globe" : "pen";
+        return "shield";
+    }
+
+    /// <summary>Button text for a two-workload choice. When the two workloads have DIFFERENT baselines the baseline names
+    /// ("Public" / "Internal") are concise and unambiguous; the full workload name stays in the title and accessible name.
+    /// Otherwise the full names are used and wrap (never an illegible ellipsis).</summary>
+    public static IReadOnlyList<(string Text, string FullName, bool Short)> SegmentLabels(IReadOnlyList<WorkloadProfileDto?> two, IReadOnlyList<string> ids)
+    {
+        string Full(int i) => two[i]?.Name is { Length: > 0 } n ? n : ids[i];
+        bool distinct = two.Count == 2 && two[0] is not null && two[1] is not null
+                        && !string.Equals(two[0]!.Baseline, two[1]!.Baseline, StringComparison.Ordinal);
+        return Enumerable.Range(0, ids.Count)
+            .Select(i => distinct ? (PolicyText.ClassificationLabel(two[i]!.Baseline), Full(i), true) : (Full(i), Full(i), false))
+            .ToList();
+    }
+
+    /// <summary>How the workload choice is presented: none, a static label (one), a two-way segmented radio (exactly two),
+    /// or a selector (three or more — never collapsed into a fake binary).</summary>
+    public static WorkloadChoiceKind WorkloadChoice(int grantedCount) => grantedCount switch
+    {
+        0 => WorkloadChoiceKind.None,
+        1 => WorkloadChoiceKind.Single,
+        2 => WorkloadChoiceKind.Segmented,
+        _ => WorkloadChoiceKind.Select,
+    };
+
+    /// <summary>Arrow-key movement in a radio group (wraps), as in the WAI-ARIA radio pattern.</summary>
+    public static int NextIndex(int current, int count, string key) => count <= 0 ? -1 : key switch
+    {
+        "ArrowRight" or "ArrowDown" => (current + 1 + count) % count,
+        "ArrowLeft" or "ArrowUp" => (current - 1 + count) % count,
+        "Home" => 0,
+        "End" => count - 1,
+        _ => current,
+    };
 
     /// <summary>"Support portal", or the id when no display name is configured.</summary>
     public static string ApplicationName(ApplicationSummaryDto app) => string.IsNullOrWhiteSpace(app.DisplayName) ? app.Id : app.DisplayName.Trim();
@@ -352,3 +412,5 @@ public static class ComposerRules
         _ => null,
     };
 }
+
+public enum WorkloadChoiceKind { None, Single, Segmented, Select }

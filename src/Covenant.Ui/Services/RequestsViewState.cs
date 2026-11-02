@@ -23,6 +23,8 @@ public sealed class RequestsViewState : IDisposable
     /// <summary>Cursor paging of the selected segment (Logic/RequestPaging): requested segment, the Host's segment
     /// descriptor, next_cursor and the 410 cursor_expired state.</summary>
     public RequestPaging Paging { get; } = new();
+    /// <summary>Visible pagination of the loaded records (size 10/25/50/100, default 25); survives navigation.</summary>
+    public RequestPager Pager { get; } = new();
     /// <summary>Segment id requested (null = current segment).</summary>
     public string? SegmentId => Paging.RequestedSegmentId;
     /// <summary>The Host's descriptor of the loaded pages (never inferred from a row).</summary>
@@ -45,8 +47,23 @@ public sealed class RequestsViewState : IDisposable
     public void ResetPages(string? segmentId)
     {
         Paging.Reset(segmentId);
+        Pager.Reset();
         Items.Clear();
         LoadedUtc = null;
+    }
+
+    /// <summary>Audit entry count of the status feed when the list was last refreshed (new entries ⇒ refresh the newest page).</summary>
+    public int? SeenAuditEntries { get; set; }
+
+    /// <summary>Records added on top by the last refresh (shown as "N new").</summary>
+    public int LastMergedCount { get; set; }
+
+    /// <summary>Merges a freshly fetched NEWEST page on top of what is loaded: unseen records are inserted at the top in
+    /// the page's newest-first order; loaded older pages, the older-page cursor, filters and selection are kept.</summary>
+    public int MergeNewest(IEnumerable<AuditEntryView> newestFirst)
+    {
+        LastMergedCount = RequestList.MergeNewest(Items, newestFirst, MaxLoaded);
+        return LastMergedCount;
     }
 
     /// <summary>Appends a page, de-duplicating by id (defensive: stable cursors never overlap).</summary>

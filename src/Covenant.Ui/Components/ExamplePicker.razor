@@ -1,6 +1,7 @@
 @inject PlaygroundState Pg
 @inject WorkspaceConfig Ws
 @inject Interop Interop
+@implements IDisposable
 
 @* Demo examples as a COMPACT selector (browser review: seven open cards buried the prompt at 1280×720). One row: pick an
    example by title (readiness in the option text), then "Use example" fills the composer and moves focus to the filled
@@ -8,13 +9,41 @@
    prerequisites (with links) are behind "Details". Nothing runs and nothing changes configuration. *@
 
 <div class="examples">
+    @if (Pg.Examples.Count == 0)
+    {
+        <span class="secondary muted example-empty">@EmptyText</span>
+    }
+    else
+    {
+    var groups = ExampleRecommendations.Split(Pg.Examples);
+    // Expansion is the operator's choice only (collapsible at any time). A selected example from "More" stays selectable
+    // as a single option while collapsed, so the select keeps its value and the summary below stays intact.
+    bool showMore = _showMore && _expandedFor == Pg.Form.ApplicationId;
+    var pinned = !showMore && Selected is { } cur && groups.More.Contains(cur) ? cur : null;
     <div class="example-bar">
         <label for="@(IdPrefix + "-ex")" class="field-label">Example</label>
         <select id="@(IdPrefix + "-ex")" class="input" value="@(_selected ?? "")" @onchange="OnSelect" disabled="@Pg.Running">
             <option value="">Write your own, or choose an example…</option>
-            @foreach (var r in Pg.Examples)
+            <optgroup label="Recommended for this application">
+                @foreach (var r in groups.Recommended)
+                {
+                    <option value="@r.Example.Id">@(r.Title + (r.Ready ? "" : " — needs setup"))</option>
+                }
+            </optgroup>
+            @if (pinned is { } pin)
             {
-                <option value="@r.Example.Id">@(r.Example.Title + (r.Ready ? "" : " — needs setup"))</option>
+                <optgroup label="Selected (from More examples)">
+                    <option value="@pin.Example.Id">@(pin.Title + (pin.Ready ? "" : " — needs setup"))</option>
+                </optgroup>
+            }
+            @if (showMore && groups.More.Count > 0)
+            {
+                <optgroup label="More examples (diagnostics)">
+                    @foreach (var r in groups.More)
+                    {
+                        <option value="@r.Example.Id">@(r.Title + (r.Ready ? "" : " — needs setup"))</option>
+                    }
+                </optgroup>
             }
         </select>
         @if (Selected is { } sel)
@@ -23,11 +52,38 @@
                 @(IsActive(sel) ? "Fill again" : "Use example")
             </button>
         }
+        @if (groups.More.Count > 0)
+        {
+            <button type="button" class="btn ghost sm" aria-expanded="@(showMore ? "true" : "false")" @onclick="() => ToggleMore(showMore)">
+                @(showMore ? "Fewer examples" : "More examples (" + groups.More.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + ")")
+            </button>
+        }
     </div>
-    @if (Selected is { } s)
+    }
+    @if (Selected is { } s && (!Compact || !s.Ready))
     {
         <div class="example-summary">
-            <span class="secondary">@(s.Ready ? "Expect: " + s.Example.Expected : "Needs setup: " + (s.Missing.FirstOrDefault()?.Text ?? "prerequisites missing."))</span>
+            @{ bool modified = s.Ready && string.Equals(Pg.Form.ExampleId, s.Example.Id, StringComparison.Ordinal) && !DemoExamples.StillMatches(s.Example, Pg.Form); }
+            @if (modified)
+            {
+                <span class="note warn" role="status">Modified since the example was applied — its expected outcome no longer applies. Use “Fill again” to restore it.</span>
+            }
+            else if (s.Ready && !IsActive(s) && DemoExamples.ChangesFor(s, Pg.Form) is { Count: > 0 } changes)
+            {
+                <span class="secondary example-changes">Use example will set: @string.Join(" · ", changes)</span>
+            }
+            @if (modified)
+            {
+                @* No stale expected-outcome claim for an edited form. *@
+            }
+            else if (s.Ready && s.Steps is { } steps)
+            {
+                <span class="secondary example-steps">@steps</span>
+            }
+            else
+            {
+                <span class="secondary">@(s.Ready ? "Expect: " + s.Example.Expected : "Needs setup: " + (s.Missing.FirstOrDefault()?.Text ?? "prerequisites missing."))</span>
+            }
             <details class="tech">
                 <summary>Details</summary>
                 <span class="secondary">@s.Example.Teaches</span>
@@ -35,7 +91,7 @@
                 {
                     <dl class="facts compact">
                         <dt>Runs as</dt><dd>@AppName(s.ApplicationId) · workload @ProfileName(s.ProfileId)</dd>
-                        <dt>Route now</dt><dd class="mono wrap-any">@s.ConfiguredRoute</dd>
+                        <dt>@(IsActive(s) ? "Configured route" : "Proposed route (not applied)")</dt><dd class="mono wrap-any">@s.ConfiguredRoute <span class="subtle">— from configuration, not a preview; the Expected route above is the server's answer.</span></dd>
                         <dt>Pays</dt><dd>@s.Payer</dd>
                         <dt>Observe</dt><dd>@s.Example.Observe</dd>
                     </dl>
@@ -61,11 +117,64 @@
 @code {
     /// <summary>Element-id prefix of the composer (the prompt is "&lt;prefix&gt;-prompt").</summary>
     [Parameter] public string IdPrefix { get; set; } = "cmp";
+    /// <summary>Overview: the selector row only (the expectation and details live in the Playground), unless it needs setup.</summary>
+    [Parameter] public bool Compact { get; set; }
 
     private string? _selected;
+    private bool _showMore;
+    /// <summary>Application the expansion was made for: another application starts recommended-only.</summary>
+    private string? _expandedFor;
 
+    private void ToggleMore(bool currentlyShown)
+    {
+        _showMore = !currentlyShown;
+        _expandedFor = Pg.Form.ApplicationId;
+    }
+
+    /// <summary>Only an example listed for the CURRENT application can be selected; a selection made under another
+    /// application simply disappears (the list is per application).</summary>
     private ExampleResolution? Selected
         => (_selected ?? Pg.Form.ExampleId) is { Length: > 0 } id ? Pg.Examples.FirstOrDefault(e => e.Example.Id == id) : null;
+
+    private string? _forApp;
+
+    protected override void OnInitialized()
+    {
+        Pg.Changed += OnChanged;
+        Ws.Changed += OnChanged;
+    }
+
+    private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    public void Dispose()
+    {
+        Pg.Changed -= OnChanged;
+        Ws.Changed -= OnChanged;
+    }
+
+    protected override void OnParametersSet() => ResetOnApplicationChange();
+
+    protected override void OnAfterRender(bool firstRender) => ResetOnApplicationChange();
+
+    private void ResetOnApplicationChange()
+    {
+        // Keyed by application AND workload: switching either drops a selection that no longer describes the form.
+        var key = Pg.Form.ApplicationId + "\u001f" + Pg.Form.ProfileId;
+        if (string.Equals(_forApp, key, StringComparison.Ordinal)) return;
+        bool first = _forApp is null;
+        _forApp = key;
+        if (!first && _selected is { } id && !(Pg.Form.ExampleId == id)) { _selected = null; StateHasChanged(); }
+    }
+
+    private string EmptyText
+    {
+        get
+        {
+            if (ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId) is not { } app) return "Choose an application to see its examples.";
+            var workloads = ComposerRules.GrantedProfiles(app).Select(id => ComposerRules.Profile(Ws.Profiles, id) is { } p ? (p.Name ?? p.Id) + " (" + p.Baseline + ")" : id).ToList();
+            return "No examples fit " + ComposerRules.ApplicationName(app) + ". Its workloads: " + (workloads.Count == 0 ? "none granted" : string.Join(", ", workloads)) + ".";
+        }
+    }
 
     private bool IsActive(ExampleResolution r)
         => string.Equals(Pg.Form.ExampleId, r.Example.Id, StringComparison.Ordinal) && DemoExamples.StillMatches(r.Example, Pg.Form);

@@ -485,11 +485,17 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .present-prompt textarea { flex: 1 1 auto; min-height: 120px; font-size: var(--text-facts-present); resize: none; }
 .present-prompt .action-bar { border-top: 0; padding-top: 0; }
 .present-prompt .btn { font-size: 18px; min-height: 48px; }
-.present-response .response { flex: 1 1 auto; max-height: none; min-height: 100px; font-size: 19px; }
+/* Only the answer text gives way: it takes the space left over (basis 0) and scrolls; outcome, governance facts and the
+   collapsed Sources line keep their size. The section scrolls only as a last resort, so nothing is ever clipped. */
+.present-response { overflow-y: auto; }
+.present-response .response { flex: 1 1 0; max-height: none; min-height: 72px; font-size: 19px; }
+.present-response > :not(.response) { flex: 0 0 auto; }
 .present-response .outcome { font-size: 30px; }
 .present-response .run-facts { font-size: 14px; }
-.present-response .presentation-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 16px; }
+.present-response .presentation-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 16px; }
 .present-response .run-summary { flex: 0 0 auto; }
+.present-response .web-sources-compact > summary { min-height: 28px; }
+.present-response .web-sources-body { display: flex; flex-direction: column; gap: 6px; max-height: 9.5em; overflow-y: auto; }
 .present-trace .trace-name { font-size: 15px; }
 .present-trace .trace-meta, .present-trace .trace-dur { font-size: 13px; }
 
@@ -538,7 +544,8 @@ details.tech[open] > summary { margin-bottom: 6px; }
 @media (max-width: 1100px) {
   .pg-panes, .ov-top { grid-template-columns: minmax(0, 1fr); }
   .present-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto auto; grid-template-areas: "prompt" "response" "trace"; }
-  .present-response .response { max-height: 60vh; }
+  .present-response { overflow-y: visible; }
+  .present-response .response { flex: 0 0 auto; max-height: 60vh; }
 }
 @media (max-width: 640px) {
   .composer-grid, .composer-grid.three { grid-template-columns: minmax(0, 1fr); }
@@ -609,7 +616,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .price-grid { flex-basis: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 12px; align-items: end; }
 .problem-list li { color: var(--amber); }
 
-.conn-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 520px), 1fr)); gap: 12px; }
+.conn-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 12px; align-items: start; }
 .conn-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .conn-card.disabled { opacity: .8; border-style: dashed; }
 .conn-head, .policy-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
@@ -645,7 +652,7 @@ details.tech[open] > summary { margin-bottom: 6px; }
 .state-text.s-skipped { color: var(--muted); }
 
 .budget-table td { vertical-align: top; }
-.budget-table td:last-child { width: 100px; min-width: 100px; }
+.budget-table td.row-actions { width: 1%; white-space: nowrap; }
 .budget-table .btn { white-space: nowrap; }
 .budget-table .meter { margin-top: 6px; min-width: 80px; }
 .budget-edit-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -716,5 +723,215 @@ details[open] > summary::before { transform: rotate(45deg); }
 .route-result { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: var(--radius-inner); background: var(--surface2); overflow-wrap: anywhere; }
 .route-result.refused { border-left-color: var(--amber); }
 .route-result.stale { opacity: .7; border-style: dashed; }
+.route-result.changed { border-style: dashed; border-left-style: solid; border-left-color: var(--muted); }
 .workload-route { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 4px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-inner); background: var(--bg); }
 .inline-list > li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+
+/* Workload selector: two equal segments that fill the field and never overflow; long names ellipsize (title has full). */
+.seg.workload-seg { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); width: 100%; }
+.seg.workload-seg button { min-width: 0; }
+.seg.workload-seg .seg-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workload-single { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.example-empty { padding: 4px 0; }
+.seg.workload-seg .seg-text.wrap { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.25; }
+.seg.workload-seg button { height: auto; }
+
+/* Composer: approved destination of the selected workload (classification is not destination). */
+.destination-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: var(--text-secondary); min-width: 0; }
+
+/* Requests: the active filters are always visible, with a count and Clear. */
+.active-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 10px; border: 1px solid var(--accent); border-radius: var(--radius-control); background: var(--blue-bg); }
+.chip { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); font-size: var(--text-secondary); }
+
+/* Focused edit dialogs (EditDialog → Drawer): body scrolls, the action footer stays visible. */
+.drawer-body { flex: 1 1 auto; min-height: 0; }
+.dialog-box { max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
+.drawer-footer { flex: 0 0 auto; display: flex; flex-direction: column; gap: 10px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface); }
+.dialog-actions { justify-content: flex-start; }
+.dialog-section { display: flex; flex-direction: column; gap: 8px; }
+.dialog-section + .dialog-section { border-top: 1px solid var(--border); padding-top: 12px; }
+.dialog-section > h3 { font-size: var(--text-secondary); color: var(--muted); font-weight: 600; }
+
+/* Policies: tabbed views and route rows with per-item actions. */
+.view-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); }
+.view-tabs button { border: 0; border-bottom: 2px solid transparent; background: none; color: var(--muted); font: inherit; font-weight: 500; padding: 10px 16px; min-height: var(--target-min); cursor: pointer; }
+.view-tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
+.entity-list { list-style: none; margin: 0; padding: 0; }
+/* Scoped row layout with its OWN area names (the legacy .route-row classes carry grid-areas that must not leak here).
+   Default (≤ 1599 px): identity · state · actions on the first line, the route path on a full-width second line. */
+.entity-row {
+  display: grid; align-items: center; gap: 8px 14px; padding: 12px 18px; border-bottom: 1px solid var(--border);
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-areas: "ent-id ent-state ent-actions" "ent-path ent-path ent-path";
+}
+.entity-row:last-child { border-bottom: 0; }
+.entity-row > .entity-main { grid-area: ent-id; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.entity-row > .entity-path { grid-area: ent-path; display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.entity-row > .entity-state { grid-area: ent-state; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; justify-content: flex-end; }
+.entity-row > .entity-actions { grid-area: ent-actions; display: flex; flex-wrap: nowrap; gap: 6px; justify-content: flex-end; }
+.entity-row > .entity-actions .btn { flex: 0 0 auto; min-width: max-content; white-space: nowrap; }
+.entity-arrow { color: var(--subtle); line-height: 28px; flex: 0 0 auto; }
+.entity-targets { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.entity-row.simple { grid-template-areas: "ent-id ent-state ent-actions"; }
+/* Wide desktop: one line per route. */
+@media (min-width: 1600px) {
+  .entity-row:not(.simple) { grid-template-columns: minmax(220px, 1fr) minmax(0, 2.4fr) auto auto; grid-template-areas: "ent-id ent-path ent-state ent-actions"; }
+}
+@media (max-width: 700px) {
+  .entity-row, .entity-row.simple { grid-template-columns: minmax(0, 1fr); grid-template-areas: "ent-id" "ent-path" "ent-state" "ent-actions"; }
+  .entity-row > .entity-state, .entity-row > .entity-actions { justify-content: flex-start; }
+}
+
+/* Trace: proportional share of measured processing time; the longest stage gets an accent ring, its state colour kept. */
+.trace-chip { grid-template-rows: auto auto auto auto; }
+.trace-share { grid-column: 1 / -1; display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: var(--surface2); overflow: hidden; }
+.trace-share > span { display: block; height: 3px; background: var(--muted); border-radius: 2px; }
+.trace-step.longest .trace-chip { box-shadow: 0 0 0 2px var(--accent) inset; }
+.trace-step.longest .trace-share > span { background: var(--accent); }
+.trace-longest { color: var(--muted); }
+
+/* Models: configured / credential / tested as three aligned, separate facts. */
+.fact-trio { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px 12px; }
+.fact-trio li { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-rows: auto auto; column-gap: 6px; align-items: center; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius-control); background: var(--bg); min-width: 0; }
+.fact-trio .dot { grid-row: 1 / span 2; align-self: center; }
+.fact-label { font-size: 12px; color: var(--muted); }
+.fact-value { font-size: var(--text-secondary); overflow-wrap: anywhere; }
+@media (max-width: 700px) { .fact-trio { grid-template-columns: minmax(0, 1fr); } }
+/* Permitted model rows: id, price and the route action on one baseline; wraps cleanly when narrow. */
+.inline-list > li { align-items: baseline; }
+.inline-list > li .workload-route { flex-basis: 100%; }
+/* Overview: one concise full-width route line (details in the title and the Playground). */
+.destination-line.compact { flex-wrap: nowrap; white-space: nowrap; overflow: hidden; }
+.destination-line.compact > .ellipsis { min-width: 0; }
+
+/* ---- Connection cards: compact by default (two providers side by side at 1280×720). ---- */
+.conn-card { gap: 8px; padding: 12px 14px; }
+.conn-actions { margin-left: auto; flex-wrap: nowrap; }
+.fact-trio.compact { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.fact-trio.compact li { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; background: none; min-width: 0; }
+.fact-trio.compact .dot { grid-row: auto; }
+.fact-trio.compact .fact-label::after { content: ":"; }
+.fact-trio.compact .fact-label { font-size: var(--text-secondary); }
+/* One row per model: description shrinks with an ellipsis; the action sits in its own right-aligned column and never
+   wraps under a long price. An opened "Route a workload here" form spans the full row. */
+.conn-models { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+.conn-models > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 10px; min-height: 36px; border-bottom: 1px solid var(--border); }
+.conn-model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-secondary); }
+.conn-model-action { justify-self: end; display: contents; }
+.conn-model-action > .btn { justify-self: end; white-space: nowrap; }
+.conn-model-action > .workload-route { grid-column: 1 / -1; }
+.conn-details > summary { min-height: 28px; }
+
+/* ---- Connection editor: provider model listing (ADR-0017) ---- */
+.discover-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.discover-row select { flex: 1 1 260px; min-width: 0; }
+
+/* ---- Usage ---- */
+.usage-controls { display: flex; flex-direction: row; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
+.usage-controls .field { flex: 0 1 220px; }
+.usage-scope { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-bottom: 10px; }
+.usage-kpis { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.usage-kpis li { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-inner); background: var(--bg); min-width: 0; }
+.kpi-label { font-size: 12px; color: var(--muted); }
+.kpi-value { font-size: 20px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.kpi-sub, .cell-sub { display: block; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.usage-table { width: 100%; min-width: 860px; }
+.usage-table th, .usage-table td { padding: 8px 10px; vertical-align: top; font-size: var(--text-secondary); text-align: left; }
+.usage-table tbody tr { border-top: 1px solid var(--border); }
+.trend { display: inline-flex; align-items: flex-end; gap: 2px; height: 28px; min-width: 40px; }
+.trend-bar { display: inline-block; width: 5px; background: var(--accent); border-radius: 1px; opacity: .8; }
+
+/* ---- InfoTip: one-line concept explanations ---- */
+.infotip { display: inline-block; position: relative; vertical-align: middle; margin-left: 4px; }
+.infotip > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; color: var(--accent); }
+.infotip > summary::-webkit-details-marker { display: none; }
+.infotip > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.infotip-panel { position: absolute; z-index: 30; top: 26px; left: -8px; width: min(320px, 80vw); padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-inner); box-shadow: 0 6px 20px rgba(0,0,0,.18); font-size: var(--text-secondary); font-weight: 400; color: var(--text); line-height: 1.4; }
+.label-row { display: inline-flex; align-items: center; gap: 2px; }
+.owner-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; margin-top: 2px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface2); font-size: 12px; line-height: 20px; white-space: nowrap; }
+.chip.owner { border-color: var(--accent); color: var(--text); }
+
+/* ---- Journey chips (semantic: local teal, external purple, sensitive red, refused amber) ---- */
+.journey-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.jchip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: 12.5px; line-height: 20px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); max-width: 100%; }
+.jchip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jchip.ok { color: var(--green); border-color: transparent; background: var(--green-bg, var(--surface2)); }
+.jchip.local { color: var(--local); background: var(--local-bg); border-color: transparent; }
+.jchip.external { color: var(--cloud); background: var(--cloud-bg); border-color: transparent; }
+.jchip.sensitive { color: var(--red); background: var(--red-bg); border-color: transparent; font-weight: 600; }
+.jchip.refused { color: var(--amber); background: var(--amber-bg); border-color: transparent; }
+.escalation { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding-top: 6px; border-top: 1px dashed var(--border); }
+
+/* ---- ADR-0016 sanitized payload preview ---- */
+.sanitized { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding: 10px 12px; border-radius: var(--radius-inner); border: 1px solid var(--cloud); background: var(--cloud-bg); }
+.sanitized.refused { border-color: var(--red); background: var(--red-bg); }
+.sanitized strong { display: inline-flex; align-items: center; gap: 6px; }
+.sanitized-messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.sanitized-messages pre { margin: 2px 0 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-control); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; max-height: 220px; overflow: auto; }
+
+/* ---- Overview layout: totals, then checks (left) | activity (right), then recent outcomes full width ---- */
+.ov-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.ov-split > section { min-width: 0; }
+@media (max-width: 1100px) { .ov-split { grid-template-columns: minmax(0, 1fr); } }
+.row-list.compact li { padding: 7px 18px; }
+/* Setup checks: dot, label, status and action share ONE baseline (first line); the id sits secondary below the status. */
+.check { align-items: start; line-height: 20px; }
+.check > .dot { align-self: start; margin-top: 6px; }
+.check-name, .check-status { line-height: 20px; }
+.check-id { line-height: 16px; margin-top: 1px; }
+.check-action { align-self: start; }
+.check .btn.sm.check-action { margin-top: -6px; }
+
+/* ---- Requests pager ---- */
+.pager { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; border-top: 1px solid var(--border); }
+.pager-size { width: auto; min-width: 72px; }
+.request-history-tech { font-size: var(--text-secondary); }
+
+/* ---- Budgets: compact scope cell and collapsible accounting ---- */
+div.budget-scope { display: flex; flex-direction: column; gap: 2px; min-width: 180px; }   /* flex on the inner div; the td stays a table cell */
+.budget-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.budget-period > span, .budget-state > span:not(.indicator) { display: block; white-space: nowrap; }
+.budget-state > .indicator { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.budget-actions { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; }
+.budget-actions .btn { margin-right: 0; }
+/* ≤1400px (e.g. 1280×720, ~1004px content): stack the two actions so the table fits without horizontal overflow; the td stays a table cell. */
+@media (max-width: 1400px) { .budget-actions { flex-direction: column; align-items: stretch; gap: 6px; } .budget-table th, .budget-table td { padding-left: 10px; padding-right: 10px; } }
+.budget-scope .jchip { align-self: flex-start; }
+.budget-accounting { padding: 10px 16px; }
+.budget-accounting ul { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+
+/* ---- Route scheme: Sender → Covenant → Destination (local teal, external purple, sanitized amber, blocked red) ---- */
+.route-scheme { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.route-scheme-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: var(--text-secondary); }
+.route-scheme-kind { font-weight: 600; }
+.route-boxes { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1.1fr) auto minmax(0, 1.2fr); align-items: stretch; gap: 6px; }
+.route-box { min-width: 0; display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border: 1px solid var(--border); border-left-width: 4px; border-radius: var(--radius-inner); background: var(--surface2); font-size: var(--text-secondary); }
+.route-box-title { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.route-box-line { font-weight: 600; overflow-wrap: anywhere; }
+.route-box-sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Scoped: the legacy .route-arrow (Policies route rows) carries grid-area: arrow and is hidden ≤640px; neither may leak here. */
+.route-boxes > .route-arrow { grid-area: auto; display: block; align-self: center; color: var(--muted); font-size: 18px; }
+/* Compact (presentation mode, 1280×720): tight padding; Sender/Covenant secondary lines hidden (tooltip keeps them). The
+   Destination's secondary line stays: it carries "contacted earlier" / "a web search was made before the refusal". */
+.route-scheme.compact { gap: 4px; }
+.route-scheme.compact .route-scheme-head { font-size: 13px; }
+.route-scheme.compact .route-box { padding: 4px 8px; gap: 0; font-size: 15px; }
+.route-scheme.compact .route-box-line { overflow-wrap: anywhere; }
+.route-scheme.compact .route-box:not(:last-child) .route-box-sub { display: none; }
+.route-scheme.compact .route-badges .jchip { font-size: 13px; }
+.route-box.local { border-left-color: var(--local); background: var(--local-bg); }
+.route-box.external { border-left-color: var(--cloud); background: var(--cloud-bg); }
+.route-box.sanitized { border-left-color: var(--amber); background: var(--amber-bg); }
+.route-box.blocked { border-left-color: var(--red); background: var(--red-bg); }
+.route-box.cache { border-left-color: var(--accent); }
+.route-box.pending { border-style: dashed; border-left-style: solid; color: var(--muted); }
+.route-scheme.stale .route-box, .route-scheme.none .route-box.pending { opacity: .85; }
+.route-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+@media (max-width: 700px) {
+  .route-boxes { grid-template-columns: minmax(0, 1fr); }
+  .route-boxes > .route-arrow { transform: rotate(90deg); justify-self: start; margin-left: 12px; }
+}
+/* Overview: Setup checks and Activity equal height on desktop; natural stacking on narrow screens. */
+.ov-split { align-items: stretch; }
+.ov-split > section { display: flex; flex-direction: column; }

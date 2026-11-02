@@ -14,7 +14,8 @@
             var s = step;
             var key = StateKey(s.State);
             var open = _open == s.Stage;
-            <li class="trace-step s-@key @(open ? "open" : "")">
+            var share = TraceModel.Share(Trace, s);
+            <li class="trace-step s-@key @(open ? "open" : "") @(s.Stage == _longest ? "longest" : "")">
                 <button type="button" class="trace-chip" aria-expanded="@(open ? "true" : "false")" aria-controls="@(_id + "-pop")"
                         title="@ChipTitle(s)" @onclick="() => Toggle(s.Stage)">
                     <Icon Name="@IconFor(s.State)" Size="16" />
@@ -23,6 +24,11 @@
                     @if (Duration(s) is { } dur)
                     {
                         <span class="trace-dur">@dur</span>
+                    }
+                    @if (share is { } sh)
+                    {
+                        @* Proportional bar: share of measured processing time (state colour unchanged). *@
+                        <span class="trace-share" aria-hidden="true"><span style="width:@(Math.Max(2, Math.Round(sh * 100)).ToString(System.Globalization.CultureInfo.InvariantCulture))%"></span></span>
                     }
                 </button>
             </li>
@@ -72,6 +78,10 @@
         </div>
     }
 
+    @if (Trace.Complete && TraceModel.LongestText(Trace) is { } lt)
+    {
+        <span class="trace-source trace-longest">@lt</span>
+    }
     <span class="trace-source">@SourceText</span>
 </div>
 
@@ -84,6 +94,9 @@
     [Parameter] public bool Replaying { get; set; }
 
     private readonly string _id = "trace-" + Guid.NewGuid().ToString("n")[..8];
+    private string? _longest;
+
+    protected override void OnParametersSet() => _longest = Trace.Complete ? TraceModel.LongestStage(Trace) : null;
     private string? _open;
 
     private void Toggle(string stage) => _open = _open == stage ? null : stage;

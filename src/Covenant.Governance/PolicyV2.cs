@@ -29,6 +29,11 @@ public static class PolicyEngineV2
     /// an unknown or disabled connection is never eligible (legacy-cloud included), and PII/PHI never reach a
     /// cloud destination (no escape hatch; validation also refuses such a policy).</summary>
     public static string? Ineligibility(IRequestConfiguration cfg, PolicyTarget target, DataClassification classification)
+        => Ineligibility(cfg, target, classification, sanitizedPayload: false);
+
+    /// <summary><paramref name="sanitizedPayload"/> (ADR-0016): the matched policy carries a redaction contract, so a cloud
+    /// target is eligible for PII — ONLY PII, never PHI — for the payload the redact stage builds and verifies.</summary>
+    public static string? Ineligibility(IRequestConfiguration cfg, PolicyTarget target, DataClassification classification, bool sanitizedPayload)
     {
         if (target.Paused) return "route paused";
         var connection = cfg.FindConnection(target.ConnectionId);
@@ -40,7 +45,7 @@ public static class PolicyEngineV2
         if (connection.Boundary == Boundary.Cloud)
         {
             if (cfg.Config.Mode == ProviderMode.LocalOnly) return "cloud destination excluded in local-only mode";
-            if (classification >= DataClassification.Pii)
+            if (classification >= DataClassification.Pii && !(sanitizedPayload && classification == DataClassification.Pii))
                 return $"{classification} is never routed to a cloud destination";
             if (model.Price is null && cfg.Config.Budgets.Any(b => b.Enforcement == BudgetEnforcement.Hard))
                 return "unpriced paid destination under a hard budget";
@@ -83,6 +88,13 @@ public static class PolicyEngineV2
         IRequestConfiguration cfg, DataClassification classification, string? profileId, string? requestedModel,
         IReadOnlyList<ChatMessage> messages)
     {
+        // ADR-0016 runtime defence: a workload reserved for sanitized structured records (named by an enabled redaction
+        // policy) never falls through to an ordinary policy below PII — e.g. an e-mail-only record the detector does not
+        // escalate. Validation already requires such profiles to have a PII baseline; this guards unvalidated candidates.
+        if (classification < DataClassification.Pii && profileId is not null
+            && cfg.Config.Policies.Any(p => p.Enabled && p.Redaction is not null && p.Profiles.Contains(profileId, StringComparer.Ordinal)))
+            return PolicyOutcome.Deny($"workload profile '{Evidence.Bounded(profileId)}' is reserved for sanitized structured records and must have a PII baseline");
+
         var matches = Match(cfg.Config, classification, profileId);
         if (matches.Count == 0)
             return PolicyOutcome.Deny($"no permitted route for classification '{classification}'");
@@ -94,12 +106,13 @@ public static class PolicyEngineV2
         if (policy.Paused)
             return PolicyOutcome.Deny($"policy '{Evidence.Bounded(policy.Id)}' is paused") with { PolicyId = policy.Id };
 
+        bool sanitized = IsSanitizedPolicy(policy) && classification == DataClassification.Pii;
         var eligible = new List<(PolicyTarget Target, RouteTarget Route)>();
         var excluded = new List<ExcludedTarget>();
         foreach (var t in policy.Targets)
         {
             var route = new RouteTarget(t.ConnectionId, t.ModelId);
-            if (Ineligibility(cfg, t, classification) is { } why) excluded.Add(new ExcludedTarget(route, why));
+            if (Ineligibility(cfg, t, classification, sanitized) is { } why) excluded.Add(new ExcludedTarget(route, why));
             else eligible.Add((t, route));
         }
 
@@ -145,16 +158,29 @@ public static class PolicyEngineV2
             $"allowed (fixed primary {routes[0].AdapterKey}/{routes[0].ModelId}; fallback: {string.Join(", ", routes.Skip(1).Select(r => $"{r.AdapterKey}/{r.ModelId}"))})");
     }
 
+    /// <summary>ADR-0016: a profile-scoped, PII-only policy with a redaction contract (validation enforces the shape; the
+    /// engine re-checks it so an unvalidated candidate can never widen PII egress).</summary>
+    public static bool IsSanitizedPolicy(PolicyConfigV2 policy)
+        => policy.Redaction is { Types.Count: > 0, Tasks.Count: > 0 }
+           && policy.Profiles.Count > 0
+           && policy.Classifications.Count == 1 && policy.Classifications[0] == DataClassification.Pii;
+
     private static PolicyOutcome Allowed(
         IRequestConfiguration cfg, PolicyConfigV2 policy, DataClassification classification, RouteTarget primary,
         IReadOnlyList<RouteTarget> candidates, IReadOnlyList<ExcludedTarget> excluded, string reason)
-        => PolicyOutcome.Allow(primary, reason) with
+    {
+        bool sanitized = IsSanitizedPolicy(policy) && classification == DataClassification.Pii;
+        return PolicyOutcome.Allow(primary, sanitized ? reason + " (sanitized structured payload only — ADR-0016)" : reason) with
         {
             PolicyId = policy.Id,
             Candidates = candidates,
             Excluded = excluded,
-            Explanation = Explain(cfg, policy, classification, candidates),
+            Explanation = Explain(cfg, policy, classification, candidates) + (sanitized ? " · sanitized payload only" : ""),
+            SanitizedPayloadRequired = sanitized,
+            RedactionTypes = sanitized ? policy.Redaction!.Types : [],
+            RedactionTasks = sanitized ? policy.Redaction!.Tasks : [],
         };
+    }
 
     public static string Explain(IRequestConfiguration cfg, PolicyConfigV2 policy, DataClassification classification, IReadOnlyList<RouteTarget> candidates)
     {

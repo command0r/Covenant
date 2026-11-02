@@ -1,0 +1,64 @@
+@inject PlaygroundState Pg
+@inject WorkspaceConfig Ws
+
+@* Explicit escalation after a result (demo journey §5): re-run the SAME prompt on another approved target, chosen by the
+   operator. Internal content needs an explicit reclassification to a granted Public workload, confirmed in a dialog; the
+   Host runs detection and policy again. Never automatic, never a grant change, never a quality claim. *@
+@if (!Run.InFlight && Run.Evidence.Record is { } rec)
+{
+    var plan = Escalation.Plan(rec, Ws.Config?.Config, ComposerRules.Find(Ws.Applications, rec.ApplicationId));
+    if (plan.Kind != EscalationKind.None)
+    {
+        <div class="escalation" role="group" aria-label="Compare on another approved model">
+            @if (plan.Kind == EscalationKind.SamePolicy)
+            {
+                <button type="button" class="btn sm" disabled="@(Pg.Running)" @onclick="() => Pg.EscalateAsync(Run, plan)">
+                    <Icon Name="play" Size="14" /><span>Compare with @ModelLabels.Friendly(Ws.Config?.Config, plan.Target)</span>
+                </button>
+                <BoundaryTag Boundary="@plan.Boundary" />
+                <span class="secondary subtle" title="@plan.Message">@(plan.Boundary == "Cloud" ? "Second, paid request" : "Second request") · <span class="mono">@plan.Target</span></span>
+            }
+            else if (plan.Kind == EscalationKind.Reclassify)
+            {
+                <button type="button" class="btn sm" id="@_openerId" disabled="@(Pg.Running)" @onclick="() => _confirm = plan">
+                    <span>Compare externally as Public…</span>
+                </button>
+                <span class="secondary subtle">Internal stays local unless you explicitly reclassify.</span>
+            }
+            else
+            {
+                <span class="secondary subtle">@plan.Message @if (plan.Href is { } h) { <a href="@h">Policies</a> }</span>
+            }
+            <InfoTip Label="Is this a quality judgement?">@Escalation.NotQuality</InfoTip>
+            <span class="help">Sends this run's original request (@(Run.Snapshot.ApplicationId ?? "no application") · @Run.Snapshot.Title), not the composer's current text.</span>
+        </div>
+        @if (Pg.EscalationProblem is { } ep) { <span class="note warn" role="status">@ep</span> }
+    }
+}
+
+<EditDialog Open="@(_confirm is not null)" OpenChanged="@(open => { if (!open) _confirm = null; })" Title="Send this content as Public?"
+            OpenerId="@_openerId" SaveLabel="Reclassify and run" Note="@null" OnSave="ConfirmAsync" OnCancel="() => _confirm = null">
+    @if (_confirm is { } c)
+    {
+        <p>This prompt was sent as <strong>Internal</strong>. Public permits processing by an approved external model (@c.Target).</p>
+        <ul class="plain-list secondary">
+            <li>Confirm the text contains nothing internal, personal or confidential.</li>
+            <li>It is resent under the granted workload <strong>@c.ProfileName</strong>; detection and policy run again — a detected identifier still refuses it.</li>
+            <li>The application's grants and the configuration do not change. Both runs stay in the evidence.</li>
+        </ul>
+    }
+</EditDialog>
+
+@code {
+    [Parameter, EditorRequired] public PlaygroundRun Run { get; set; } = default!;
+
+    private EscalationPlan? _confirm;
+    private readonly string _openerId = "esc-" + Guid.NewGuid().ToString("n")[..8];
+
+    private async Task ConfirmAsync()
+    {
+        if (_confirm is not { } plan) return;
+        _confirm = null;
+        await Pg.EscalateAsync(Run, plan);
+    }
+}

@@ -57,3 +57,6 @@ hits** — the UI says so), costs $0 provider charge with `CostBasis = no_call`,
 - (+) Fallback is bounded, explainable, evidenced, and cannot route sensitive data to cloud by accident.
 - (+) The console shows real stage execution, not a configured-order animation.
 - (−) Every config activation cold-starts the cache.
+
+## Amendment (2026-11-01): ADR-0016
+The "PII/PHI ⇒ cloud targets are never eligible" rule has exactly one exception: a profile-scoped, PII-only policy carrying an ADR-0016 redaction contract makes its cloud targets eligible **only** for the payload the redact stage builds from a valid `covenant.record.v1` record (re-verified per attempt). PHI, prose and every other PII policy are unchanged. The classification is never lowered.

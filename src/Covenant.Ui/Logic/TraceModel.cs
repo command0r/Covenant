@@ -45,7 +45,7 @@ public static class TraceModel
 {
     /// <summary>Canonical stage order (ADR-0013). Unknown stages from a newer Host are appended in seq order.</summary>
     public static readonly IReadOnlyList<string> Stages =
-        ["auth", "shape", "classify", "policy", "cache", "rate_limit", "pause", "budget", "search", "provider", "attribution"];
+        ["auth", "shape", "classify", "policy", "redact", "cache", "rate_limit", "pause", "budget", "search", "provider", "attribution"];
 
     public static string Label(string stage) => stage switch
     {
@@ -53,6 +53,7 @@ public static class TraceModel
         "shape" => "Shape",
         "classify" => "Classify",
         "policy" => "Policy",
+        "redact" => "Sanitize",
         "cache" => "Cache",
         "rate_limit" => "Rate limit",
         "pause" => "Pause",
@@ -70,6 +71,7 @@ public static class TraceModel
         "shape" => "Checks the request is well-formed and within bounds.",
         "classify" => "Starts from the profile's trusted baseline; the detector can only raise it (e.g. an SSN pattern → PII).",
         "policy" => "Finds the one policy for this workload profile and classification, and its eligible targets in order.",
+        "redact" => "Only for a dedicated sanitized-payload policy (ADR-0016): validates the structured record, replaces identifiers with placeholders and re-checks. Skipped for every other request.",
         "cache" => "Exact-match cache: a hit answers at $0 with no provider call; web-search requests bypass it.",
         "rate_limit" => "Per-minute limits for all traffic and per team.",
         "pause" => "Refuses new provider calls while an operator has paused them.",
@@ -116,6 +118,40 @@ public static class TraceModel
         (_, TraceStepState.Skipped, "not_reached") => "Not reached: an earlier stage ended the request.",
         _ => null,
     };
+
+    /// <summary>Stages with a MEASURED duration (&gt; 0) that actually ran — skipped, pending and unreported stages carry no
+    /// timing and are excluded (never fabricated).</summary>
+    private static bool Measured(TraceStepView s)
+        => s.DurationMs is > 0 && s.State is not (TraceStepState.Pending or TraceStepState.Skipped or TraceStepState.NotReported);
+
+    /// <summary>The stage with the longest measured duration, or null when nothing was measured. Its state colour is kept
+    /// (a slow stage is not a failed one); the view only adds an accent.</summary>
+    public static string? LongestStage(TraceView view)
+    {
+        TraceStepView? best = null;
+        foreach (var s in view.Steps)
+            if (Measured(s) && (best is null || s.DurationMs > best.DurationMs)) best = s;
+        return best?.Stage;
+    }
+
+    /// <summary>The step's share (0–1) of the summed measured stage durations, or null when it has no measurement. This is
+    /// the share of MEASURED PROCESSING time, not of the end-to-end wall time (network and queueing are not stages).</summary>
+    public static double? Share(TraceView view, TraceStepView step)
+    {
+        if (!Measured(step)) return null;
+        double total = view.Steps.Where(Measured).Sum(s => s.DurationMs!.Value);
+        return total > 0 ? step.DurationMs!.Value / total : null;
+    }
+
+    /// <summary>"Provider took 93% of the measured processing time" — or null when nothing was measured.</summary>
+    public static string? LongestText(TraceView view)
+    {
+        if (LongestStage(view) is not { } stage) return null;
+        var step = view.Steps.First(s => s.Stage == stage);
+        var share = Share(view, step) ?? 0;
+        return Label(stage) + " took " + Math.Round(share * 100).ToString("0", System.Globalization.CultureInfo.InvariantCulture)
+               + "% of the measured processing time (" + DurationText(step.DurationMs) + "). Stage timings only — not total wall time.";
+    }
 
     public static TraceStepState ParseState(string? state) => state switch
     {

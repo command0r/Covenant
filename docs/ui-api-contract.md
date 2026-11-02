@@ -375,3 +375,23 @@ model-invoked tool. `/v1` is unchanged (always `web_search` off).
 - Console wording only (wire names unchanged): stage `auth` is shown as "Identify caller" (assigns application, team
   and workload before anything runs); stage `attribution` is shown as "Finalize cost" (prices usage after the provider
   answered; a refused request shows "No usage" and is still attributed).
+- Web search grounding (ADR-0015 amendment): the model receives ONE system message, then the original turns. The last user
+  turn is `<<<WEB_SOURCES … WEB_SOURCES>>>`, then "Question (from the user, verbatim):", then the question. The search query
+  keeps the user's own period, units and `site:` filters; the Playground request field is labelled "Search location"
+  (wire name `location` unchanged).
+
+## Demo journey additions (2026-11-01)
+
+All endpoints require the admin token, answer `Cache-Control: no-store` where they read live state, and never return a
+secret value or prompt content.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /admin/usage?window=1h\|24h\|7d\|30d\|all&group=team\|application\|profile[&segment=<id>][&from=&to=]` | Aggregation of ONE audit segment's request records (snake_case `UsageReport`). Charges are summed per attempt and per tool call (never the request total again). Unknown charges are counted, not $0. Local/external uses each record's configuration version (unknown when it cannot be loaded). Segments above 64 MiB → 413 `segment_too_large` before any read. |
+| `POST /admin/connections/discover-models` `{kind: Anthropic\|OpenAi, secret_ref}` | ADR-0017: lists model IDs visible to the server-side credential from a fixed provider URL. `ok=false` with a bounded `code` on any failure. Not approval, not pricing. |
+| `GET /admin/redaction/schema` | ADR-0016 `covenant.record.v1`: fields (identifier / enum / integer / decimal), fixed tasks, a synthetic example and the limits text. |
+| `POST /admin/policies/simulate` | Unchanged request. When the matched policy requires a sanitized payload, the response adds `redaction` = `{outcome: applied\|refused, reason_code, reason, messages[{role, content}] (placeholders only), counts, transformed_classification, schema}`. A preview is never authorization. |
+
+Audit v3 records add `Redaction` = `{Transform, PolicyId, Outcome, ReasonCode, Counts[{Type, Count}],
+OriginalClassification, TransformedClassification}`. The trace adds the stage `redact`, between `policy` and `cache`. It
+is `skipped` with reason `redaction_not_required` for every request without a sanitized policy.

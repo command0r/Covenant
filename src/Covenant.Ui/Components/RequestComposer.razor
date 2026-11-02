@@ -4,7 +4,7 @@
 @implements IDisposable
 
 @* The shared request composer (Playground and the Overview compact composer bind the SAME PlaygroundState form).
-   "Run as" lists GET /admin/applications: only enabled + console-testing applications are selectable; the others
+   "Send a request as" lists GET /admin/applications: only enabled + console-testing applications are selectable; the others
    stay visible, disabled, with the reason. The profile select offers ONLY the application's granted profiles.
    Examples populate; Run is always explicit; nothing here submits on render, on example click or on reload. *@
 
@@ -14,16 +14,19 @@
             @{ var only = ComposerRules.OnlySelectable(Ws.Applications); var current = ComposerRules.Find(Ws.Applications, Pg.Form.ApplicationId); }
             @if (only is not null && string.Equals(only.Id, Pg.Form.ApplicationId, StringComparison.Ordinal))
             {
-                <span class="field-label" id="@(IdPrefix + "-app-l")">Run as (calling application)</span>
+                <span class="field-label" id="@(IdPrefix + "-app-l")">Send a request as</span><InfoTip Label="What is an application?">An <strong>application</strong> is an authenticated consuming system (a portal, an assistant, a batch job). It belongs to a <strong>team</strong>, and that team pays. The Playground sends as an authorized test identity of that application; its credential never reaches this browser.</InfoTip>
                 <div class="static-value" aria-labelledby="@(IdPrefix + "-app-l")">
                     <strong>@ComposerRules.ApplicationName(only)</strong>
                     @if (!string.IsNullOrWhiteSpace(only.DisplayName)) { <span class="subtle mono">&nbsp;@only.Id</span> }
                 </div>
-                <span class="help">The only application allowed to run console requests. <a href="policies#applications-list">Add or manage applications</a></span>
+                @if (!Compact)
+                {
+                    <span class="help">The only application allowed to run console requests. <a href="policies#applications-list">Add or manage applications</a></span>
+                }
             }
             else
             {
-                <label for="@(IdPrefix + "-app")">Run as (calling application)</label>
+                <span class="label-row"><label for="@(IdPrefix + "-app")">Send a request as</label><InfoTip Label="What is an application?">An <strong>application</strong> is an authenticated consuming system (a portal, an assistant, a batch job). It belongs to a <strong>team</strong>, and that team pays. The Playground sends as an authorized test identity of that application; its credential never reaches this browser.</InfoTip></span>
                 <select id="@(IdPrefix + "-app")" class="input" value="@(Pg.Form.ApplicationId ?? "")" @onchange="OnApplication"
                         disabled="@(Pg.Running || Ws.Applications is null)" aria-describedby="@(IdPrefix + "-app-help")"
                         title="Identity and team come from this application; its credential never reaches the browser.">
@@ -33,42 +36,82 @@
                         <option value="@c.App.Id" disabled="@(!c.Selectable)">@c.Label</option>
                     }
                 </select>
-                <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@(AppHelp ?? "The system this request comes from.") <a href="policies#applications-list">Add or manage applications</a></span>
+                @if (!Compact || AppHelp is not null)
+                {
+                    <span id="@(IdPrefix + "-app-help")" class="help @(Ws.ApplicationsError is null ? "" : "bad")">@(AppHelp ?? "The system this request comes from.") <a href="policies#applications-list">Add or manage applications</a></span>
+                }
             }
             @if (current is not null)
             {
-                <span class="help"><span class="mono">@current.Id</span> · @ComposerRules.PayerText(current)@(string.IsNullOrWhiteSpace(current.Description) ? "" : " · " + current.Description)</span>
+                @* Owner/team stays visible in both composers; the id and purpose only where there is room. *@
+                <span class="owner-chips">
+                    @if (!Compact) { <span class="chip mono" title="Application id">@current.Id</span> }
+                    <span class="chip owner" title="Owning team — pays for this application's requests"><Icon Name="budgets" Size="14" />team @current.Team</span>
+                    @if (!Compact && !string.IsNullOrWhiteSpace(current.Description)) { <span class="subtle secondary">@current.Description</span> }
+                </span>
             }
         </div>
         <div class="field">
-            <label for="@(IdPrefix + "-profile")">Workload (profile)</label>
             @{ var app = current; var granted = ComposerRules.GrantedProfiles(app); }
-            <select id="@(IdPrefix + "-profile")" class="input" value="@(Pg.Form.ProfileId ?? "")" @onchange="OnProfile"
-                    disabled="@(Pg.Running || app is null || granted.Count == 0)" aria-describedby="@(IdPrefix + "-profile-help")">
-                @if (granted.Count == 0)
+            <WorkloadSelector Granted="granted" Profiles="Ws.Profiles" Selected="@Pg.Form.ProfileId" Disabled="@(Pg.Running || app is null)"
+                              HasApplication="@(app is not null)" IdPrefix="@IdPrefix" OnSelect="OnWorkload" />
+            @{ var selectedProfile = ComposerRules.Profile(Ws.Profiles, Pg.Form.ProfileId);
+               var dest = WorkloadDestination.For(Ws.Config?.Config, selectedProfile, Pg.Form.RequestedModel); }
+            @* The approved destination of THIS workload (classification ≠ destination), refreshed with every form/config change.
+               Full composer: beside the workload, with fallback, policy and note. Compact: one full-width line below the row. *@
+            @if (!Compact)
+            {
+                <div id="@(IdPrefix + "-profile-help")" class="destination-line" aria-live="polite">
+                    @if (dest.Ok)
+                    {
+                        <span class="subtle">@(selectedProfile is null ? "" : PolicyText.ClassificationLabel(selectedProfile.Baseline) + " →")</span>
+                        <BoundaryTag Boundary="@dest.Boundary" />
+                        <span class="mono wrap-any">@dest.Target</span>
+                        @if (dest.Fallbacks.Count > 0) { <span class="subtle">· fallback @string.Join(", ", dest.Fallbacks)</span> }
+                        @if (dest.PolicyId is { } pid) { <span class="subtle">· policy @pid</span> }
+                    }
+                    else if (dest.Problem is { } problem)
+                    {
+                        <span class="note warn">@(problem + (dest.Href is null ? "" : " "))@if (dest.Href is { } dh) { <a href="@dh">@dest.HrefLabel</a> }</span>
+                    }
+                </div>
+                @if (Pg.Form.RequestedModel is { } pinned)
                 {
-                    <option value="">@(app is null ? "Choose an application first" : "No profile granted — server default")</option>
+                    <div class="note warn pin-warning" role="status">
+                        <span>Model pinned to <span class="mono">@pinned</span>@(Pg.Form.PinnedByExample ? " by the example" : " by you") — no fallback; policy still decides and refuses a pin this workload does not approve.</span>
+                        <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="ResetToPolicy">Let policy choose</button>
+                    </div>
                 }
-                @foreach (var p in granted)
+                @if (dest.Note is { } dn)
                 {
-                    <option value="@p">@(ComposerRules.Profile(Ws.Profiles, p)?.Name ?? p)</option>
+                    <span class="help">@(dn + (dest.Href is null ? "" : " "))@if (dest.Href is { } nh) { <a href="@nh">@dest.HrefLabel</a> }</span>
                 }
-            </select>
-            @{ var selectedProfile = ComposerRules.Profile(Ws.Profiles, Pg.Form.ProfileId); }
-            <span id="@(IdPrefix + "-profile-help")" class="help">
-                @if (selectedProfile is not null)
+                @if (WorkloadDestination.OutputBound(Ws.Config?.Config, Pg.Form.ApplicationId, dest, Pg.Form.MaxTokens) is { } bound)
                 {
-                    <span>Baseline <strong>@PolicyText.ClassificationLabel(selectedProfile.Baseline)</strong>@(string.IsNullOrWhiteSpace(selectedProfile.Description) ? "" : " · " + selectedProfile.Description). </span>
+                    <span class="help warn-text">@bound</span>
                 }
-                Policy routes by this workload; detection can only raise the classification.
-            </span>
+            }
         </div>
     </div>
-
-    @if (!Compact)
+    @if (Compact)
     {
-        <ExamplePicker IdPrefix="@IdPrefix" />
+        <div id="@(IdPrefix + "-profile-help")" class="destination-line compact" aria-live="polite">
+            @if (dest.Ok)
+            {
+                <span class="subtle">Runs on</span>
+                <BoundaryTag Boundary="@dest.Boundary" />
+                <span class="mono ellipsis" title="@(dest.Target + (dest.Fallbacks.Count > 0 ? " · fallback " + string.Join(", ", dest.Fallbacks) : "") + (dest.PolicyId is { } tp ? " · policy " + tp : ""))">@dest.Target</span>
+            }
+            else if (dest.Problem is { } cproblem)
+            {
+                <span class="note warn ellipsis" title="@cproblem">@cproblem</span>
+                @if (dest.Href is { } ch) { <a href="@ch">@dest.HrefLabel</a> }
+            }
+        </div>
     }
+
+    @* Both composers (Playground and the compact Overview one) offer the examples of the selected application. *@
+    <ExamplePicker IdPrefix="@IdPrefix" Compact="@Compact" />
     @if (Pg.PresetNote is { } pn)
     {
         <span class="note warn" role="status">@pn</span>
@@ -103,27 +146,32 @@
             </div>
             @if (ready is { Known: true, Possible: false })
             {
-                <span id="@(IdPrefix + "-ws-help")" class="help warn">
-                    @(ready.Cause + " " + ready.Fix + (ready.Href is null ? "" : " "))@if (ready.Href is { } href) { <a href="@href">@ready.HrefLabel</a> }
+                @* The precise reason is always visible (Off included); warning styling only once search is requested.
+                   Internal workloads staying local is correct behaviour, so it has no "fix" link. *@
+                var asked = Pg.Form.WebSources != WebSourcesMode.Off;
+                <span id="@(IdPrefix + "-ws-help")" class="help @(asked ? "warn" : "")">
+                    @(ready.Cause + (asked && !string.IsNullOrEmpty(ready.Fix) ? " " + ready.Fix : "") + (ready.Href is null ? "" : " "))@if (ready.Href is { } href) { <a href="@href">@ready.HrefLabel</a> }
                 </span>
                 @if (ready.SwitchToProfile is { } alt)
                 {
-                    <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="() => Pg.SelectProfile(alt)">Switch to @ComposerRules.ProfileLabel(Ws.Profiles, alt)</button>
+                    <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="() => Pg.SelectProfile(alt)">Switch to @(ComposerRules.Profile(Ws.Profiles, alt)?.Name ?? alt)</button>
                 }
             }
             else
             {
-                <span id="@(IdPrefix + "-ws-help")" class="help">@WebSourcesText.Help(Pg.Form.WebSources)@(ready.Known ? "" : " (" + ready.Cause + ")")</span>
+                <span id="@(IdPrefix + "-ws-help")" class="help @(Compact && ready.Known ? "visually-hidden" : "")">@WebSourcesText.Help(Pg.Form.WebSources)@(ready.Known ? "" : " (" + ready.Cause + ")")</span>
             }
         </div>
-        @if (Pg.Form.WebSources != WebSourcesMode.Off)
+        @* Search location only where it can matter: web sources on and search possible (or not yet known). *@
+        @if (Pg.Form.WebSources != WebSourcesMode.Off && ready.Possible)
         {
             <div class="field">
-                <label for="@(IdPrefix + "-loc")">Location (optional)</label>
+                <label for="@(IdPrefix + "-loc")">Search location</label>
                 <input id="@(IdPrefix + "-loc")" class="input" type="text" maxlength="@WebSourcesText.MaxLocationChars" placeholder="e.g. Toronto"
                        @bind="Pg.Form.Location" @bind:event="oninput" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running"
                        aria-describedby="@(IdPrefix + "-loc-help")" autocomplete="off" />
-                <span id="@(IdPrefix + "-loc-help")" class="help">@WebSourcesText.LocationHelp</span>
+                @{ var missingCity = SearchIntent.MissingLocation(Pg.Form.WebSources, Pg.Form.Prompt, Pg.Form.Location); }
+                <span id="@(IdPrefix + "-loc-help")" class="help @(missingCity is null ? (Compact ? "visually-hidden" : "") : "warn")">@(missingCity ?? SearchIntent.LocationEffect(Pg.Form.WebSources, Pg.Form.Prompt, Pg.Form.Location))</span>
             </div>
         }
     </div>
@@ -185,7 +233,11 @@
                     </div>
                     <div class="field">
                         <label for="@(IdPrefix + "-max")">Max output tokens</label>
-                        <input id="@(IdPrefix + "-max")" class="input mono" type="number" min="1" @bind="Pg.Form.MaxTokens" @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" />
+                        @* oninput (not the default onchange): every keystroke updates the form, so closing Advanced or pressing Run
+                           right after typing can never send the previous value. The run snapshot records exactly what was sent. *@
+                        <input id="@(IdPrefix + "-max")" class="input mono" type="number" min="1" @bind="Pg.Form.MaxTokens" @bind:event="oninput"
+                               @bind:after="Pg.NotifyFormChanged" disabled="@Pg.Running" aria-describedby="@(IdPrefix + "-max-help")" />
+                        <span id="@(IdPrefix + "-max-help")" class="help">Enforced as the lowest of this, the application's cap and the model's cap. A cut-off answer is flagged.</span>
                     </div>
                 </div>
                 <label class="switch">
@@ -281,15 +333,21 @@
 
     private void OnProfile(ChangeEventArgs e) => Pg.SelectProfile(e.Value?.ToString());
 
+    private void OnWorkload(string? profileId) => Pg.SelectProfile(profileId);
+
     private void OnCatalogModel(ChangeEventArgs e)
     {
         Pg.Form.CatalogModel = e.Value?.ToString();
+        Pg.Form.PinnedByExample = false;   // now the operator's own choice: kept across workload changes, with a warning
         Pg.NotifyFormChanged();
     }
+
+    private void ResetToPolicy() => SetMode(RouteMode.Policy);
 
     private void SetMode(RouteMode mode)
     {
         Pg.Form.Mode = mode;
+        Pg.Form.PinnedByExample = false;
         if (mode == RouteMode.Catalog && (string.IsNullOrWhiteSpace(Pg.Form.CatalogModel) || Overrides.All(o => o.Value != Pg.Form.CatalogModel)) && Overrides.Count > 0)
             Pg.Form.CatalogModel = Overrides[0].Value;
         Pg.NotifyFormChanged();

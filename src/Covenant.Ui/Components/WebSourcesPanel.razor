@@ -6,19 +6,49 @@
 @if (Run.Snapshot.WebSources != WebSourcesMode.Off)
 {
     <div class="web-sources" role="region" aria-label="Web sources retrieved by Covenant">
-        @{ var kind = WebSourcesText.Kind(Run.Search?.ReasonCode); }
-        <span class="note @(Tone)">
-            @if (kind != SearchProblemKind.None) { <strong>@WebSourcesText.KindLabel(kind):</strong> }
-            @Run.WebSourcesStatus
-        </span>
+        @{ var kind = WebSourcesText.Kind(Run.Search?.ReasonCode); bool collapsed = Compact && Run.Search is { Outcome: "passed", Sources.Count: > 0 }; }
+        @if (!collapsed)
+        {
+            @* Problems (and "no sources") are always shown in full, also in presentation mode. *@
+            <span class="note @(Tone)">
+                @if (kind != SearchProblemKind.None) { <strong>@WebSourcesText.KindLabel(kind):</strong> }
+                @Run.WebSourcesStatus
+            </span>
+        }
         @if (kind != SearchProblemKind.None && Run.Result?.ErrorReason is { Length: > 0 } serverReason)
         {
             @* The Host's specific reason for THIS request (e.g. "web search is disabled in configuration v3"), not a generic list. *@
             <span class="secondary">Server: <span class="wrap-any">@serverReason</span></span>
         }
-        @if (Run.Search is { Outcome: "passed", Sources.Count: > 0 } s)
+        @if (Compact && Run.Search is { Outcome: "passed", Sources.Count: > 0 } cs)
         {
-            <ol class="plain-list secondary">
+            @* Presentation mode: one collapsed line (count + "not verified") so the governance facts stay on screen; the
+               full list, hosts and the untrusted-data note are one click away and scroll inside the disclosure. *@
+            <details class="tech web-sources-compact">
+                <summary>@WebSourcesText.CompactSummary(cs.Sources.Count)</summary>
+                <div class="web-sources-body">
+                    <span class="secondary">@Run.WebSourcesStatus</span>
+                    @SourceList(cs)
+                    <span class="help">@Disclaimer</span>
+                </div>
+            </details>
+        }
+        else if (Run.Search is { Outcome: "passed", Sources.Count: > 0 } s)
+        {
+            @SourceList(s)
+            <span class="help">@Disclaimer</span>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public PlaygroundRun Run { get; set; } = default!;
+    /// <summary>Presentation mode: sources collapse to one disclosure line; problems are still shown in full.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    private const string Disclaimer = "These are the sources Covenant retrieved and gave the model as untrusted data. Citations like [1] in the answer are the model's own and are not verified. Live information such as weather may be inaccurate.";
+
+    private RenderFragment SourceList(RequestSearchDto s) => @<ol class="plain-list secondary">
                 @foreach (var src in s.Sources)
                 {
                     var href = WebSourcesText.SafeHref(src.Url);
@@ -35,14 +65,7 @@
                         }
                     </li>
                 }
-            </ol>
-            <span class="help">These are the sources Covenant retrieved and gave the model as untrusted data. Citations like [1] in the answer are the model's own and are not verified. Live information such as weather may be inaccurate.</span>
-        }
-    </div>
-}
-
-@code {
-    [Parameter, EditorRequired] public PlaygroundRun Run { get; set; } = default!;
+            </ol>;
 
     private string Tone => Run.Search?.Outcome switch
     {

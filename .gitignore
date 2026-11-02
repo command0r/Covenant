@@ -36,5 +36,7 @@ appsettings.Development.json
 appsettings.Local.json
 secrets.json
 .env
+.covenant-local/
+__pycache__/
 *.pfx
 *.key

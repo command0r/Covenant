@@ -220,6 +220,12 @@ public static class ConfigAdminApi
 
         // Dry run with the REAL classifier and policy engine. Never calls a provider, never writes audit,
         // never reserves or records spend.
+        app.MapGet("/admin/redaction/schema", (HttpContext http) =>
+        {
+            if (!s.Authorized(http)) return Unauthorized();
+            return Json(SchemaView(), ConfigJsonContext.Default.RecordSchemaView);
+        });
+
         app.MapPost("/admin/policies/simulate", async Task<IResult> (HttpContext http, CancellationToken ct) =>
         {
             if (!s.Authorized(http)) return Unauthorized();
@@ -260,6 +266,9 @@ public static class ConfigAdminApi
         var messages = new List<ChatMessage> { new(ChatRole.User, body.Prompt ?? "") };
         var request = new InferenceRequest(app.Id, messages, body.Model, new AttributionTags(app.Team, "simulation", "simulation"));
         var detected = classifier.Classify(request);
+        if (detected.Incomplete)
+            return Refuse("sensitive-data inspection could not complete (input too large or too complex): the request would be refused; nothing would be sent",
+                resolved.ProfileId, resolved.Baseline);
         var final = ClassificationRules.Combine(resolved.Baseline, detected);
         var outcome = PolicyEngineV2.Evaluate(cfg, final, resolved.ProfileId, body.Model, messages);
 
@@ -297,6 +306,52 @@ public static class ConfigAdminApi
             Fallbacks = route ? outcome.Candidates.Skip(1).Select(c => $"{c.AdapterKey}/{c.ModelId}").ToList() : [],
             Reason = outcome.Reason,
             Explanation = outcome.Explanation,
+            Redaction = outcome.SanitizedPayloadRequired ? PreviewRedaction(outcome, final, classifier, request) : null,
+        };
+    }
+
+    /// <summary>ADR-0016 preview: the same decision function the redact stage runs (so they cannot diverge). Shows the built
+    /// payload (placeholders only) or the specific refusal. Never authorization: execution re-validates.</summary>
+    private static SimulatedRedaction PreviewRedaction(PolicyOutcome outcome, DataClassification final,
+        IDataClassifier classifier, InferenceRequest request)
+    {
+        var d = SanitizedPayload.Evaluate(request.Messages, final, outcome, classifier, request);
+        return new SimulatedRedaction
+        {
+            Outcome = d.Applied ? "applied" : "refused",
+            ReasonCode = d.ReasonCode,
+            Reason = d.Reason,
+            Messages = d.Messages?.Select(m => new SimulatedMessage { Role = m.Role.ToString(), Content = m.Content }).ToList() ?? [],
+            Counts = new Dictionary<string, int>(d.Counts, StringComparer.Ordinal),
+            TransformedClassification = d.TransformedClassification?.ToString(),
+            Schema = SchemaView(outcome.RedactionTypes, outcome.RedactionTasks),
+        };
+    }
+
+    public static RecordSchemaView SchemaView(IReadOnlyList<string>? policyTypes = null, IReadOnlyList<string>? policyTasks = null)
+    {
+        var fields = new List<RecordFieldView>();
+        foreach (var name in StructuredRecordSchema.FieldOrder)
+        {
+            if (StructuredRecordSchema.Identifiers.TryGetValue(name, out var type))
+                fields.Add(new RecordFieldView { Name = name, Kind = "identifier", RedactionType = type });
+            else if (StructuredRecordSchema.Enums.TryGetValue(name, out var allowed))
+                fields.Add(new RecordFieldView { Name = name, Kind = "enum", Allowed = allowed.ToList() });
+            else if (StructuredRecordSchema.Integers.TryGetValue(name, out var ir))
+                fields.Add(new RecordFieldView { Name = name, Kind = "integer", Range = $"{ir.Min}–{ir.Max}" });
+            else if (StructuredRecordSchema.Decimals.TryGetValue(name, out var dr))
+                fields.Add(new RecordFieldView { Name = name, Kind = "decimal", Range = $"{dr.Min.ToString(System.Globalization.CultureInfo.InvariantCulture)}–{dr.Max.ToString(System.Globalization.CultureInfo.InvariantCulture)} (2 decimals)" });
+        }
+        return new RecordSchemaView
+        {
+            Id = StructuredRecordSchema.Id,
+            MaxChars = StructuredRecordSchema.MaxChars,
+            Fields = fields,
+            Tasks = StructuredRecordSchema.Tasks.Select(kv => new RecordTaskView { Id = kv.Key, Instruction = kv.Value }).ToList(),
+            PolicyTypes = policyTypes?.ToList(),
+            PolicyTasks = policyTasks?.ToList(),
+            Example = StructuredRecordSchema.SyntheticExample,
+            Limits = StructuredRecordSchema.Limits,
         };
     }
 

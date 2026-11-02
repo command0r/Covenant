@@ -114,7 +114,7 @@ public sealed class DemoCheckpoint3Tests
     public void Research_example_is_bounded_to_an_official_source_and_honest_about_verification()
     {
         var ex = UiLogic.DemoExamples.Find("public-research")!;
-        Assert.Contains("site:learn.microsoft.com", ex.Prompt, StringComparison.Ordinal);
+        Assert.Contains("site:dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core", ex.Prompt, StringComparison.Ordinal);   // one targeted official page
         Assert.Contains("not stated in the sources", ex.Prompt, StringComparison.Ordinal);
         Assert.Contains("not independently verified", ex.Observe, StringComparison.Ordinal);
         Assert.True(ex.Prompt.Length <= 300);   // the Host bounds the search query to 300 characters

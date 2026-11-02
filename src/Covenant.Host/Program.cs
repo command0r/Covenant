@@ -278,6 +278,8 @@ var denyAllPolicy = new PolicyConfig { AllowedRoutes = new Dictionary<DataClassi
 var noPrices = new PriceBook(new Dictionary<string, (decimal, decimal)>());
 // ADR-0015: one bounded Tavily client (tests replace IWebSearchClient via DI). The key stays in this closure only.
 builder.Services.AddSingleton<IWebSearchClient>(_ => new TavilySearchClient(builder.Configuration[WebSearchEgress.SecretKey], searchEgressApproved));
+// ADR-0017: admin-only cloud model catalog discovery (fixed URLs; tests replace the instance with a fake transport).
+builder.Services.AddSingleton(_ => new ModelCatalogDiscovery());
 builder.Services.AddSingleton(sp =>
 {
     var liveRegistry = sp.GetRequiredService<IChatClientRegistry>();
@@ -288,6 +290,7 @@ builder.Services.AddSingleton(sp =>
         new ShapeStage(),                                // refuse shapes governance can't see (images, tools) — audited
         new ClassifyStage(classifier),                   // classify: max(trusted baseline, detected)
         new PolicyStage(new PolicyEngine(denyAllPolicy)),// policy v2 on the bound snapshot, fail-closed
+        new RedactStage(classifier),                     // ADR-0016: sanitized structured payload only when the policy requires it
         new CacheStage(responseCache, new CacheConfig()),// cache before budget/provider: a hit skips the model call
         new RateLimitStage(rateCounterGlobal, rateCounterTeams, new RateLimitConfig()), // rate half of budget/rate; cache hits bypass (free)
         new PauseStage(killSwitch),                      // global provider-call pause (after cache: a hit is served during a pause)
@@ -861,6 +864,30 @@ app.MapPost("/admin/providers/probe", async (ProbeRequest body, HttpContext http
     return Results.Json(result, CovenantJsonContext.Default.ProbeResult);
 });
 
+// ADR-0017: list the models a configured cloud credential can see. Fixed per-kind URL, startup egress allow-list, the key
+// resolved server-side from an allowed reference and never returned. Discovery is not approval and not pricing.
+app.MapPost("/admin/connections/discover-models", async (HttpContext http, CancellationToken ct) =>
+{
+    if (!Authorized(http)) return Unauthorized();
+    http.Response.Headers.CacheControl = "no-store";
+    DiscoverModelsRequest? body;
+    try
+    {
+        body = await JsonSerializer.DeserializeAsync(http.Request.Body, ModelDiscoveryJsonContext.Default.DiscoverModelsRequest, ct);
+    }
+    catch (JsonException)
+    {
+        body = null;
+    }
+    if (body is null)
+        return Results.Json(new ErrorResponse { Error = "invalid_request", Reason = "body must be {\"kind\", \"secret_ref\"}" },
+            CovenantJsonContext.Default.ErrorResponse, statusCode: StatusCodes.Status400BadRequest);
+    var discovery = http.RequestServices.GetRequiredService<ModelCatalogDiscovery>();
+    var result = await discovery.DiscoverAsync(body,
+        secretRef => ConfigValidator.IsAllowedSecretRef(secretRef) ? builder.Configuration[secretRef] : null, egressAllowList, ct);
+    return Results.Json(result, ModelDiscoveryJsonContext.Default.DiscoverModelsResponse);
+});
+
 // The dashboard: one self-contained embedded page, no CDN, no egress (root CLAUDE.md #4). Data calls
 // need the token; no-store because a stale cached page against a newer endpoint dies silently.
 app.MapGet("/admin/ui", (HttpContext http) =>
@@ -894,6 +921,7 @@ app.MapGet("/admin/web-search", (HttpContext http) =>      // ADR-0015 status + 
 });
 app.MapBudgets(runtime, budgetLedger, Authorized);                        // ADR-0014 budget state
 app.MapArchive(new AuditSegments(auditPath, anchorPath), Authorized, anchorPath);   // spec §5 archive + export
+app.MapUsage(new AuditSegments(auditPath, anchorPath), v => v == runtime.Current.Version ? runtime.Current.Config : configRepo.GetVersion(v), Authorized);  // demo journey §3: usage from recorded evidence
 
 app.MapConsole();
 app.Run();
