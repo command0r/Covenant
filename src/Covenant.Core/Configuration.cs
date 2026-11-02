@@ -19,6 +19,11 @@ public enum BudgetPeriod { None, Daily, Monthly }
 
 public enum BudgetEnforcement { Hard, WarnOnly }
 
+/// <summary>ADR-0019: what a workload does when detection raises a request to PII/PHI. <see cref="Route"/> (default, every
+/// pre-0019 version): the escalated classification is routed by its policy (PII/PHI stay local, ADR-0013/0016).
+/// <see cref="Reject"/>: refused at the classify stage — nothing reaches policy, cache, search or any provider.</summary>
+public enum SensitiveDataAction { Route, Reject }
+
 public sealed record CovenantConfig
 {
     public required int Version { get; init; }
@@ -134,6 +139,9 @@ public sealed record WorkloadProfileConfig
     /// <summary>May requests under this profile use governed web search (ADR-0015)? Default false. Only a Public-baseline
     /// profile may carry it (validation error otherwise).</summary>
     public bool WebSearchAllowed { get; init; }
+    /// <summary>ADR-0019: action when detection raises a request under this profile to PII/PHI. Default Route (unchanged
+    /// behaviour). Reject is valid only on a Public- or Internal-baseline profile.</summary>
+    public SensitiveDataAction SensitiveDataAction { get; init; } = SensitiveDataAction.Route;
 }
 
 public sealed record PolicyConfigV2

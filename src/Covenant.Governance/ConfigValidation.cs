@@ -135,6 +135,7 @@ public static class ConfigValidator
                 {
                     if (pr.Id is null) Req($"profiles[{i}].id");
                     Defined($"profiles[{i}].baseline", pr.Baseline);
+                    Defined($"profiles[{i}].sensitive_data_action", pr.SensitiveDataAction);
                     if (pr.Name is null) Req($"profiles[{i}].name");
                 }
 
@@ -415,6 +416,12 @@ public static class ConfigValidator
             if (!c.Policies.Any(pol => pol.Enabled && pol.Classifications.Contains(cls)))
                 Warn("policies", "no_route_for_classification", $"no enabled policy covers {cls}: such requests are refused");
         }
+
+        // ---- sensitive-data action (ADR-0019) ----
+        foreach (var (pr, i) in c.Profiles.Select((pr, i) => (pr, i)))
+            if (pr.SensitiveDataAction == SensitiveDataAction.Reject && pr.Baseline >= DataClassification.Pii)
+                Err($"profiles[{i}].sensitive_data_action", "sensitive_action_requires_non_sensitive_baseline",
+                    $"profile '{pr.Id}' has baseline {pr.Baseline}: every request under it is sensitive by declaration, so 'reject' is valid only on a Public or Internal workload");
 
         // ---- web search (ADR-0015) ----
         foreach (var (pr, i) in c.Profiles.Select((pr, i) => (pr, i)))

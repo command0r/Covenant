@@ -19,6 +19,12 @@ workload and one of the recommended examples, preview the route, and press Run.
 | Destination | **Local** (teal, inside the perimeter) or **External** (purple, an approved provider). Red means sensitive data was detected or blocked. Every tag also has text and an icon. |
 | Policy (route) | One match per workload + classification: an approved primary and optional fallback. No match means refused. |
 
+## The sensitive-data comparison
+
+For **Demo application**, apply **Internal workload: sensitive data served locally** and run. Internal is selected automatically. Switch to Public and run the unchanged prompt: this workload rejects detected PII/PHI before cache, search or models. Both outcomes are audited. Public is still a data label, not a promise to use a cloud model.
+
+This behavior is a workload setting, not a special case for the example. Under **Policies → Workloads**, the Public workload must use **When sensitive data is detected → Reject the request**. Internal retains **Route by policy**. Existing saved setups keep their old behavior until this setting is saved; new demo seeds set it explicitly.
+
 ## What detection can and cannot see
 
 Covenant inspects every message locally; no text leaves the perimeter for inspection (ADR-0018). It recognises:

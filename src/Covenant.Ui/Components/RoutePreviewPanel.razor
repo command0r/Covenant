@@ -25,6 +25,21 @@
             <span class="secondary subtle">Configured for this workload (not a preview): <BoundaryTag Boundary="@now.Boundary" /> <span class="mono wrap-any">@now.Target</span>@(now.PolicyId is { } np ? " · policy " + np : "")</span>
         }
     }
+    @if (scheme.State == "ready" && Pg.Preview?.Result is { RefusedAtStage: "classify", SuggestedProfiles.Count: > 0 } rej)
+    {
+        @* ADR-0019: the Host's own suggestion (granted workloads its policy engine WOULD route this classification under).
+           Switching keeps the prompt; nothing runs until Run. *@
+        <div class="btn-row">
+            @foreach (var pid in rej.SuggestedProfiles!)
+            {
+                var target = pid;
+                <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="() => SwitchAndPreviewAsync(target)">
+                    Use workload @(ComposerRules.Profile(Ws.Profiles, target)?.Name ?? target) (prompt kept)
+                </button>
+            }
+            <span class="secondary subtle">This workload rejects detected sensitive data; the server suggests a workload approved for it.</span>
+        </div>
+    }
     @if (scheme.State == "ready" && Pg.Preview?.Result is { } r)
     {
         <details class="tech route-details">
@@ -69,6 +84,11 @@
     }
 
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
+
+    private async Task SwitchAndPreviewAsync(string profileId)
+    {
+        if (Pg.SelectProfile(profileId)) await Pg.PreviewRouteAsync();
+    }
 
     public void Dispose()
     {

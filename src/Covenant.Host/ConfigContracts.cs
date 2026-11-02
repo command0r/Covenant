@@ -11,6 +11,7 @@ namespace Covenant.Host;
 //   strategy    RoutingStrategy    "fixed" | "length-heuristic"                        (kebab-case)
 //   period      BudgetPeriod       "none" | "daily" | "monthly"                        (kebab-case)
 //   enforcement BudgetEnforcement  "hard" | "warn-only"                                (kebab-case)
+//   sensitive_data_action SensitiveDataAction "route" | "reject"  (kebab-case; absent ⇒ "route", ADR-0019)
 //   kind        ProviderKind       "Ollama" | "OpenAiCompatible" | "OpenAi" | "Anthropic"   (C# names)
 //   boundary    Boundary           "Local" | "Cloud"                                   (C# names)
 //   classifications / baseline  DataClassification  "Public" | "Internal" | "Pii" | "Phi"  (C# names)
@@ -185,6 +186,10 @@ public sealed class SimulateResponse
     /// <summary>ADR-0016: present when the matched policy requires a sanitized structured payload — the payload that WOULD
     /// be sent (placeholders only) or the refusal. A preview is never authorization.</summary>
     public SimulatedRedaction? Redaction { get; init; }
+    /// <summary>ADR-0019: set when the request would be refused at the classify stage ("classify"); null otherwise.</summary>
+    public string? RefusedAtStage { get; init; }
+    /// <summary>ADR-0019: granted workloads under which the engine WOULD route this classification (empty when none).</summary>
+    public List<string>? SuggestedProfiles { get; init; }
 }
 
 public sealed class SimulatedRedaction
@@ -287,6 +292,7 @@ public sealed class KebabEnumConverter<TEnum> : JsonStringEnumConverter<TEnum> w
         typeof(KebabEnumConverter<RoutingStrategy>),
         typeof(KebabEnumConverter<BudgetPeriod>),
         typeof(KebabEnumConverter<BudgetEnforcement>),
+        typeof(KebabEnumConverter<SensitiveDataAction>),
         typeof(JsonStringEnumConverter<DataClassification>),
     ])]
 [JsonSerializable(typeof(CovenantConfig))]

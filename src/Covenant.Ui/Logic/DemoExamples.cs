@@ -17,8 +17,11 @@ public enum ExampleNeed
     InternalResearch,
     /// <summary>A Public profile with an eligible cloud target, used with an explicit cloud model pin and a synthetic SSN.</summary>
     SensitiveCloudPinRefusal,
-    /// <summary>A Public workload whose PII route is local: the same synthetic sensitive prompt, policy chooses (served locally).</summary>
+    /// <summary>An Internal workload approved for sensitive data (action route) whose PII route is local: the synthetic
+    /// sensitive prompt is served locally (ADR-0019).</summary>
     SensitiveLocal,
+    /// <summary>A Public workload that rejects detected sensitive data (ADR-0019): the SAME prompt is refused at the gateway.</summary>
+    SensitivePublicRejected,
     /// <summary>The exact cache enabled (TTL &gt; 0) and a Public route.</summary>
     CacheRepeat,
     /// <summary>A hard budget applying to the application that cannot cover one more request.</summary>
@@ -109,9 +112,10 @@ public static class DemoExamples
         "site:dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core .NET 10 support end date. "
         + "Answer in one sentence using only the retrieved sources and cite the page; if they do not state it, reply \"not stated in the sources\".";
 
-    /// <summary>One synthetic sensitive prompt for BOTH sensitive examples (local by policy, blocked when pinned external).</summary>
+    /// <summary>One neutral synthetic sensitive prompt for the sensitive examples (Internal: served locally; Public: rejected;
+    /// explicit external pin: blocked). It claims no classification itself — the WORKLOAD declares it.</summary>
     public const string SensitivePrompt =
-        "Summarize this public support ticket in one sentence: \"Printer on floor 3 jammed again. Reporter SSN " + SyntheticSsn + " (synthetic test marker).\"";
+        "Summarize this note in one sentence: \"Customer asked to update their mailing address. SSN on file: " + SyntheticSsn + " (synthetic test marker).\"";
 
     public static readonly IReadOnlyList<DemoExample> All =
     [
@@ -146,13 +150,21 @@ public static class DemoExamples
             ExampleNeed.InternalResearch,
             "For an internal ledger service, compare optimistic and pessimistic concurrency control: when to use each, and two failure modes of each. Keep it under 200 words.",
             WebSourcesMode.Off, "research", "internal-analysis", false, MaxTokens: 2048, Prefer: ["research"]),
-        new("sensitive-local", "Sensitive data detected: served locally",
-            "Detection raises a Public request containing a synthetic SSN to PII; with policy choosing, the PII route keeps it on a local model.",
+        new("sensitive-local", "Internal workload: sensitive data served locally",
+            "The Internal workload is approved for sensitive data: detection raises the request to PII and the PII route keeps it on a local model.",
             "Served locally · sensitive data detected. Nothing leaves the perimeter; the classification is never lowered.",
-            "The chips show Sensitive · PII (detected) and a Local destination. Compare with the next example: the SAME prompt with an explicit external pin is blocked.",
+            "The route shows Sensitive · PII (detected) and a Local destination. Then switch the workload to Public (the prompt stays): the gateway rejects the same request.",
             ExampleNeed.SensitiveLocal,
             SensitivePrompt,
-            WebSourcesMode.Off, "writing", "sensitive-local", false, Prefer: ["writing"]),
+            // Same workflow/use case as its Public pair: switching the workload keeps every attribution label true.
+            WebSourcesMode.Off, "demo", "sensitive-data", false, Prefer: ["internal"]),
+        new("sensitive-public-rejected", "Public workload: the same sensitive data is rejected",
+            "A Public workload declares public content. When detection finds PII or PHI, this workload rejects the request at the gateway — it is never silently rerouted.",
+            "Rejected at Classify · nothing sent. The reason names the detected data and the workload that would accept it.",
+            "The route shows Blocked — model not contacted, refused at Classify; no cache, web search or model call; no charge. Switch to the Internal workload to process it locally.",
+            ExampleNeed.SensitivePublicRejected,
+            SensitivePrompt,
+            WebSourcesMode.Off, "demo", "sensitive-data", false, Prefer: ["public"]),
         new("sensitive-refusal", "Sensitive data: explicit external attempt is blocked",
             "The same synthetic sensitive prompt, but the example explicitly pins an external model (shown before you apply it). Policy blocks it before any provider call.",
             "Blocked by policy · sensitive data cannot go external. Nothing is sent; no charge. This is a governance refusal, not a provider outage.",
@@ -212,6 +224,11 @@ public static class DemoExamples
     /// <summary>Mirror of PolicyEngineV2.Match + Ineligibility (UI copy; the Host decides at run time).</summary>
     public static ResolvedRoute Route(CovenantConfigDto cfg, string classification, string? profileId)
     {
+        // ADR-0019 mirror: a Public/Internal workload that rejects detected sensitive data never has PII/PHI routed.
+        if (PolicyText.IsSensitive(classification) && profileId is not null
+            && cfg.Profiles.FirstOrDefault(p => string.Equals(p.Id, profileId, StringComparison.Ordinal)) is { } wp
+            && ProfileEditing.RejectsSensitive(wp) && !PolicyText.IsSensitive(wp.Baseline))
+            return new(null, null, null, [], "workload " + profileId + " rejects detected sensitive data (refused at Classify; nothing is sent)");
         var matching = cfg.Policies.Where(p => p.Enabled
                 && p.Classifications.Contains(classification, StringComparer.OrdinalIgnoreCase)
                 && (p.Profiles.Count == 0 || (profileId is not null && p.Profiles.Contains(profileId, StringComparer.Ordinal))))
@@ -292,8 +309,15 @@ public static class DemoExamples
             ExampleNeed.InternalCoder => workloads.Any(w => Declares(w.Profile, Coding) && w.Route.Primary?.ModelId == CoderModel),
             ExampleNeed.InternalResearch => workloads.Any(w => Declares(w.Profile, Research) && w.Route.Primary?.ModelId == ResearchModel),
             ExampleNeed.InternalWriting => workloads.Any(w => Declares(w.Profile, Writing) && IsLocal(w.Route)),
-            ExampleNeed.SensitiveCloudPinRefusal => workloads.Any(w => w.Route.Eligible.Any(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud")),
-            ExampleNeed.SensitiveLocal => workloads.Any(w => IsLocal(Route(cfg, "Pii", w.Profile.Id))),
+            // A workload that REJECTS detected sensitive data refuses at Classify, before policy: the explicit-pin example
+            // (a POLICY refusal) does not describe it.
+            ExampleNeed.SensitiveCloudPinRefusal => workloads.Any(w => !ProfileEditing.RejectsSensitive(w.Profile)
+                && w.Route.Eligible.Any(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud")),
+            // ADR-0019 pair: offered only where the application shows BOTH halves (its Observe text promises the Public rejection),
+            // so an Internal-only application (e.g. engineering) is not given sensitive-data noise.
+            ExampleNeed.SensitiveLocal => HasRejectingPublic(cfg, app)
+                && workloads.Any(w => !ProfileEditing.RejectsSensitive(w.Profile) && IsLocal(Route(cfg, "Pii", w.Profile.Id))),
+            ExampleNeed.SensitivePublicRejected => workloads.Any(w => ProfileEditing.RejectsSensitive(w.Profile)),
             ExampleNeed.CacheRepeat => workloads.Any(w => w.Route.Primary is not null),
             ExampleNeed.BudgetRefusal => workloads.Any(w => w.Route.Primary is not null) && HasIsolatedBudget(cfg, app, budgets),
             ExampleNeed.PublicLocalResearch => workloads.Any(w => w.Profile.WebSearchAllowed && IsLocal(w.Route)),
@@ -328,7 +352,7 @@ public static class DemoExamples
 
     private static string BaselineFor(DemoExample ex) => ex.Need switch
     {
-        ExampleNeed.InternalCoder or ExampleNeed.InternalResearch or ExampleNeed.InternalWriting => "Internal",
+        ExampleNeed.InternalCoder or ExampleNeed.InternalResearch or ExampleNeed.InternalWriting or ExampleNeed.SensitiveLocal => "Internal",
         ExampleNeed.SanitizedRecord => "Pii",
         _ => "Public",
     };
@@ -381,6 +405,8 @@ public static class DemoExamples
                 ? RouteText(Route(cfg, "Pii", best.Profile.Id)) + " — the explicit cloud pin is refused"
                 : ex.Need == ExampleNeed.SensitiveLocal
                     ? RouteText(Route(cfg, "Pii", best.Profile.Id)) + " (after detection raises it to PII)"
+                : ex.Need == ExampleNeed.SensitivePublicRejected
+                    ? RouteText(Route(cfg, "Pii", best.Profile.Id))
                 : RouteText(best.Route);
             var (title, steps) = Describe(ex, cfg, best.Route);
             return new(ex, true, best.App.Id, best.Profile.Id, best.Pin.Length == 0 ? null : best.Pin, routeText,
@@ -457,10 +483,13 @@ public static class DemoExamples
             case ExampleNeed.InternalWriting:
                 return Declares(profile, Writing) && IsLocal(route) ? "" : null;
             case ExampleNeed.SensitiveCloudPinRefusal:
+                if (ProfileEditing.RejectsSensitive(profile)) return null;
                 var cloud = route.Eligible.FirstOrDefault(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud");
                 return cloud is null ? null : cloud.ConnectionId + "/" + cloud.ModelId;
             case ExampleNeed.SensitiveLocal:
-                return IsLocal(Route(cfg, "Pii", profile.Id)) ? "" : null;
+                return HasRejectingPublic(cfg, app) && !ProfileEditing.RejectsSensitive(profile) && IsLocal(Route(cfg, "Pii", profile.Id)) ? "" : null;
+            case ExampleNeed.SensitivePublicRejected:
+                return ProfileEditing.RejectsSensitive(profile) ? "" : null;
             case ExampleNeed.CacheRepeat:
                 return route.Primary is not null && (cfg.Settings?.CacheTtlSeconds ?? 0) > 0 ? "" : null;
             case ExampleNeed.BudgetRefusal:
@@ -475,6 +504,11 @@ public static class DemoExamples
         }
         return null;
     }
+
+    /// <summary>The application is granted a Public workload that rejects detected sensitive data (ADR-0019).</summary>
+    public static bool HasRejectingPublic(CovenantConfigDto cfg, ApplicationSummaryDto app)
+        => ComposerRules.GrantedProfiles(app).Any(g => cfg.Profiles.FirstOrDefault(p => p.Id == g) is { } p
+            && string.Equals(p.Baseline, "Public", StringComparison.Ordinal) && ProfileEditing.RejectsSensitive(p));
 
     private static bool PrimaryPriced(ResolvedRoute r)
         => r.Primary is { } p && r.PrimaryConnection?.Models.FirstOrDefault(m => m.ModelId == p.ModelId)?.Price is { } price
@@ -521,7 +555,10 @@ public static class DemoExamples
                 yield return new("No Public profile has an eligible cloud target to pin. This example needs a Public cloud route (Hybrid mode).", "policies", "Policies");
                 break;
             case ExampleNeed.SensitiveLocal:
-                yield return new("No local route covers PII for this application's Public workloads. Add a PII route to a local model (Policies → Routes); without one, sensitive requests are refused.", "policies", "Policies");
+                yield return new("This example needs both halves of the comparison: an Internal workload whose \"When sensitive data is detected\" is Route with a PII route to a local model, and a Public workload set to Reject — both granted to this application (Policies → Workloads, Routes).", "policies", "Policies");
+                break;
+            case ExampleNeed.SensitivePublicRejected:
+                yield return new("No Public workload of this application rejects detected sensitive data. Set \"When sensitive data is detected\" to Reject on its Public workload (Policies → Workloads) — a new, audited configuration version.", "policies", "Policies");
                 break;
             case ExampleNeed.CacheRepeat:
                 if ((cfg.Settings?.CacheTtlSeconds ?? 0) <= 0)
@@ -595,6 +632,31 @@ public static class DemoExamples
         form.CatalogModel = null;
         form.PinnedByExample = false;
         return true;
+    }
+
+    /// <summary>After the operator switches the workload (PlaygroundState.SelectProfile). The prompt and every other field are
+    /// KEPT. An external pin the example set is reset (<see cref="ResetExamplePin"/>). The example label is kept only when
+    /// the form now holds EXACTLY what another ready example fills for the new workload (e.g. the Internal/Public sensitive
+    /// pair: same prompt, workflow and use case, no pin) — then it is relabelled to that example; otherwise it is cleared, so
+    /// no run is labelled with an example (or expected outcome) that no longer describes it.</summary>
+    public static void AfterWorkloadChange(PlaygroundForm form, IReadOnlyList<ExampleResolution>? examples)
+    {
+        ResetExamplePin(form);
+        if (form.ExampleId is null || string.Equals(form.ExampleProfileId, form.ProfileId, StringComparison.Ordinal)) return;
+        var twin = examples?.FirstOrDefault(r => r.Ready && r.ModelPin is null
+            && string.Equals(r.ApplicationId, form.ApplicationId, StringComparison.Ordinal)
+            && string.Equals(r.ProfileId, form.ProfileId, StringComparison.Ordinal)
+            && string.Equals(r.Example.Prompt, form.Prompt, StringComparison.Ordinal)
+            && string.Equals(r.Example.Workflow, form.Workflow, StringComparison.Ordinal)
+            && string.Equals(r.Example.UseCase, form.UseCase, StringComparison.Ordinal));
+        if (twin is not null)
+        {
+            form.ExampleId = twin.Example.Id;
+            form.ExampleApplicationId = form.ApplicationId;
+            form.ExampleProfileId = form.ProfileId;
+            if (StillMatches(twin.Example, form)) return;
+        }
+        form.ExampleId = null;
     }
 
     /// <summary>What "Use example" will change in the CURRENT form, shown before it is pressed. Empty = nothing visible changes

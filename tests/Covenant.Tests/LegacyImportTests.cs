@@ -245,8 +245,15 @@ public sealed class LegacyImportTests
 
         var h = new RuntimeSnapshot(hybrid);
         Assert.Equal("openai/gpt-4o-mini (fallback: ollama/qwen3:8b)", PolicyEngineV2.Summary(h, DataClassification.Public, "public-demo"));
-        foreach (var cls in new[] { DataClassification.Internal, DataClassification.Pii, DataClassification.Phi })
-            Assert.Equal("ollama/qwen3:8b", PolicyEngineV2.Summary(h, cls, "public-demo"));
+        Assert.Equal("ollama/qwen3:8b", PolicyEngineV2.Summary(h, DataClassification.Internal, "public-demo"));
+        // ADR-0019: the seeded Public workload rejects detected sensitive data; the Internal workload routes it locally.
+        Assert.Equal(SensitiveDataAction.Reject, hybrid.Profiles.Single(p => p.Id == "public-demo").SensitiveDataAction);
+        Assert.Equal(SensitiveDataAction.Route, hybrid.Profiles.Single(p => p.Id == "internal-default").SensitiveDataAction);
+        foreach (var cls in new[] { DataClassification.Pii, DataClassification.Phi })
+        {
+            Assert.StartsWith("refused: workload 'public-demo' rejects detected sensitive data", PolicyEngineV2.Summary(h, cls, "public-demo"), StringComparison.Ordinal);
+            Assert.Equal("ollama/qwen3:8b", PolicyEngineV2.Summary(h, cls, "internal-default"));
+        }
         Assert.Equal("ollama/qwen3:8b", PolicyEngineV2.Summary(new RuntimeSnapshot(local), DataClassification.Public, "public-demo"));
         Assert.Equal(BudgetPeriod.Monthly, hybrid.Budgets.Single().Period);
         Assert.Equal(3m, hybrid.Budgets.Single().CapUsd);

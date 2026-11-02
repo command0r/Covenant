@@ -102,12 +102,15 @@ public sealed class DemoAppScopedTests
     public void Each_application_lists_only_examples_its_workloads_and_routes_support()
     {
         Assert.Equal(["internal-coding"], Ids(For("engineering-assistant")));                       // no research-model or public examples
-        Assert.Equal(["cache-repeat", "internal-research", "public-research", "sensitive-local", "sensitive-refusal"], Ids(For("research-assistant")));
-        Assert.Equal(["cache-repeat", "public-writing", "sensitive-local", "sensitive-refusal"], Ids(For("communications-assistant")));
-        Assert.Equal(["budget-refusal", "cache-repeat", "public-writing", "sensitive-local", "sensitive-refusal"], Ids(For("budget-demo")));
+        // ADR-0019: the sensitive pair ("sensitive-local" / "sensitive-public-rejected") is offered only to an application whose
+        // workloads show BOTH halves (Internal routes sensitive data locally AND Public rejects it) — none in v7; see
+        // SensitiveDataActionUiTests for demo-app. Engineering (Internal only) gets no sensitive-data noise.
+        Assert.Equal(["cache-repeat", "internal-research", "public-research", "sensitive-refusal"], Ids(For("research-assistant")));
+        Assert.Equal(["cache-repeat", "public-writing", "sensitive-refusal"], Ids(For("communications-assistant")));
+        Assert.Equal(["budget-refusal", "cache-repeat", "public-writing", "sensitive-refusal"], Ids(For("budget-demo")));
         // demo-app's Public workload searches the web and answers on the LOCAL coder: the generic web-research example and the
         // local-inference + governed-search example both describe it; nothing external-model-only is offered.
-        Assert.Equal(["cache-repeat", "public-local-research", "public-research", "sensitive-local"], Ids(For("demo-app")));   // PII stays local; no external to block
+        Assert.Equal(["cache-repeat", "public-local-research", "public-research"], Ids(For("demo-app")));   // Public only here; no external to block
         Assert.DoesNotContain("public-local-research", Ids(For("research-assistant")));   // its Public research answers on Claude
         Assert.DoesNotContain("budget-refusal", Ids(For("research-assistant")));
     }
@@ -124,7 +127,7 @@ public sealed class DemoAppScopedTests
             .Select(e => UiLogic.DemoExamples.ResolveFor(e, "communications-assistant", cfg, Apps(cfg), Budgets, Search()))
             .Where(r => r.Relevant).Select(r => r.Example.Id).OrderBy(x => x, StringComparer.Ordinal).ToArray();
 
-        Assert.Equal(["cache-repeat", "internal-writing", "public-writing", "sensitive-local", "sensitive-refusal"], ids);   // generic examples kept
+        Assert.Equal(["cache-repeat", "internal-writing", "public-writing", "sensitive-refusal"], ids);   // generic examples kept
         Assert.DoesNotContain("internal-coding", ids);                                                 // same model ≠ coding work
         var writing = UiLogic.DemoExamples.ResolveFor(UiLogic.DemoExamples.Find("internal-writing")!, "communications-assistant", cfg, Apps(cfg), Budgets, Search());
         Assert.True(writing.Ready);
@@ -147,9 +150,9 @@ public sealed class DemoAppScopedTests
         var cfg = V7();
         Assert.Equal(["internal-coding"], Groups(cfg, "engineering-assistant").Recommended);
         Assert.Equal(["internal-research"], Groups(cfg, "research-assistant").Recommended);          // cloud research is optional
-        Assert.Equal(["cache-repeat", "public-research", "sensitive-local", "sensitive-refusal"], Groups(cfg, "research-assistant").More);
+        Assert.Equal(["cache-repeat", "public-research", "sensitive-refusal"], Groups(cfg, "research-assistant").More);
         Assert.Equal(["public-writing"], Groups(cfg, "communications-assistant").Recommended);
-        Assert.Equal(["cache-repeat", "sensitive-local", "sensitive-refusal"], Groups(cfg, "communications-assistant").More);
+        Assert.Equal(["cache-repeat", "sensitive-refusal"], Groups(cfg, "communications-assistant").More);
         Assert.Equal(["public-writing", "budget-refusal"], Groups(cfg, "budget-demo").Recommended);  // dedicated budget app only
         Assert.Equal(["public-local-research"], Groups(cfg, "demo-app").Recommended);
         foreach (var app in new[] { "engineering-assistant", "research-assistant", "communications-assistant", "budget-demo", "demo-app" })
@@ -191,14 +194,15 @@ public sealed class DemoAppScopedTests
     }
 
     [Fact]
-    public void The_same_sensitive_prompt_is_local_by_policy_and_blocked_only_with_an_explicit_external_pin()
+    public void Without_a_rejecting_public_workload_only_the_explicit_external_pin_example_is_offered()
     {
-        var local = ResolveFor("sensitive-local", "communications-assistant");
-        var blocked = ResolveFor("sensitive-refusal", "communications-assistant");
+        // research-assistant: Internal research + Public research (Claude, route action). The pin example is offered;
+        // the Internal/Public pair is not (no Public workload rejects sensitive data here — ADR-0019).
+        var local = ResolveFor("sensitive-local", "research-assistant");
+        var blocked = ResolveFor("sensitive-refusal", "research-assistant");
         Assert.Equal(local.Example.Prompt, blocked.Example.Prompt);                      // same synthetic input
-        Assert.True(local.Ready);
-        Assert.Null(local.ModelPin);                                                     // policy chooses → PII route → local
-        Assert.Contains("ollama/", local.ConfiguredRoute, StringComparison.Ordinal);
+        Assert.False(local.Relevant);
+        Assert.False(local.Ready);
         Assert.Equal("anthropic/" + Claude, blocked.ModelPin);                           // explicit external attempt
         Assert.Contains("Blocked by policy", blocked.Example.Expected, StringComparison.Ordinal);
         Assert.Contains("not a provider outage", blocked.Example.Expected, StringComparison.Ordinal);

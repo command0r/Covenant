@@ -1,188 +1,110 @@
-"""Generates docs/diagrams/covenant-architecture.{drawio,svg} from one node/edge list.
-The SVG embeds the draw.io XML (content attribute) so draw.io can reopen the SVG directly."""
-import html, sys, os
+"""Original Covenant diagram artwork. Generates editable Draw.io XML and matching SVG.
+Standard library only. Edit coordinates/content here, then run this script.
+"""
+from pathlib import Path
+from xml.etree.ElementTree import Element, SubElement, tostring
+from html import escape
 
-# palette (matches README mermaid classDefs)
-C = {
-    "caller":   ("#e3f2fd", "#1565c0", "#0d47a1"),
-    "govern":   ("#fff3e0", "#ef6c00", "#e65100"),
-    "provider": ("#e8f5e9", "#2e7d32", "#1b5e20"),
-    "evidence": ("#f3e5f5", "#6a1b9a", "#4a148c"),
-    "denied":   ("#ffebee", "#c62828", "#b71c1c"),
-    "neutral":  ("#f5f5f5", "#616161", "#212121"),
-    "none":     ("none",    "#616161", "#212121"),
-}
+OUT=Path(__file__).parent
+P={'blue':('#EFF6FF','#2563EB'),'teal':('#ECFDF5','#078568'),'purple':('#F5F3FF','#7653C7'),'amber':('#FFFBEB','#B77912'),'red':('#FFF1F2','#C0394D'),'slate':('#F1F5F9','#64748B')}
+class Diagram:
+ def __init__(self,name,w,h,title,subtitle):
+  self.name,self.w,self.h=name,w,h
+  self.xml=Element('mxfile',host='app.diagrams.net',version='26.0.0')
+  dia=SubElement(self.xml,'diagram',id=name,name=title)
+  model=SubElement(dia,'mxGraphModel',dx=str(w),dy=str(h),grid='1',gridSize='10',page='1',pageScale='1',pageWidth=str(w),pageHeight=str(h),background='#FFFFFF')
+  self.root=SubElement(model,'root');SubElement(self.root,'mxCell',id='0');SubElement(self.root,'mxCell',id='1',parent='0');self.n=0
+  self.svg=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-label="{escape(title)}"><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="#64748B"/></marker></defs><rect width="100%" height="100%" fill="white"/>']
+  self.text(40,32,w-80,42,title,30,'#14233B',True)
+  self.text(40,80,w-80,28,subtitle,17,'#54647B')
+ def cell(self,value,style,x,y,w,h):
+  self.n+=1;c=SubElement(self.root,'mxCell',id=str(self.n+1),value=value,style=style,vertex='1',parent='1');SubElement(c,'mxGeometry',x=str(x),y=str(y),width=str(w),height=str(h),attrib={'as':'geometry'});return str(self.n+1)
+ def text(self,x,y,w,h,s,size=16,color='#23354D',bold=False,center=False):
+  self.cell(s,f'text;html=0;whiteSpace=wrap;align={"center" if center else "left"};verticalAlign=middle;fontFamily=Arial;fontSize={size};fontColor={color};fontStyle={1 if bold else 0};spacing=0;',x,y,w,h)
+  self.svg.append(f'<text x="{x+w/2 if center else x}" y="{y+h/2}" dominant-baseline="central" text-anchor="{"middle" if center else "start"}" font-family="Arial,Helvetica,sans-serif" font-size="{size}" font-weight="{700 if bold else 400}" fill="{color}">{escape(s)}</text>')
+ def rect(self,x,y,w,h,fill,stroke,rounded=True,dash=False):
+  self.cell('',f'rounded={1 if rounded else 0};arcSize=10;fillColor={fill};strokeColor={stroke};strokeWidth=1.5;dashed={1 if dash else 0};',x,y,w,h)
+  self.svg.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{12 if rounded else 0}" fill="{fill}" stroke="{stroke}" stroke-width="1.5"'+(' stroke-dasharray="6 5"' if dash else '')+'/>')
+ def card(self,x,y,w,h,title,lines=(),tone='blue',num=None):
+  fill,color=P[tone];self.rect(x,y,w,h,fill,color)
+  off=20
+  if num:
+   self.rect(x+16,y+16,32,32,color,color);self.text(x+16,y+16,32,32,str(num),18,'#FFFFFF',True,True);off=60
+  self.text(x+off,y+15,w-off-16,30,title,21,color,True)
+  for i,s in enumerate(lines):self.text(x+20,y+54+24*i,w-40,24,s,16)
+ def edge(self,points,label=None,lx=0,ly=0,lw=200,dash=False):
+  self.n+=1;c=SubElement(self.root,'mxCell',id=str(self.n+1),edge='1',parent='1',style=f'endArrow=block;endFill=1;rounded=0;strokeColor=#64748B;strokeWidth=2;dashed={1 if dash else 0};')
+  g=SubElement(c,'mxGeometry',relative='1',attrib={'as':'geometry'})
+  SubElement(g,'mxPoint',x=str(points[0][0]),y=str(points[0][1]),attrib={'as':'sourcePoint'});SubElement(g,'mxPoint',x=str(points[-1][0]),y=str(points[-1][1]),attrib={'as':'targetPoint'})
+  if len(points)>2:
+   a=SubElement(g,'Array',attrib={'as':'points'})
+   for x,y in points[1:-1]:SubElement(a,'mxPoint',x=str(x),y=str(y))
+  self.svg.append('<polyline points="'+' '.join(f'{x},{y}' for x,y in points)+'" fill="none" stroke="#64748B" stroke-width="2" marker-end="url(#arrow)"'+(' stroke-dasharray="6 5"' if dash else '')+'/>')
+  if label:self.text(lx,ly,lw,24,label,14,'#54647B',False,True)
+ def save(self):
+  (OUT/(self.name+'.drawio')).write_bytes(tostring(self.xml,encoding='utf-8',xml_declaration=True))
+  (OUT/(self.name+'.svg')).write_text('\n'.join(self.svg+['</svg>']))
 
-# id, kind, x, y, w, h, lines, opts
-N_DETAIL = [
-    ("perimeter", "none", 260, 60, 920, 830, ["Customer perimeter — no prompt, response, or metadata leaves; egress only to the allow-listed models"], {"container": True, "dashed": True}),
-    ("appliance", "none", 290, 120, 690, 560, ["Covenant appliance — single .NET process, NativeAOT target"], {"container": True}),
+# Overview: a small number of purposeful blocks, with a visible trust boundary.
+d=Diagram('covenant-overview',1440,760,'Covenant at a glance','One governed entry point between your applications and approved AI services.')
+d.rect(32,128,900,490,'#FBFCFE','#CCD6E3',dash=True);d.text(52,140,820,28,'YOUR ORGANIZATION',15,'#54647B',True)
+d.rect(964,128,444,490,'#FCFAFF','#D9D0EE',dash=True);d.text(984,140,400,28,'APPROVED EXTERNAL SERVICES',15,'#7653C7',True)
+d.card(64,236,220,126,'Applications',['App identity','Owning team'], 'blue')
+d.card(340,224,290,150,'Covenant',['Inspect data and apply rules','Choose an approved route','Check spend and record proof'],'amber')
+d.card(692,250,208,102,'Local models',['Ollama / Qwen'],'teal')
+d.card(1000,236,372,126,'Cloud models',['Anthropic / OpenAI','Only when policy permits'],'purple')
+d.card(64,468,220,102,'Admin console',['Rules, routes and budgets'],'blue')
+d.card(340,468,290,102,'Evidence and costs',['Every outcome, including refusals'],'slate')
+d.card(1000,468,372,102,'Web search',['Tavily, for approved Public work'],'purple')
+d.edge([(284,299),(340,299)])
+d.edge([(630,299),(692,299)])
+d.edge([(610,224),(610,195),(1186,195),(1186,236)],'Approved cloud route',800,169,235)
+d.edge([(630,344),(658,344),(658,408),(1186,408),(1186,468)],'Optional external search',810,380,235)
+d.edge([(174,468),(174,415),(410,415),(410,374)],dash=True)
+d.edge([(518,374),(518,468)],'All outcomes',530,414,130)
+d.text(48,646,1344,28,'LOCAL  Data stays inside     |     EXTERNAL  Data leaves only through an approved route     |     EVIDENCE  Who, what, where and cost',16,'#23354D',True)
+d.text(48,694,1344,24,'Direct access to a chatbot bypasses Covenant. Use network and endpoint controls to require this path.',16,'#54647B')
+d.save()
 
-    ("c_openai", "caller", 30, 190, 190, 70, ["OpenAI-compatible clients", "SDKs · Open WebUI · Bearer key"], {}),
-    ("c_anthropic", "caller", 30, 290, 190, 70, ["Anthropic clients", "x-api-key · Messages API"], {}),
-    ("c_admin", "caller", 30, 720, 190, 70, ["Admins / auditors", "admin token"], {}),
+# Detail: one downward spine, branches kept outside the reading path.
+d=Diagram('covenant-architecture',1440,1240,'How a request is governed','Read top to bottom. A refusal stops further work and still creates an audit record.')
+d.text(48,126,320,28,'INPUT AND CONTROL',15,'#54647B',True)
+d.text(480,126,480,28,'REQUEST PIPELINE',15,'#54647B',True)
+d.text(1060,126,330,28,'DESTINATIONS AND RESULTS',15,'#54647B',True)
+steps=[('Identify the caller',['Authenticate the application; bind its team.','Validate the request format.'],'blue'),('Inspect the content',['Combine the workload label with detection.','Incomplete inspection means refuse.'],'amber'),('Apply the policy',['Enforce sensitive-data handling and routes.','Sanitize only an approved structured record.'],'amber'),('Check the exact cache',['Reuse only an eligible, matching response.','A cache hit avoids a new model call.'],'blue'),('Check limits and retrieve',['Check rate, pause and budget reservation.','Optional Public web search is governed too.'],'amber'),('Call an approved model',['Use the selected local or external adapter.','Fallback stays within the approved routes.'],'teal'),('Finalize and record',['Settle usage and attribute cost to the team.','Record the outcome and return the response.'],'slate')]
+for i,(title,lines,tone) in enumerate(steps):
+ y=172+i*134;d.card(480,y,480,108,title,lines,tone,str(i+1))
+ if i<6:d.edge([(720,y+108),(720,y+134)])
+d.card(48,172,340,108,'Application request',['OpenAI / Anthropic compatible API','Application key identifies the caller'],'blue')
+d.edge([(388,226),(480,226)])
+d.card(48,332,340,156,'Sensitive data rules',['Internal: approved local processing','Public demo: reject detected PII/PHI','Detection can raise the data label.','No match is not proof of safe data.'],'red')
+d.card(48,550,340,132,'Configuration',['Profiles, routes and model allow-list','Budgets and permission settings','Provider secrets stay on the server.'],'slate')
+d.edge([(388,603),(426,603),(426,494),(480,494)],dash=True)
+d.card(48,758,340,156,'Refused or failed',['Record the reason and any usage.','Do not continue to later stages.','Earlier tool or model calls may','already have incurred a charge.'],'red')
+d.card(1060,574,332,108,'Exact cache hit',['Skip retrieval and model execution.','Still record and attribute the request.'],'blue')
+d.edge([(960,628),(1060,628)])
+d.edge([(1392,628),(1420,628),(1420,1118),(1000,1118),(1000,1030),(960,1030)],dash=True)
+d.card(1060,730,332,108,'Tavily web search',['Public only, explicitly enabled','Sources and cost recorded separately'],'purple')
+d.edge([(960,762),(1010,762),(1010,784),(1060,784)])
+d.card(1060,870,332,108,'Approved models',['Local: Ollama / Qwen','External: Anthropic / OpenAI'],'teal')
+d.edge([(960,896),(1010,896),(1010,924),(1060,924)])
+d.card(48,1010,340,108,'Audit and budget ledger',['Hash-linked request evidence','Costs by application and team'],'slate')
+d.edge([(480,1030),(428,1030),(428,1064),(388,1064)])
+# Cache shortcut terminates at finalization, not an unimplemented provider stage.
+d.text(48,1160,1344,28,'DESIGN PATTERNS  Canonical proxy  •  Policy middleware  •  Provider adapters  •  Exact cache  •  Governed retrieval  •  Audit trail',16,'#23354D',True)
+d.text(48,1200,1344,24,'Sensitive-data inspection is bounded and heuristic. Sanitization supports a narrow schema, not arbitrary prose or PHI.',16,'#54647B')
+d.save()
 
-    ("ingress", "caller", 310, 180, 150, 200, ["Ingress", "/v1/chat/completions", "/v1/messages", "/v1/models", "", "→ one canonical request"], {}),
-
-    ("audit", "evidence", 490, 160, 470, 250, ["Audit stage — outermost; records allow, deny, and error alike", "metadata + SHA-256 prompt fingerprint — never content"], {"container": True}),
-    ("s_auth", "govern", 510, 210, 100, 55, ["Auth + shape", "keys · text only"], {}),
-    ("s_classify", "govern", 620, 210, 100, 55, ["Classify", "PII / PHI"], {}),
-    ("s_policy", "govern", 730, 210, 100, 55, ["Policy", "route, complexity"], {}),
-    ("s_cache", "govern", 840, 210, 100, 55, ["Cache", "team-scoped TTL"], {}),
-    ("s_rate", "govern", 840, 320, 100, 55, ["Rate limit", "team + global"], {}),
-    ("s_budget", "govern", 730, 320, 100, 55, ["Budget", "caps, kill switch"], {}),
-    ("s_provider", "provider", 620, 320, 100, 55, ["Provider call", "adapter:model"], {}),
-    ("s_attr", "evidence", 510, 320, 100, 55, ["Attribute cost", "team, workflow"], {}),
-
-    ("denied", "denied", 490, 440, 210, 70, ["Denied — fail-closed", "400 · 401 · 403 · 429 · 502", "no provider call, still audited"], {}),
-    ("response", "caller", 730, 440, 230, 70, ["Response + usage", "OpenAI or Anthropic wire", "buffered or SSE stream"], {}),
-
-    ("log", "evidence", 310, 560, 200, 80, ["Hash-chained audit log", "append-only · SHA-256 links", "tampered chain refuses boot"], {}),
-    ("anchors", "evidence", 530, 560, 220, 80, ["Chain-head anchors", "Nth head hash → separate storage", "end-truncation detectable (ADR-0007)"], {}),
-    ("ledger", "evidence", 770, 560, 190, 80, ["Spend ledger", "replayed from the log at boot", "read by the Budget stage"], {}),
-
-    ("local", "provider", 1000, 380, 160, 70, ["Local model", "Ollama / vLLM", "in-perimeter, PII/PHI"], {}),
-
-    ("p_openai", "provider", 1220, 180, 160, 60, ["OpenAI", "openai adapter"], {}),
-    ("p_anthropic", "provider", 1220, 270, 160, 60, ["Anthropic", "anthropic adapter"], {}),
-    ("egress", "none", 1200, 130, 200, 30, ["Egress allow-list only"], {"plain": True}),
-
-    ("dash", "caller", 310, 730, 200, 80, ["Admin dashboard", "/admin/ui · FinOps savings", "kill switch · live SSE · reset"], {}),
-    ("export", "evidence", 540, 730, 200, 80, ["Evidence export", "/admin/evidence", "verifies chain + anchors"], {}),
-    ("neo4j", "evidence", 770, 730, 190, 80, ["Neo4j evidence graph", "optional (ADR-0006)", "verified prefix only"], {"dashed": True}),
-    ("otel", "neutral", 990, 730, 170, 80, ["OTel collector", "optional (ADR-0003)", "spans, never content"], {"dashed": True}),
-]
-
-# source, target, label, dashed, svg points (explicit polyline for the SVG render)
-E_DETAIL = [
-    ("c_openai", "ingress", "", False, [(220, 225), (310, 225)]),
-    ("c_anthropic", "ingress", "", False, [(220, 325), (310, 325)]),
-    ("ingress", "s_auth", "", False, [(460, 237), (510, 237)]),
-    ("s_auth", "s_classify", "", False, [(610, 237), (620, 237)]),
-    ("s_classify", "s_policy", "", False, [(720, 237), (730, 237)]),
-    ("s_policy", "s_cache", "", False, [(830, 237), (840, 237)]),
-    ("s_cache", "s_rate", "miss", False, [(890, 265), (890, 320)]),
-    ("s_rate", "s_budget", "", False, [(840, 347), (830, 347)]),
-    ("s_budget", "s_provider", "", False, [(730, 347), (720, 347)]),
-    ("s_provider", "s_attr", "", False, [(620, 347), (610, 347)]),
-    ("s_attr", "response", "", False, [(560, 375), (560, 395), (845, 395), (845, 440)]),
-    ("audit", "denied", "any stage denies", False, [(595, 410), (595, 440)]),
-    ("s_provider", "local", "", False, [(670, 375), (670, 425), (1000, 425)]),
-    ("s_provider", "p_openai", "", False, [(985, 425), (985, 210), (1220, 210)]),
-    ("s_provider", "p_anthropic", "", False, [(985, 290), (1220, 290)]),
-    ("audit", "log", "every request", False, [(490, 395), (475, 395), (475, 545), (410, 545), (410, 560)]),
-    ("log", "anchors", "", False, [(510, 600), (530, 600)]),
-    ("log", "ledger", "boot replay", False, [(510, 625), (525, 625), (525, 655), (755, 655), (755, 625), (770, 625)]),
-    ("log", "export", "", False, [(400, 640), (400, 690), (640, 690), (640, 730)]),
-    ("log", "neo4j", "", True, [(420, 640), (420, 705), (865, 705), (865, 730)]),
-    ("audit", "otel", "", True, [(960, 390), (970, 390), (970, 720), (1075, 720), (1075, 730)]),
-    ("c_admin", "dash", "", False, [(220, 755), (310, 755)]),
-    ("c_admin", "export", "", False, [(220, 770), (270, 770), (270, 825), (640, 825), (640, 810)]),
-]
-
-N, E, SIZE, TITLE = [], [], [None], [None]
-
-# ---------------- draw.io ----------------
-def drawio():
-    cells = ['<mxCell id="0"/>', '<mxCell id="1" parent="0"/>']
-    for nid, kind, x, y, w, h, lines, o in N:
-        fill, stroke, font = C[kind]
-        label = "&lt;b&gt;" + html.escape(lines[0]) + "&lt;/b&gt;" + ("&lt;br&gt;" + "&lt;br&gt;".join(html.escape(l) for l in lines[1:]) if len(lines) > 1 else "")
-        style = f"rounded=1;whiteSpace=wrap;html=1;fillColor={fill};strokeColor={stroke};fontColor={font};"
-        if o.get("container"): style += "verticalAlign=top;align=left;spacingLeft=8;spacingTop=2;container=1;"
-        if o.get("dashed"): style += "dashed=1;"
-        if o.get("plain"): style = "text;html=1;align=center;verticalAlign=middle;fontStyle=2;fontColor=#616161;"
-        if kind == "none" and not o.get("plain"): style += "strokeWidth=2;"
-        cells.append(f'<mxCell id="{nid}" value="{label}" style="{style}" vertex="1" parent="1"><mxGeometry x="{x}" y="{y}" width="{w}" height="{h}" as="geometry"/></mxCell>')
-    for i, (s, t, label, dashed, _) in enumerate(E):
-        style = "edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;strokeColor=#455a64;" + ("dashed=1;" if dashed else "")
-        cells.append(f'<mxCell id="e{i}" value="{html.escape(label)}" style="{style}" edge="1" parent="1" source="{s}" target="{t}"><mxGeometry relative="1" as="geometry"/></mxCell>')
-    return ('<mxfile host="app.diagrams.net" agent="Covenant gen_diagram.py" version="24.0.0">'
-            '<diagram name="Covenant architecture" id="covenant-arch">'
-            f'<mxGraphModel dx="{SIZE[0][0]}" dy="{SIZE[0][1]}" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="{SIZE[0][0]+30}" pageHeight="{SIZE[0][1]+10}" math="0" shadow="0">'
-            '<root>' + "".join(cells) + '</root></mxGraphModel></diagram></mxfile>')
-
-# ---------------- SVG ----------------
-def svg(embed_xml):
-    W, H = SIZE[0]
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
-           f'font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="12" content="{html.escape(embed_xml, quote=True)}">',
-           '',
-           f'<rect width="{W}" height="{H}" fill="#ffffff"/>',
-           f'<text x="20" y="34" font-size="20" font-weight="700" fill="#212121">{html.escape(TITLE[0])}</text>',
-           (SIZE[0][0] > 1300 and '<text x="20" y="54" font-size="12" fill="#616161">Every request passes the same ordered governance pipeline; the hash-chained audit log is the evidence of record, everything else is a derived view.</text>' or '')]
-    for nid, kind, x, y, w, h, lines, o in N:
-        fill, stroke, font = C[kind]
-        dash = ' stroke-dasharray="6 4"' if o.get("dashed") else ""
-        if o.get("plain"):
-            out.append(f'<text x="{x + w/2}" y="{y + h/2 + 4}" text-anchor="middle" font-style="italic" fill="#616161">{html.escape(lines[0])}</text>')
-            continue
-        sw = 2 if kind == "none" else 1.2
-        out.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="8" fill="{fill}" stroke="{stroke}" stroke-width="{sw}"{dash}/>')
-        if o.get("container"):
-            out.append(f'<text x="{x + 10}" y="{y + 18}" font-weight="700" fill="{font}">{html.escape(lines[0])}</text>')
-            for j, l in enumerate(lines[1:]):
-                out.append(f'<text x="{x + 10}" y="{y + 34 + j*14}" font-size="11" fill="{font}" fill-opacity="0.85">{html.escape(l)}</text>')
-            continue
-        n = len(lines); lh = 15
-        y0 = y + h/2 - (n - 1) * lh / 2 + 4
-        for i, l in enumerate(lines):
-            fw = ' font-weight="700"' if i == 0 else ' fill-opacity="0.85"'
-            out.append(f'<text x="{x + w/2}" y="{y0 + i*lh}" text-anchor="middle" fill="{font}"{fw}>{html.escape(l)}</text>')
-    for s, t, label, dashed, pts in E:
-        d = " ".join(f"{px},{py}" for px, py in pts)
-        dash = ' stroke-dasharray="6 4"' if dashed else ""
-        out.append(f'<polyline points="{d}" fill="none" stroke="#455a64" stroke-width="1.4"{dash}/>')
-        # explicit arrowhead (renderer-independent): triangle along the final segment
-        (x1, y1), (x2, y2) = pts[-2], pts[-1]
-        dx, dy = x2 - x1, y2 - y1
-        L = (dx*dx + dy*dy) ** 0.5 or 1
-        ux, uy = dx / L, dy / L
-        bx, by = x2 - ux * 9, y2 - uy * 9
-        out.append(f'<polygon points="{x2},{y2} {bx - uy*4:.1f},{by + ux*4:.1f} {bx + uy*4:.1f},{by - ux*4:.1f}" fill="#455a64"/>')
-        if label:
-            segs = list(zip(pts, pts[1:]))
-            (ax, ay), (cx, cy) = max(segs, key=lambda p: abs(p[1][0]-p[0][0]) + abs(p[1][1]-p[0][1]))
-            mx, my = (ax + cx) / 2, (ay + cy) / 2
-            w = len(label) * 6.2 + 8
-            out.append(f'<rect x="{mx - w/2:.1f}" y="{my - 7}" width="{w:.1f}" height="14" rx="3" fill="#ffffff"/>')
-            out.append(f'<text x="{mx}" y="{my + 4}" text-anchor="middle" font-size="10.5" fill="#455a64">{html.escape(label)}</text>')
-    # legend
-    lx, ly = 20, 100
-    for i, (name, kind) in enumerate([("Callers / wire", "caller"), ("Governance stages", "govern"), ("Providers", "provider"), ("Evidence", "evidence"), ("Denial (fail-closed)", "denied")]):
-        fill, stroke, font = C[kind]
-        out.append(f'<rect x="{lx}" y="{ly + i*20 - 10}" width="14" height="14" rx="3" fill="{fill}" stroke="{stroke}"/>')
-        out.append(f'<text x="{lx + 20}" y="{ly + i*20 + 1}" font-size="11" fill="#212121">{name}</text>')
-    out.append('</svg>')
-    return "\n".join(out)
-
-# ---------------- high-level overview (one glance) ----------------
-N_HL = [
-    ("perimeter", "none", 250, 50, 700, 420, ["Customer perimeter — nothing leaves except allow-listed model egress"], {"container": True, "dashed": True}),
-    ("clients", "caller", 30, 230, 180, 90, ["Any AI client", "OpenAI or Anthropic wire", "SDKs, Open WebUI, agents"], {}),
-    ("covenant", "govern", 290, 120, 360, 150, ["Covenant — one governed pipeline", "auth → shape → classify → policy → cache → rate limit", "→ budget / kill switch → provider → attribute cost", "", "fail-closed: no match, no call"], {}),
-    ("evidence", "evidence", 290, 320, 360, 110, ["Tamper-evident evidence", "hash-chained audit log + anchored head", "spend ledger · evidence export · dashboard"], {}),
-    ("local", "provider", 700, 320, 210, 90, ["In-perimeter model", "Ollama / vLLM", "PII / PHI never leave"], {}),
-    ("external", "provider", 1000, 130, 200, 110, ["Allow-listed providers", "OpenAI · Anthropic", "egress only to these"], {}),
-    ("admins", "caller", 30, 360, 180, 70, ["Admins / auditors", "kill switch · evidence"], {}),
-]
-E_HL = [
-    ("clients", "covenant", "every request", False, [(210, 265), (250, 265), (250, 195), (290, 195)]),
-    ("covenant", "external", "permitted routes", False, [(650, 185), (1000, 185)]),
-    ("covenant", "local", "sensitive data", False, [(650, 245), (805, 245), (805, 320)]),
-    ("covenant", "evidence", "allow, deny, error alike", False, [(470, 270), (470, 320)]),
-    ("admins", "evidence", "", False, [(210, 395), (290, 395)]),
-]
-
-if __name__ == "__main__":
-    outdir = sys.argv[1]
-    os.makedirs(outdir, exist_ok=True)
-    for name, nodes, edges, size, title in [
-        ("covenant-architecture", N_DETAIL, E_DETAIL, (1420, 910), "Covenant — in-perimeter AI inference governance & FinOps control plane"),
-        ("covenant-overview", N_HL, E_HL, (1240, 500), "Covenant at a glance"),
-    ]:
-        N[:] = nodes; E[:] = edges; SIZE[0] = size; TITLE[0] = title
-        xml = drawio()
-        open(os.path.join(outdir, f"{name}.drawio"), "w").write(xml)
-        open(os.path.join(outdir, f"{name}.svg"), "w").write(svg(xml))
-    print("ok")
+# Use Draw.io itself for final SVG exports, so wrapping matches the editable source.
+# The built-in SVG is a portable preview when the desktop exporter is unavailable.
+if __name__ == '__main__':
+ import os, shutil, subprocess
+ exporter=os.environ.get('DRAWIO') or shutil.which('drawio')
+ mac='/Applications/draw.io.app/Contents/MacOS/draw.io'
+ if not exporter and Path(mac).exists(): exporter=mac
+ if exporter:
+  for name in ('covenant-overview','covenant-architecture'):
+   for fmt in ('svg','png'):
+    subprocess.run([exporter,'--export','--format',fmt,'--theme','light','--size','page','--embed-diagram','--output',str(OUT/(name+'.'+fmt)),str(OUT/(name+'.drawio'))],check=True,timeout=90)
+ else:
+  print('Draw.io not installed: generated portable SVG previews. Export .drawio files with Draw.io before publishing.')

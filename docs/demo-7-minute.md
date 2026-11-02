@@ -44,10 +44,11 @@ pricing.
 
 ## 3. Sensitive record: denied, then an explicit sanitized route (≈2.5 min)
 
-1. **Local, then denied:** example **Sensitive data detected: served locally** (same prompt, policy chooses → local), then
-   **Sensitive data: explicit external attempt is blocked**. The synthetic SSN `000-12-3456` raises the request
-   to PII, and the pinned external model is refused at Policy. The red **Sensitive · PII (detected …)** chip shows it;
-   nothing is sent.
+1. **Local, then denied:** choose **Demo application**, then **Internal workload: sensitive data served locally**.
+   Use example selects Internal. Run it, switch to Public, and run the identical prompt. The synthetic SSN raises
+   classification to PII; the Public workload rejects it at Classify, before cache, search or any model call.
+   The paired **Public workload: the same sensitive data is rejected** example is recommended too.
+   Configure the Public workload to **Reject the request** on detection before the session.
 2. **Explicit policy:** Policies → Routes → the `support-records` route. Show the **Sanitized external route** section:
    - only the dedicated PII workload uses it;
    - only the listed identifier fields and tasks are accepted;

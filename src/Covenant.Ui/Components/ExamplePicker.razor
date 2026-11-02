@@ -22,7 +22,7 @@
     var pinned = !showMore && Selected is { } cur && groups.More.Contains(cur) ? cur : null;
     <div class="example-bar">
         <label for="@(IdPrefix + "-ex")" class="field-label">Example</label>
-        <select id="@(IdPrefix + "-ex")" class="input" value="@(_selected ?? "")" @onchange="OnSelect" disabled="@Pg.Running">
+        <select id="@(IdPrefix + "-ex")" class="input" value="@(ExampleSelection.Shown(_selected, Pg.Form.ExampleId) ?? "")" @onchange="OnSelect" disabled="@Pg.Running">
             <option value="">Write your own, or choose an example…</option>
             <optgroup label="Recommended for this application">
                 @foreach (var r in groups.Recommended)
@@ -134,7 +134,7 @@
     /// <summary>Only an example listed for the CURRENT application can be selected; a selection made under another
     /// application simply disappears (the list is per application).</summary>
     private ExampleResolution? Selected
-        => (_selected ?? Pg.Form.ExampleId) is { Length: > 0 } id ? Pg.Examples.FirstOrDefault(e => e.Example.Id == id) : null;
+        => ExampleSelection.Shown(_selected, Pg.Form.ExampleId) is { Length: > 0 } id ? Pg.Examples.FirstOrDefault(e => e.Example.Id == id) : null;
 
     private string? _forApp;
 
@@ -163,7 +163,11 @@
         if (string.Equals(_forApp, key, StringComparison.Ordinal)) return;
         bool first = _forApp is null;
         _forApp = key;
-        if (!first && _selected is { } id && !(Pg.Form.ExampleId == id)) { _selected = null; StateHasChanged(); }
+        // A twin relabel (Internal ⇄ Public sensitive pair) moves the selection WITH the form's example instead of
+        // dropping it to the placeholder while "Fill again" stays (pure rule: ExampleSelection.AfterSwitch).
+        if (first) return;
+        var next = ExampleSelection.AfterSwitch(_selected, Pg.Form.ExampleId);
+        if (!string.Equals(next, _selected, StringComparison.Ordinal)) { _selected = next; StateHasChanged(); }
     }
 
     private string EmptyText

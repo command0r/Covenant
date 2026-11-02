@@ -102,7 +102,8 @@ public sealed class ContractRoundTripTests
         ],
         Profiles =
         [
-            new WorkloadProfileConfig { Id = "public-tickets", Name = "Public tickets", Baseline = DataClassification.Public, Description = "Synthetic public text" },
+            new WorkloadProfileConfig { Id = "public-tickets", Name = "Public tickets", Baseline = DataClassification.Public, Description = "Synthetic public text",
+                                        SensitiveDataAction = SensitiveDataAction.Reject },
             new WorkloadProfileConfig { Id = "internal", Name = "Internal", Baseline = DataClassification.Internal },
             new WorkloadProfileConfig { Id = "customer-pii", Name = "Customer PII", Baseline = DataClassification.Pii },
             new WorkloadProfileConfig { Id = "clinical", Name = "Clinical", Baseline = DataClassification.Phi },
@@ -331,6 +332,8 @@ public sealed class ContractRoundTripTests
         Assert.Equal(new[] { "monthly", "daily", "none" }, dto.Budgets.Select(b => b.Period));
         Assert.Equal(new[] { "hard", "warn-only", "hard" }, dto.Budgets.Select(b => b.Enforcement));
         Assert.Equal(new[] { "Public", "Internal", "Pii", "Phi" }, dto.Profiles.Select(p => p.Baseline));
+        // ADR-0019: "reject" is written explicitly; the default "route" travels too, and the console keeps both on save.
+        Assert.Equal(new[] { "reject", "route", "route", "route" }, dto.Profiles.Select(p => p.SensitiveDataAction));
         Assert.Equal(new[] { "Pii", "Phi" }, dto.Policies[2].Classifications);
         Assert.Equal(0.15m, dto.Connections[2].Models[0].Price!.InputPer1M);
         Assert.Equal(0.60m, dto.Connections[2].Models[0].Price!.OutputPer1M);
@@ -504,6 +507,18 @@ public sealed class ContractRoundTripTests
         Assert.Null(ui.Eligible[0].ExcludedReason);
         Assert.Equal("cloud destination for PII", ui.Eligible[1].ExcludedReason);
         Assert.Equal("PII → ollama/qwen3:8b", ui.Explanation);
+        Assert.Null(ui.RefusedAtStage);
+
+        // ADR-0019: a classify-stage rejection carries the stage and the Host-computed suggestions to the console.
+        var rejected = JsonSerializer.Serialize(new SimulateResponse
+        {
+            DryRun = true, ConfigVersion = 7, ApplicationId = "demo-app", Profile = "public-tickets", Classification = "Pii", Baseline = "Public",
+            DetectedSignal = "US SSN pattern", Eligible = [], Decision = "refuse", Fallbacks = [], Reason = "rejected",
+            RefusedAtStage = "classify", SuggestedProfiles = ["internal"],
+        }, ConfigJsonContext.Default.SimulateResponse);
+        var uiRejected = JsonSerializer.Deserialize(rejected, UiModels.UiJsonContext.Default.SimulateResponseDto)!;
+        Assert.Equal("classify", uiRejected.RefusedAtStage);
+        Assert.Equal(["internal"], uiRejected.SuggestedProfiles!);
     }
 
     [Fact]

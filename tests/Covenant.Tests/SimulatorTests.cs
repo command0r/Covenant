@@ -64,14 +64,22 @@ public sealed class SimulatorTests : IDisposable
     [Fact]
     public async Task Dry_run_shows_detector_escalation_and_cloud_exclusion()
     {
-        var body = await Simulate("""{"application_id":"demo-app","profile_id":"public-demo","prompt":"Public notice, SSN 123-45-6789"}""");
+        // ADR-0019: the seeded Internal workload routes detected PII locally; the seeded Public workload rejects it (below).
+        var body = await Simulate("""{"application_id":"demo-app","profile_id":"internal-default","prompt":"Notice, SSN 123-45-6789"}""");
         Assert.Equal("Pii", body.GetProperty("classification").GetString());
-        Assert.Equal("Public", body.GetProperty("baseline").GetString());
+        Assert.Equal("Internal", body.GetProperty("baseline").GetString());
         Assert.Equal("US SSN pattern", body.GetProperty("detected_signal").GetString());
         Assert.Equal($"ollama/{V2.LocalTag}", body.GetProperty("primary").GetString());
 
-        var refused = await Simulate($$"""{"application_id":"demo-app","profile_id":"public-demo","prompt":"Public notice, SSN 123-45-6789","model":"{{V2.CloudModel}}"}""");
+        var refused = await Simulate($$"""{"application_id":"demo-app","profile_id":"internal-default","prompt":"Notice, SSN 123-45-6789","model":"{{V2.CloudModel}}"}""");
         Assert.Equal("refuse", refused.GetProperty("decision").GetString());
+
+        var rejected = await Simulate("""{"application_id":"demo-app","profile_id":"public-demo","prompt":"Public notice, SSN 123-45-6789"}""");
+        Assert.Equal("refuse", rejected.GetProperty("decision").GetString());
+        Assert.Equal("classify", rejected.GetProperty("refused_at_stage").GetString());
+        Assert.Equal("Pii", rejected.GetProperty("classification").GetString());
+        Assert.Equal("internal-default", rejected.GetProperty("suggested_profiles")[0].GetString());
+        Assert.False(rejected.TryGetProperty("primary", out var primary) && primary.ValueKind == JsonValueKind.String);   // no route shown
         Assert.Equal(0, _factory.Cloud.Calls + _factory.Local.Calls);
     }
 

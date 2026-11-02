@@ -293,7 +293,8 @@ public static class LegacyImport
 
 /// <summary>Isolated demonstration profiles (spec §3, Config:Seed). Restrictive defaults: Public → approved
 /// economical cloud model with an explicit local fallback (hybrid only); Internal, PII and PHI → the local
-/// model, never a cloud fallback. Public is reachable only through the granted "public-demo" profile.</summary>
+/// model, never a cloud fallback. Public is reachable only through the granted "public-demo" profile, which rejects
+/// detected PII/PHI (ADR-0019); "internal-default" routes it to the local model.</summary>
 public static class DemoSeeds
 {
     public const string LocalOnly = "demo-local-only";
@@ -397,8 +398,11 @@ public static class DemoSeeds
             Applications = applications,
             Profiles =
             [
+                // ADR-0019: the Public workload never accepts detected PII/PHI (explicit refusal, never a silent local reroute);
+                // the Internal workload is the one approved to process it on the local model.
                 new() { Id = "public-demo", Name = "Public demo (synthetic public content)", Baseline = DataClassification.Public,
-                        Description = "Deliberately public, synthetic content only." },
+                        Description = "Deliberately public, synthetic content only. Detected sensitive data is rejected.",
+                        SensitiveDataAction = SensitiveDataAction.Reject },
                 new() { Id = "internal-default", Name = "Internal (default)", Baseline = DataClassification.Internal },
             ],
             Policies =
