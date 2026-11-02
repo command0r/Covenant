@@ -43,6 +43,16 @@ public static class RecordFacts
     public static bool Truncated(AuditEntryView r)
         => r.Attempts?.Any(a => a.Truncated == true && AttemptFacts.IsSuccess(a)) == true;
 
+    /// <summary>The prominent warning shown with the outcome when the served answer was cut at the output bound
+    /// (finish_reason length), or null. Names the enforced bound and how to raise it.</summary>
+    public static string? TruncationWarning(AuditEntryView r)
+    {
+        if (!Truncated(r)) return null;
+        var enforced = EffectiveMaxOutputTokens(r);
+        return "Answer cut off: the model stopped at the output limit (" + enforced + " tokens enforced, finish reason \"length\"). "
+               + "The answer is incomplete. Raise Max output tokens under Advanced — the application's and model's caps still apply — and run again.";
+    }
+
     /// <summary>"Yes — …" / "No" / "Not recorded" for the drawer.</summary>
     public static string TruncatedText(AuditEntryView r)
     {

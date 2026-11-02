@@ -26,6 +26,16 @@ public sealed record PolicyOutcome(PolicyEffect Effect, string Reason, RouteTarg
     /// <summary>e.g. "Public → openai/gpt-4o-mini (fallback: ollama/qwen3:8b) · policy public-demo v7".</summary>
     public string? Explanation { get; init; }
 
+    /// <summary>ADR-0016: the matched policy authorizes its targets only for a Covenant-sanitized payload. The redact stage
+    /// must transform and re-check the request before anything else runs; the attempt gate re-verifies per attempt.</summary>
+    public bool SanitizedPayloadRequired { get; init; }
+
+    /// <summary>ADR-0016: the structured types the redact stage replaces (from the policy).</summary>
+    public IReadOnlyList<string> RedactionTypes { get; init; } = [];
+
+    /// <summary>ADR-0016: the fixed task ids the policy allows for its structured records.</summary>
+    public IReadOnlyList<string> RedactionTasks { get; init; } = [];
+
     public static PolicyOutcome Deny(string reason) => new(PolicyEffect.Deny, reason, null);
     public static PolicyOutcome Allow(RouteTarget route) => new(PolicyEffect.Allow, "allowed", route);
     public static PolicyOutcome Allow(RouteTarget route, string reason) => new(PolicyEffect.Allow, reason, route);
@@ -92,7 +102,23 @@ public sealed record AuditEntry(
     // ---- v3 continued (console demo clarity, additive, nullable): WHICH policy decided the route, and what the exact
     // cache did (hit | miss | bypass_web_search | disabled | not_reached). Absent on older records ⇒ "Not recorded".
     string? PolicyId = null,
-    string? CacheOutcome = null);
+    string? CacheOutcome = null,
+    // ---- v3 continued (ADR-0016, additive, nullable): sanitized-payload decision — counts and types only, never values.
+    AuditRedaction? Redaction = null);
+
+/// <summary>ADR-0016 evidence of a sanitized-payload decision: the transform identity, the authorizing policy, applied |
+/// refused (with a bounded reason code), how many values of each type were replaced, the ORIGINAL classification (never
+/// rewritten) and, separately, the classification of the transformed payload (informational, never used for routing).</summary>
+public sealed record AuditRedaction(
+    string Transform,
+    string? PolicyId,
+    string Outcome,
+    string? ReasonCode,
+    IReadOnlyList<AuditRedactionCount> Counts,
+    DataClassification OriginalClassification,
+    DataClassification? TransformedClassification);
+
+public sealed record AuditRedactionCount(string Type, int Count);
 
 /// <summary>One provider attempt in an audit v3 record (ADR-0013): which connection/model was called, how it ended,
 /// the bounded error class, its measured duration and its charge (ADR-0014). Outcome ∈ served | failed | cancelled.

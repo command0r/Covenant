@@ -28,7 +28,7 @@ public static class ShellStatus
         LocalOnly => new("Local-only", "local",
             "Only in-perimeter (local) connections can execute; cloud configuration cannot run."),
         Hybrid => new("Hybrid", "hybrid",
-            "Local and approved cloud routes; PII/PHI never route to cloud destinations."),
+            "Local and approved external routes. Raw PII/PHI never leaves; only an opted-in sanitized structured-record route (ADR-0016) may send a Covenant-built PII payload externally — never PHI."),
         LegacyCloud => new("Legacy cloud", "legacy",
             "Imported pre-v2 routing (cloud default). Review the effective rules before relying on it."),
         _ => new(ModeNotReported, "unknown", "The Host did not report a provider mode."),

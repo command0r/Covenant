@@ -158,6 +158,11 @@ public static class ConfigValidator
                     }
                 if (pol.Retry is null) Req($"{p}.retry");
                 else NonNullList($"{p}.retry.on", pol.Retry.On);
+                if (pol.Redaction is { } red)
+                {
+                    NonNullList($"{p}.redaction.types", red.Types);
+                    NonNullList($"{p}.redaction.tasks", red.Tasks);
+                }
             }
 
         if (NonNullList("budgets", c.Budgets))
@@ -345,6 +350,26 @@ public static class ConfigValidator
             if (pol.Retry.On.Any(k => !RetryKinds.Contains(k))) Err($"{p}.retry.on", "invalid_retry", "retry triggers ⊆ {connect, timeout, 429, 5xx}");
 
             bool sensitive = pol.Classifications.Any(x => x >= DataClassification.Pii);
+            // ADR-0016: the ONE exception to "PII/PHI never cloud" — a profile-scoped, PII-only policy with a redaction contract.
+            if (pol.Redaction is { } red)
+            {
+                if (pol.Classifications.Count != 1 || pol.Classifications[0] != DataClassification.Pii)
+                    Err($"{p}.redaction", "redaction_requires_pii_only", "a sanitized-payload policy must cover exactly the PII classification (never PHI, Public or Internal)");
+                if (pol.Profiles.Count == 0)
+                    Err($"{p}.redaction", "redaction_requires_profile", "a sanitized-payload policy must name at least one workload profile (it is never a global PII rule)");
+                // A dedicated workload: every request under it is PII by baseline, so the structured contract always applies —
+                // an e-mail-only record (not escalated by the detector) can never reach an ordinary policy.
+                foreach (var (prof, g) in pol.Profiles.Select((x, g) => (x, g)))
+                    if (c.Profiles.FirstOrDefault(x => x is not null && string.Equals(x.Id, prof, StringComparison.Ordinal)) is { } wp && wp.Baseline != DataClassification.Pii)
+                        Err($"{p}.profiles[{g}]", "redaction_profile_baseline", $"profile '{wp.Id}' is used by a sanitized-payload policy and must have baseline PII (it has {wp.Baseline})");
+                if (red.Types.Count == 0 || red.Types.Any(t => !RedactionTypes.Supported.Contains(t)))
+                    Err($"{p}.redaction.types", "redaction_invalid_types", "identifier types must be a non-empty subset of: " + string.Join(", ", RedactionTypes.Supported));
+                else if (RedactionTypes.RequiredForPii.FirstOrDefault(t => !red.Types.Contains(t)) is { } missing)
+                    Err($"{p}.redaction.types", "redaction_missing_required_type", $"identifier types must include '{missing}' (the detector escalates it to PII)");
+                if (red.Tasks.Count == 0 || red.Tasks.Any(t => !StructuredRecordSchema.Tasks.ContainsKey(t)))
+                    Err($"{p}.redaction.tasks", "redaction_invalid_tasks", "tasks must be a non-empty subset of: " + string.Join(", ", StructuredRecordSchema.Tasks.Keys));
+            }
+            bool sanitizedEgress = PolicyEngineV2.IsSanitizedPolicy(pol);
             for (int t = 0; t < pol.Targets.Count; t++)
             {
                 var target = pol.Targets[t];
@@ -360,7 +385,7 @@ public static class ConfigValidator
                 if (conn.Boundary == Boundary.Cloud)
                 {
                     // No escape hatch (ADR-0013): a PII/PHI policy cannot list a cloud destination.
-                    if (sensitive)
+                    if (sensitive && !sanitizedEgress)
                         Err(tp, "sensitive_cloud_target", $"{conn.Id}/{model.ModelId} is a cloud destination; a policy covering PII/PHI may list only local targets");
                     if (model.Price is null && anyHard && pol.Enabled)
                         Err(tp, "unpriced_paid_target_under_hard_budget", $"{conn.Id}/{model.ModelId} has no price; a paid destination cannot run under a hard budget unpriced");

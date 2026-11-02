@@ -23,8 +23,12 @@
             <Button Busy="@_loading" BusyText="Loading…" OnClick="LoadAsync">Refresh</Button>
         </div>
 
-        <EditorBar Owner="budgets" Subject="Budgets" ClaimedPaths="@ClaimedPaths" OnSaved="LoadAsync"
-                   ViewHint="Viewing applied caps. Edit to change caps, thresholds, periods or enforcement." />
+        <EditorBar Owner="budgets" Subject="Budgets" ShowEditButton="false" ClaimedPaths="@ClaimedPaths" OnSaved="LoadAsync"
+                   ViewHint="Each budget is edited in its own dialog; saving creates a new configuration version." />
+        @if (_notice is { } notice)
+        {
+            <span class="note" role="status">@notice</span>
+        }
 
         <ErrorBanner Title="Budget state unavailable" Message="@_error" OnRetry="LoadAsync" Busy="@_loading" />
 
@@ -69,7 +73,10 @@
                 <section class="panel flush" aria-labelledby="bs-h">
                     <div class="panel-head">
                         <h2 id="bs-h">Budget state</h2>
+                        <InfoTip Label="How do Global and application budgets combine?">Budgets are ceilings over the same charges. Global covers every application. A team or application cap is an additional, smaller ceiling within Global: the same charge counts against both, never added up as separate spend. A "Hard cap" refuses a paid request whose reserved cost would exceed any applicable cap (an estimated bound); "Warn only" never blocks. Alerts are the warning thresholds in % of the cap.</InfoTip>
                         <span class="panel-sub">@(_loadedUtc is { } t ? "Read " + Fmt.UtcShort(t) + " UTC from the ledger" : "")</span>
+                        <span class="grow"></span>
+                        <button type="button" class="btn sm" id="budget-add" disabled="@(!CanEdit)" @onclick="OpenAdd"><Icon Name="plus" Size="16" /><span>Add budget…</span></button>
                     </div>
                     <div class="table-wrap">
                         <table class="budget-table">
@@ -92,8 +99,17 @@
                                     var warn = BudgetText.Warning(row.Warning);
                                     var pct = BudgetText.MeterPercent(row.SpentUsd, row.ReservedUsd, row.CapUsd);
                                     <tr>
-                                        <td><strong>@BudgetText.Scope(row.Scope)</strong><br /><span class="mono subtle secondary">@row.Id</span></td>
-                                        <td class="secondary">@BudgetText.Period(row.Period, row.PeriodId)</td>
+                                        <td>
+                                            <div class="budget-scope" title="@(BudgetText.Coverage(row.Scope, Editor.Applied?.Config) + " Budget id: " + row.Id)">
+                                                <span class="budget-name">
+                                                    <strong>@BudgetText.ScopeName(row.Scope, Editor.Applied?.Config)</strong>
+                                                    @if (BudgetText.TeamOf(row.Scope, Editor.Applied?.Config) is { } team) { <span class="chip">team @team</span> }
+                                                    @if (BudgetText.IsLowCap(row.Scope, row.CapUsd, row.Enforcement)) { <span class="jchip refused" title="@BudgetText.LowCapEffect(row.CapUsd)"><span>Low spending cap</span></span> }
+                                                </span>
+                                                <span class="secondary subtle">@BudgetText.ShortCoverage(row.Scope)</span>
+                                            </div>
+                                        </td>
+                                        <td class="secondary budget-period"><span>@BudgetText.PeriodName(row.Period)</span>@if (!string.IsNullOrWhiteSpace(row.PeriodId)) { <span class="mono subtle">@row.PeriodId</span> }</td>
                                         <td class="num mono">@Money.Usd(row.SpentUsd)</td>
                                         <td class="num mono">@Money.Usd(row.ReservedUsd)</td>
                                         <td class="num mono">@BudgetText.Remaining(row.RemainingUsd)</td>
@@ -101,11 +117,16 @@
                                             <span class="meter @(warn.Tone == "bad" ? "bad" : warn.Tone == "warn" ? "warn" : "")" role="img"
                                                   aria-label="@(Money.Share(row.SpentUsd + row.ReservedUsd, row.CapUsd) + " of the cap spent or reserved")"><span style="width:@pct%"></span></span>
                                         </td>
-                                        <td class="secondary">
+                                        <td class="secondary budget-state" title="@(BudgetText.Enforcement(row.Enforcement) + " · warning thresholds " + BudgetText.Thresholds(row.WarnAt))">
                                             <span class="indicator"><span class="dot @warn.Tone" aria-hidden="true"></span>@warn.Label</span>
-                                            <span class="subtle">@BudgetText.Enforcement(row.Enforcement) · warn at @BudgetText.Thresholds(row.WarnAt)</span>
+                                            <span class="subtle">@BudgetText.StateLine(row.Enforcement, row.WarnAt)</span>
                                         </td>
-                                        <td><button type="button" class="btn sm" id="@("drill-" + row.Id)" @onclick="() => OpenDrillAsync(row)">Requests</button></td>
+                                        <td class="row-actions">
+                                            <div class="budget-actions">
+                                                <button type="button" class="btn sm" id="@("budget-edit-" + row.Id)" disabled="@(!CanEdit || ConfigBudget(row.Id) is null)" @onclick="() => OpenEdit(row.Id)">Edit</button>
+                                                <button type="button" class="btn sm" id="@("drill-" + row.Id)" @onclick="() => OpenDrillAsync(row)">Requests</button>
+                                            </div>
+                                        </td>
                                     </tr>
                                 }
                             </tbody>
@@ -115,111 +136,79 @@
             }
         }
 
-        @if (Editing && Editor.Draft is { } draft)
+        @if (_edit is { } be)
         {
-            <section class="panel" aria-labelledby="be-h">
-                <div class="panel-head">
-                    <h2 id="be-h">Edit budgets (draft)</h2>
-                    <span class="panel-sub">Changing a cap never erases spend; lowering it below spend blocks new paid work. Changing a period or id keeps the scope's accrued ledger.</span>
-                </div>
-                <ul class="budget-edit-list">
-                    @foreach (var b in draft.Budgets)
-                    {
-                        var cfgRow = b;
-                        var bi = draft.Budgets.IndexOf(cfgRow);
-                        var path = IssueIndex.Budget(bi);
-                        <li>
-                            <div class="policy-head">
-                                <strong>@BudgetText.Scope(cfgRow.Scope)</strong>
-                                <span class="mono subtle secondary">@cfgRow.Id</span>
-                                @if (IsNewBudget(cfgRow))
-                                {
-                                    <span class="changed-flag">New in draft</span>
-                                    <button type="button" class="btn ghost sm" @onclick="() => RemoveBudget(cfgRow)">Remove</button>
-                                }
-                            </div>
-                            <div class="form-grid">
-                                <div class="field">
-                                    <label for="@("cap-" + bi)">Cap (USD)</label>
-                                    <input id="@("cap-" + bi)" class="input mono" type="number" min="0" step="any" @bind="cfgRow.CapUsd" @bind:after="Editor.Touch"
-                                           aria-invalid="@(Editor.Issues.HasErrorAt(path + ".cap_usd") ? "true" : "false")" />
-                                    <FieldIssues Issues="@Editor.Issues" Path="@(path + ".cap_usd")" />
-                                </div>
-                                <div class="field">
-                                    <label for="@("per-" + bi)">Period (UTC)</label>
-                                    <select id="@("per-" + bi)" class="input" value="@(cfgRow.Period ?? "monthly")" @onchange="@(e => SetPeriod(cfgRow, e))">
-                                        <option value="monthly">Monthly</option>
-                                        <option value="daily">Daily</option>
-                                        <option value="none">No period (cumulative)</option>
-                                    </select>
-                                </div>
-                                <div class="field">
-                                    <label for="@("warn-" + bi)">Warn at (% of cap)</label>
-                                    <input id="@("warn-" + bi)" class="input mono" type="text" placeholder="80, 95"
-                                           value="@BudgetText.FormatThresholds(cfgRow.WarnAt)" @onchange="@(e => SetThresholds(cfgRow, bi, e))"
-                                           aria-invalid="@(_thresholdErrors.ContainsKey(bi) || Editor.Issues.HasErrorAt(path + ".warn_at") ? "true" : "false")" />
-                                    @if (_thresholdErrors.TryGetValue(bi, out var te))
-                                    {
-                                        <span class="help bad">@te</span>
-                                    }
-                                    <FieldIssues Issues="@Editor.Issues" Path="@(path + ".warn_at")" />
-                                </div>
-                                <div class="field">
-                                    <label for="@("enf-" + bi)">Enforcement</label>
-                                    <select id="@("enf-" + bi)" class="input" value="@(cfgRow.Enforcement ?? "hard")" @onchange="@(e => SetEnforcement(cfgRow, e))">
-                                        <option value="hard">Hard — refuse paid work over the cap</option>
-                                        <option value="warn-only">Warn only — never block</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <FieldIssues Issues="@Editor.Issues" Path="@path" />
-                        </li>
-                    }
-                </ul>
-                <div class="field-row">
-                    <div class="field">
-                        <label for="nb-kind">New budget scope</label>
-                        <select id="nb-kind" class="input" @bind="_newKind">
-                            <option value="team">Team</option>
-                            <option value="application">Application</option>
-                            <option value="global">Global</option>
-                        </select>
-                    </div>
-                    @if (_newKind != "global")
-                    {
-                        <div class="field">
-                            <label for="nb-name">@(_newKind == "team" ? "Team name" : "Application id")</label>
-                            <input id="nb-name" class="input mono" type="text" spellcheck="false" @bind="_newName" @bind:event="oninput" />
-                        </div>
-                    }
-                    <button type="button" class="btn form" @onclick="AddBudget" disabled="@(_newKind != "global" && string.IsNullOrWhiteSpace(_newName))"><Icon Name="plus" Size="16" /><span>Add budget</span></button>
-                </div>
-                @if (_addError is { } ae)
+            var b = be.Working;
+            var problem = BudgetForm.Problem(be, _warnText, Editor.Applied?.Config);
+            <EditDialog Open="true" OpenChanged="@(_ => CloseDialog())" Title="@(be.IsNew ? "New budget" : "Budget: " + BudgetText.Scope(b.Scope))"
+                        OpenerId="@(be.IsNew ? "budget-add" : "budget-edit-" + be.OriginalKey)" IsDirty="@(() => be.IsDirty || _warnText != BudgetText.FormatThresholds(_warnOriginal))"
+                        Busy="@_saving" SaveDisabled="@(problem is not null)"
+                        Error="@(_saveError ?? problem)" ErrorTitle="@(_saveError is null ? "Before saving" : _saveErrorTitle)" ErrorTone="@(_saveError is null ? "warn" : _saveErrorTone)" Issues="@_issues"
+                        OnSave="@(() => SaveAsync(be))" OnCancel="DiscardScoped">
+                @if (be.IsNew)
                 {
-                    <span class="note bad" role="status">@ae</span>
+                    <div class="dialog-section">
+                        <div class="form-grid">
+                            <div class="field">
+                                <label for="bd-kind">Scope</label>
+                                <select id="bd-kind" class="input" value="@_newKind" @onchange="@(e => SetNewScope(b, e.Value?.ToString() ?? "team", _newName))">
+                                    <option value="team">Team</option>
+                                    <option value="application">Application</option>
+                                    <option value="global">Global</option>
+                                </select>
+                            </div>
+                            @if (_newKind != "global")
+                            {
+                                <div class="field">
+                                    <label for="bd-name">@(_newKind == "team" ? "Team name" : "Application id")</label>
+                                    <input id="bd-name" class="input mono" spellcheck="false" value="@_newName" @oninput="@(e => SetNewScope(b, _newKind, e.Value?.ToString()))" />
+                                </div>
+                            }
+                        </div>
+                    </div>
                 }
-                <span class="note">Raising or lowering a cap is a configuration activation and is audited with before/after. Hard caps are an estimated bound (reservation from enforced input/output limits), not an invoice ceiling.</span>
-            </section>
+                <div class="dialog-section">
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="bd-cap">Cap (USD)</label>
+                            <input id="bd-cap" class="input mono" type="number" min="0" step="any" @bind="b.CapUsd" @bind:event="oninput" />
+                            <span class="help">Lowering it below current spend blocks new paid work; spend is never erased.</span>
+                        </div>
+                        <div class="field">
+                            <label for="bd-per">Period (UTC)</label>
+                            <select id="bd-per" class="input" value="@(b.Period ?? "monthly")" @onchange="@(e => b.Period = e.Value?.ToString() is "daily" or "none" ? e.Value!.ToString() : "monthly")">
+                                <option value="monthly">Monthly</option>
+                                <option value="daily">Daily</option>
+                                <option value="none">No period (cumulative)</option>
+                            </select>
+                        </div>
+                        <div class="field">
+                            <label for="bd-warn">Warn at (% of cap)</label>
+                            <input id="bd-warn" class="input mono" placeholder="80, 95" @bind="_warnText" @bind:event="oninput" />
+                        </div>
+                        <div class="field">
+                            <label for="bd-enf">Enforcement</label>
+                            <select id="bd-enf" class="input" value="@(b.Enforcement ?? "hard")" @onchange="@(e => b.Enforcement = e.Value?.ToString() == "warn-only" ? "warn-only" : "hard")">
+                                <option value="hard">Hard — refuse paid work over the cap</option>
+                                <option value="warn-only">Warn only — never block</option>
+                            </select>
+                        </div>
+                    </div>
+                    <span class="secondary subtle">Hard caps are an estimated bound (reservation from enforced input/output limits), not an invoice ceiling.</span>
+                </div>
+            </EditDialog>
         }
 
-        <section class="panel two-col" aria-label="What counts as spend">
-            <div>
-                <h2>Provider charge</h2>
-                <ul class="plain-list secondary muted">
-                    <li>Provider-reported tokens × configured price for that connection/model. Covenant does not read provider invoices.</li>
-                    <li>Before each attempt a conservative reservation is held; it settles against reported usage (or an explicit estimate) exactly once, and the remainder is released.</li>
-                    <li>An unpriced paid model is not eligible under a hard budget — unknown cost is never counted as $0.</li>
-                </ul>
-            </div>
-            <div>
-                <h2>Local infrastructure</h2>
-                <ul class="plain-list secondary muted">
-                    <li>Local models priced “zero marginal” settle $0 provider charge.</li>
-                    <li>Hardware, power and operations are excluded — not free. No infrastructure estimate is configured, so none is shown.</li>
-                </ul>
-            </div>
-        </section>
-        <p class="note">Budget period rollover and audit archive are different operations: a budget's period rolls over by UTC date; archiving the audit segment (Settings → Maintenance) never reopens a budget.</p>
+        <details class="panel tech budget-accounting">
+            <summary>How charges are counted</summary>
+            <ul class="plain-list secondary">
+                <li><strong>Provider charge:</strong> provider-reported tokens × the configured price for that connection/model. Covenant does not read provider invoices.</li>
+                <li><strong>Reservation:</strong> before each attempt a conservative amount is held; it settles once against reported usage (or an explicit estimate) and the rest is released.</li>
+                <li><strong>Unknown is not $0:</strong> an unpriced paid model is not eligible under a hard budget.</li>
+                <li><strong>Local models:</strong> priced "zero marginal" settle $0 provider charge. Hardware, power and operations are excluded — not free; no infrastructure estimate is configured.</li>
+                <li><strong>Periods and archives:</strong> a period rolls over by UTC date. Archiving the audit log (earlier saved history) never reopens or resets a budget.</li>
+            </ul>
+        </details>
 
         <Drawer Title="@(_drill is { } d ? "Contributing requests · " + BudgetText.Scope(d.Scope) : "")" Open="@(_drill is not null)" OpenChanged="OnDrillOpenChanged"
                 OpenerId="@(_drill is { } dd ? "drill-" + dd.Id : null)">
@@ -273,12 +262,19 @@
 
     private string _newKind = "team";
     private string? _newName;
-    private string? _addError;
-    private readonly Dictionary<int, string> _thresholdErrors = new();
+    private EntityEdit<BudgetConfigDto>? _edit;
+    private string _warnText = "";
+    private List<decimal>? _warnOriginal;
+    private bool _saving;
+    private string? _saveError;
+    private string? _saveErrorTitle;
+    private string _saveErrorTone = "bad";
+    private IReadOnlyList<ConfigIssueDto>? _issues;
+    private string? _notice;
 
-    private bool Editing => Editor.Editing && Editor.Owner == "budgets";
+    private bool CanEdit => Editor.Applied?.Config is not null && !Editor.Saving && !_saving && (!Editor.IsDirty || Editor.Owner == "budgets");
 
-    private IReadOnlyList<string> ClaimedPaths => Editing && Editor.Draft is { } d ? Enumerable.Range(0, d.Budgets.Count).Select(IssueIndex.Budget).ToList() : [];
+    private IReadOnlyList<string> ClaimedPaths => Editor.Current is { } d ? Enumerable.Range(0, d.Budgets.Count).Select(IssueIndex.Budget).ToList() : [];
 
     protected override async Task OnInitializedAsync()
     {
@@ -328,61 +324,81 @@
         new("Teams with spend", s.Budget.Teams.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), true),
     ];
 
-    private bool IsNewBudget(BudgetConfigDto b) => Editor.Applied?.Config?.Budgets.All(x => !string.Equals(x.Id, b.Id, StringComparison.Ordinal)) ?? true;
+    private BudgetConfigDto? ConfigBudget(string id) => Editor.Applied?.Config?.Budgets.FirstOrDefault(b => b.Id == id);
 
-    private void SetPeriod(BudgetConfigDto b, ChangeEventArgs e)
+    private void ResetResult()
     {
-        b.Period = e.Value?.ToString() is "daily" or "none" ? e.Value!.ToString() : "monthly";
-        Editor.Touch();
+        _saveError = null;
+        _saveErrorTitle = null;
+        _saveErrorTone = "bad";
+        _issues = null;
+        _notice = null;
     }
 
-    private void SetEnforcement(BudgetConfigDto b, ChangeEventArgs e)
+    private void OpenEdit(string id)
     {
-        b.Enforcement = e.Value?.ToString() == "warn-only" ? "warn-only" : "hard";
-        Editor.Touch();
+        if (ConfigBudget(id) is not { } b) return;
+        ResetResult();
+        _edit = EntityEdits.Edit(b);
+        _edit.BaseVersion = Editor.AppliedVersion;
+        _warnOriginal = b.WarnAt;
+        _warnText = BudgetText.FormatThresholds(b.WarnAt);
     }
 
-    private void SetThresholds(BudgetConfigDto b, int index, ChangeEventArgs e)
+    private void OpenAdd()
     {
-        var parsed = BudgetText.ParseThresholds(e.Value?.ToString());
-        if (parsed is null)
-        {
-            _thresholdErrors[index] = "Enter percentages between 0 and 100, separated by commas (e.g. 80, 95).";
-            return;
-        }
-        _thresholdErrors.Remove(index);
-        b.WarnAt = parsed;
-        Editor.Touch();
-    }
-
-    private void AddBudget()
-    {
-        _addError = null;
-        if (Editor.Draft is not { } d) return;
-        string scope = _newKind switch
-        {
-            "global" => "global",
-            "application" => "application:" + (_newName ?? "").Trim(),
-            _ => "team:" + (_newName ?? "").Trim(),
-        };
-        if (d.Budgets.Any(x => string.Equals(x.Scope, scope, StringComparison.OrdinalIgnoreCase)))
-        {
-            _addError = "A budget for " + scope + " already exists in the draft.";
-            return;
-        }
-        var seed = scope.Replace(':', '-');
-        var id = ConnectionRules.UniqueId(seed, d.Budgets.Select(x => x.Id));
-        d.Budgets.Add(new BudgetConfigDto { Id = id, Scope = scope, CapUsd = 0m, Period = "monthly", WarnAt = [0.80m, 0.95m], Enforcement = "hard" });
+        ResetResult();
+        _newKind = "team";
         _newName = null;
-        Editor.Touch();
+        _warnOriginal = [0.80m, 0.95m];
+        _warnText = BudgetText.FormatThresholds(_warnOriginal);
+        _edit = EntityEdits.New(new BudgetConfigDto { Id = "", Scope = "team:", CapUsd = 0m, Period = "monthly", WarnAt = [0.80m, 0.95m], Enforcement = "hard" });
+        _edit.BaseVersion = Editor.AppliedVersion;
     }
 
-    private void RemoveBudget(BudgetConfigDto b)
+    private void SetNewScope(BudgetConfigDto b, string kind, string? name)
     {
-        if (Editor.Draft is not { } d) return;
-        d.Budgets.Remove(b);
-        _thresholdErrors.Clear();
-        Editor.Touch();
+        _newKind = kind;
+        _newName = name;
+        b.Scope = BudgetForm.Scope(kind, name);
+        b.Id = BudgetForm.Id(b.Scope, Editor.Applied?.Config);
+    }
+
+    private void CloseDialog() => _edit = null;
+
+    private void DiscardScoped()
+    {
+        Editor.DiscardIfOwner("budgets");
+        ResetResult();
+    }
+
+    private async Task SaveAsync(EntityEdit<BudgetConfigDto> e)
+    {
+        if (BudgetText.ParseThresholds(_warnText) is not { } warn) return;
+        e.Working.WarnAt = warn;
+        _saving = true;
+        _saveError = null;
+        _issues = null;
+        try
+        {
+            var outcome = await Editor.ApplyScopedAsync("budgets", e.BaseVersion, d => EntityEdits.Apply(d, e),
+                "Console: budget " + e.Working.Id + (e.IsNew ? " added" : " edited"));
+            if (outcome.Succeeded)
+            {
+                _notice = outcome.Message + ".";
+                _edit = null;
+                await LoadAsync();
+                return;
+            }
+            _saveErrorTitle = outcome.Kind == EditOutcomeKind.Stale ? "The configuration changed meanwhile" : outcome.Kind == EditOutcomeKind.Invalid ? "The Host rejected this change" : "Not saved";
+            _saveErrorTone = outcome.Kind == EditOutcomeKind.Stale ? "warn" : "bad";
+            _saveError = outcome.Message;
+            _issues = outcome.Errors;
+        }
+        finally
+        {
+            _saving = false;
+        }
     }
 
     private async Task OpenDrillAsync(BudgetStateDto b)

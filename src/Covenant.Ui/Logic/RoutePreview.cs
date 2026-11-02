@@ -9,7 +9,9 @@ public sealed record RoutePreview(string Key, SimulateResponseDto? Result, strin
     public static string KeyOf(PlaygroundForm f)
         => string.Join("\u001f", f.ApplicationId ?? "", f.ProfileId ?? "", f.RequestedModel ?? "", f.Prompt);
 
-    public bool IsCurrent(PlaygroundForm f) => string.Equals(Key, KeyOf(f), StringComparison.Ordinal);
+    public bool IsCurrent(PlaygroundForm f, int? activeVersion = null)
+        => string.Equals(Key, KeyOf(f), StringComparison.Ordinal)
+           && (activeVersion is null || Result?.ConfigVersion == activeVersion);
 
     /// <summary>"Policy public-writing → anthropic/claude… (approved fallback: …)", or "Refused: …".</summary>
     public static string Summary(SimulateResponseDto r)

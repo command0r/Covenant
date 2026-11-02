@@ -1,0 +1,24 @@
+PASS bare-nine Pii 16ms
+PASS hyphen Pii 0ms
+PASS space Pii 0ms
+PASS dot Pii 0ms
+PASS unicode Pii 0ms
+PASS zero-width Pii 0ms
+PASS partial Pii 1ms
+PASS partial-four Pii 1ms
+PASS masked Pii 0ms
+PASS json-snake Pii 0ms
+PASS json-escaped Pii 0ms
+PASS patient-snake Phi 5ms
+PASS labelled-name Phi 1ms
+PASS lower-patient Phi 0ms
+PASS self-identified Phi 0ms
+PASS dob Phi 0ms
+PASS email Pii 0ms
+PASS phone Pii 0ms
+PASS benign-four Internal 0ms
+PASS benign-health Internal 0ms
+PASS benign-code Internal 0ms
+PASS benign-time Internal 0ms
+PASS split-health Phi
+FAILURES=0

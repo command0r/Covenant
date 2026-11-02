@@ -173,7 +173,7 @@ public sealed class ConnectionForm
             if (ConnectionLogic.EndpointProblem(Endpoint) is { } e) p.Add(e);
         }
         if (Boundary is not ("Local" or "Cloud")) p.Add("Choose Local or Cloud.");
-        if (IsCloudKind && Boundary != "Cloud") p.Add("OpenAI and Anthropic connections are always Cloud.");
+        if (IsCloudKind && Boundary != "Cloud") p.Add("OpenAI and Anthropic connections are always External (cloud).");
         if (TimeoutSeconds is < 1 or > 600) p.Add("Timeout must be 1–600 seconds.");
 
         var selected = SelectedModels;
@@ -428,4 +428,36 @@ public static class ConnectionHealth
 
     private static string Stamp(DateTimeOffset? t, DateTimeOffset now)
         => t is null ? "never" : t.Value.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + " UTC (" + Ago(t, now) + ")";
+}
+
+/// <summary>The three separate facts of a connection, never merged into one "health": is it CONFIGURED (enabled, models
+/// permitted, endpoint allowed), is its CREDENTIAL available on the server, and has it been TESTED (a real governed call
+/// observed — a probe or a catalog listing is not proof of usability).</summary>
+public sealed record ConnectionFact(string Label, string Value, string Tone);
+
+public static class ConnectionFacts
+{
+    public static IReadOnlyList<ConnectionFact> Trio(ConnectionDto conn, bool? endpointAllowListed, bool? secretAvailable, ConnectionHealthView health)
+    {
+        var configured = !conn.Enabled ? new ConnectionFact("Configured", "Disabled", "hollow")
+            : conn.Models.Count == 0 ? new ConnectionFact("Configured", "No models permitted", "warn")
+            : endpointAllowListed == false ? new ConnectionFact("Configured", "Endpoint not on the egress allow-list", "bad")
+            : new ConnectionFact("Configured", conn.Models.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + (conn.Models.Count == 1 ? " model" : " models") + " permitted", "ok");
+        var credential = conn.SecretRef is null
+            ? new ConnectionFact("Credential", "None needed", "ok")
+            : secretAvailable switch
+            {
+                true => new ConnectionFact("Credential", "Available on the server", "ok"),
+                false => new ConnectionFact("Credential", "Missing — set " + ConnectionRules.EnvVarFor(conn.SecretRef) + " and restart", "bad"),
+                null => new ConnectionFact("Credential", "Not reported", "hollow"),
+            };
+        var tested = health.Tone switch
+        {
+            "ok" => new ConnectionFact("Tested", "Governed call succeeded", "ok"),
+            "bad" => new ConnectionFact("Tested", "Last governed call failed", "bad"),
+            "warn" => new ConnectionFact("Tested", "Degraded", "warn"),
+            _ => new ConnectionFact("Tested", conn.Enabled ? "Not yet — run a request" : "—", "hollow"),
+        };
+        return [configured, credential, tested];
+    }
 }

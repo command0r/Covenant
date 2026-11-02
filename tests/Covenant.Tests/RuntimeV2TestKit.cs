@@ -104,6 +104,7 @@ internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatCl
     {
         Interlocked.Increment(ref _calls);
         LastOptions = options;
+        LastMessages = messages.ToList();   // the exact provider messages, streamed path too
         OnCall?.Invoke();
         Entered.TrySetResult();
         var (mode, error) = Next();
@@ -165,7 +166,8 @@ internal sealed class V2Rig
     public RuntimeSnapshot Snapshot { get; set; } = null!;
 
     public static V2Rig Build(CovenantConfig config, IReadOnlyDictionary<string, MEAI.IChatClient> clients, TimeProvider? clock = null,
-        ResponseCache? cache = null, BudgetLedger? ledger = null, InMemoryLedgerStore? store = null, IWebSearchClient? search = null, bool withSearch = false)
+        ResponseCache? cache = null, BudgetLedger? ledger = null, InMemoryLedgerStore? store = null, IWebSearchClient? search = null, bool withSearch = false,
+        bool withRedact = true, IDataClassifier? searchClassifier = null)
     {
         store ??= new InMemoryLedgerStore();
         ledger ??= new BudgetLedger(store, clock: clock);
@@ -187,11 +189,12 @@ internal sealed class V2Rig
             new ShapeStage(),
             new ClassifyStage(new RegexDataClassifier()),
             new PolicyStage(new PolicyEngine(new PolicyConfig { AllowedRoutes = new Dictionary<DataClassification, IReadOnlyList<RouteTarget>>() })),
+            .. (withRedact ? new IPipelineStage[] { new RedactStage(new RegexDataClassifier()) } : Array.Empty<IPipelineStage>()),   // ADR-0016 (Host order)
             new CacheStage(cache ?? new ResponseCache(clock), new CacheConfig()),
             new RateLimitStage(new RateCounter(), new RateCounter(), new RateLimitConfig()),
             new PauseStage(kill),
             new BudgetStage(kill, ledger),
-            .. (withSearch || search is not null ? new IPipelineStage[] { new WebSearchStage(search, new RegexDataClassifier()) } : Array.Empty<IPipelineStage>()),
+            .. (withSearch || search is not null ? new IPipelineStage[] { new WebSearchStage(search, searchClassifier ?? new RegexDataClassifier()) } : Array.Empty<IPipelineStage>()),
             new ProviderCallStage(new ChatClientRegistry(clients), health, classifier: SdkProviderFailureClassifier.Shared),
             new AttributionStage(new PriceBook(new Dictionary<string, (decimal, decimal)>())),
         ]);

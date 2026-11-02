@@ -25,6 +25,20 @@ public sealed class DemoTraceAndSetupTests
         => Assert.Equal(text, UiLogic.TraceModel.DurationText(ms));
 
     [Fact]
+    public void Cache_miss_does_not_claim_a_provider_call_when_budget_refuses()
+    {
+        var record = Record(x =>
+        {
+            x.Effect = "Deny";
+            x.StoppedAtStage = "budget";
+            x.CacheOutcome = "miss";
+            x.Attempts = [];
+        });
+        Assert.Equal("Miss — no matching cached response", UiLogic.Ownership.Cache(record));
+        Assert.Contains("before any provider call", UiLogic.Ownership.Finalized(record), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Unknown_duration_stays_unknown()
     {
         Assert.Null(UiLogic.TraceModel.DurationText(null));

@@ -89,3 +89,10 @@ arbitrary tools.
 - Search via the local model's own runtime/extensions or Open WebUI — rejected: ungoverned egress, ungoverned keys.
 - Search in Local-only mode — rejected: Local-only is defined as no external calls.
 - Answer without sources when search fails — rejected: it pretends to current knowledge.
+
+## Amendment (2026-10-17): grounding layout and query intent
+- **Grounding layout.** The provider receives exactly ONE system message, a portable layout that works the same on every provider and chat template. It holds Covenant's grounding instructions, followed by any system text of the original request under "Application instructions". The original turns follow unchanged. The last user turn carries the delimited data block, then the user's question verbatim.
+- **Instructions.** They state that the search has already been done; the current UTC time, and that local dates can differ; the place to answer for, and whether it came from the Search location field or the prompt; that a source's retrieval time is not its observation date; for weather, to report only dated figures the sources state; and to name the missing evidence instead of guessing.
+- **Unchanged.** The injection boundary, classification of query and location before egress, the budget reservation (its bound is now derived from the worst-case grounding), cache bypass and accounting.
+- **Query.** Always the user's bounded question, so explicit dates, periods, units and `site:` filters are preserved, plus the explicit Search location when absent from the text. Only a weather question that names no period of its own gets today's date appended.
+- **No guarantee.** Query wording does not guarantee that results contain current readings; an honest "insufficient evidence" answer remains the expected outcome when they don't.

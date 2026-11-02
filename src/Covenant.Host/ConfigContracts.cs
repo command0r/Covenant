@@ -182,6 +182,57 @@ public sealed class SimulateResponse
     public required List<string> Fallbacks { get; init; }
     public required string Reason { get; init; }
     public string? Explanation { get; init; }
+    /// <summary>ADR-0016: present when the matched policy requires a sanitized structured payload — the payload that WOULD
+    /// be sent (placeholders only) or the refusal. A preview is never authorization.</summary>
+    public SimulatedRedaction? Redaction { get; init; }
+}
+
+public sealed class SimulatedRedaction
+{
+    /// <summary>"applied" | "refused".</summary>
+    public required string Outcome { get; init; }
+    public required string ReasonCode { get; init; }
+    public string? Reason { get; init; }
+    public required List<SimulatedMessage> Messages { get; init; }
+    public required Dictionary<string, int> Counts { get; init; }
+    public string? TransformedClassification { get; init; }
+    public required RecordSchemaView Schema { get; init; }
+}
+
+public sealed class SimulatedMessage
+{
+    public required string Role { get; init; }
+    public required string Content { get; init; }
+}
+
+/// <summary>GET /admin/redaction/schema and the simulator: the covenant.record.v1 contract (ADR-0016) — supported fields,
+/// their allowed values and the fixed tasks — plus, in a preview, what the matched policy allows.</summary>
+public sealed class RecordSchemaView
+{
+    public required string Id { get; init; }
+    public required int MaxChars { get; init; }
+    public required List<RecordFieldView> Fields { get; init; }
+    public required List<RecordTaskView> Tasks { get; init; }
+    public List<string>? PolicyTypes { get; init; }
+    public List<string>? PolicyTasks { get; init; }
+    public required string Example { get; init; }
+    public required string Limits { get; init; }
+}
+
+public sealed class RecordFieldView
+{
+    public required string Name { get; init; }
+    /// <summary>"identifier" (replaced by a placeholder) | "enum" | "integer" | "decimal".</summary>
+    public required string Kind { get; init; }
+    public string? RedactionType { get; init; }
+    public List<string>? Allowed { get; init; }
+    public string? Range { get; init; }
+}
+
+public sealed class RecordTaskView
+{
+    public required string Id { get; init; }
+    public required string Instruction { get; init; }
 }
 
 // ---- multi-connection catalog (extends CatalogReport compatibly; serialized by CovenantJsonContext, hence the
@@ -252,4 +303,5 @@ public sealed class KebabEnumConverter<TEnum> : JsonStringEnumConverter<TEnum> w
 [JsonSerializable(typeof(List<ApplicationView>))]
 [JsonSerializable(typeof(SimulateRequest))]
 [JsonSerializable(typeof(SimulateResponse))]
+[JsonSerializable(typeof(RecordSchemaView))]
 public partial class ConfigJsonContext : JsonSerializerContext;

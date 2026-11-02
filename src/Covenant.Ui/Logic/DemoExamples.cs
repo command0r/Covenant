@@ -17,10 +17,20 @@ public enum ExampleNeed
     InternalResearch,
     /// <summary>A Public profile with an eligible cloud target, used with an explicit cloud model pin and a synthetic SSN.</summary>
     SensitiveCloudPinRefusal,
+    /// <summary>A Public workload whose PII route is local: the same synthetic sensitive prompt, policy chooses (served locally).</summary>
+    SensitiveLocal,
     /// <summary>The exact cache enabled (TTL &gt; 0) and a Public route.</summary>
     CacheRepeat,
     /// <summary>A hard budget applying to the application that cannot cover one more request.</summary>
     BudgetRefusal,
+    /// <summary>A Public profile allowed to use web search whose policy primary is LOCAL (retrieval is external, inference local).</summary>
+    PublicLocalResearch,
+    /// <summary>A Public profile whose policy primary is local and that also approves an external target (explicit escalation).</summary>
+    PublicCodingLocalFirst,
+    /// <summary>A PII-baseline profile routed by an ADR-0016 sanitized-payload policy with an external target.</summary>
+    SanitizedRecord,
+    /// <summary>A declared Internal WRITING workload whose policy primary is local.</summary>
+    InternalWriting,
 }
 
 /// <summary>A named, meaningful demo example. It only FILLS the composer; Run stays explicit. <see cref="Expected"/> is
@@ -59,7 +69,17 @@ public sealed record ExampleResolution(
     IReadOnlyList<ExamplePrerequisite> Missing,
     /// <summary>Output bound actually enforced = min(request, application cap, model cap), and whether it is below what
     /// the example asks for (the answer may then be cut — shown, never hidden).</summary>
-    string? OutputNote = null);
+    string? OutputNote = null,
+    /// <summary>The example fits the workloads granted to the application it was resolved for (strict mode). The composer
+    /// lists only relevant examples for the selected application; an irrelevant one is never offered.</summary>
+    bool Relevant = true,
+    /// <summary>Title derived from the CONFIGURED route (e.g. "Compare local coding with Claude Opus 5.5"); null = the example's own.</summary>
+    string? DisplayTitle = null,
+    /// <summary>What will happen, step by step, before Run (e.g. local first, then an explicit, paid comparison).</summary>
+    string? Steps = null)
+{
+    public string Title => DisplayTitle ?? Example.Title;
+}
 
 /// <summary>The policy (and its first eligible target) that would decide a (classification, profile) pair, mirroring
 /// PolicyEngineV2.Match/Ineligibility. Used to FIND a fitting profile for an example — the Host's dry run is the preview.</summary>
@@ -76,14 +96,31 @@ public static class DemoExamples
     /// no one; it still matches the demo detector's US SSN pattern (\d{3}-\d{2}-\d{4}).</summary>
     public const string SyntheticSsn = "000-12-3456";
 
+    /// <summary>Synthetic structured record (covenant.record.v1): SSN area 000 is never assigned, example.test is reserved,
+    /// 555-01xx numbers are fictional. Mirrors the Host's StructuredRecordSchema.SyntheticExample.</summary>
+    public const string SyntheticRecord =
+        "{\"schema\":\"covenant.record.v1\",\"task\":\"triage_case\",\"fields\":{\"email\":\"jordan.sample@example.test\","
+        + "\"phone\":\"555-010-0199\",\"us_ssn\":\"" + SyntheticSsn + "\",\"service\":\"subscription\",\"issue\":\"billing_question\","
+        + "\"channel\":\"portal\",\"days_open\":2,\"amount_usd\":129.99}}";
+
+    /// <summary>Targeted official-source research question (both research examples): one page, one fact. The answer must come
+    /// from the retrieved sources only; retrieval is not verification, so the operator checks it against the cited page.</summary>
+    public const string ResearchPrompt =
+        "site:dotnet.microsoft.com/en-us/platform/support/policy/dotnet-core .NET 10 support end date. "
+        + "Answer in one sentence using only the retrieved sources and cite the page; if they do not state it, reply \"not stated in the sources\".";
+
+    /// <summary>One synthetic sensitive prompt for BOTH sensitive examples (local by policy, blocked when pinned external).</summary>
+    public const string SensitivePrompt =
+        "Summarize this public support ticket in one sentence: \"Printer on floor 3 jammed again. Reporter SSN " + SyntheticSsn + " (synthetic test marker).\"";
+
     public static readonly IReadOnlyList<DemoExample> All =
     [
         new("public-research", "Public research with web sources",
             "Fresh public facts come from one governed Tavily search, charged as a separate tool call.",
-            "Search runs once (Required) against an official source, then the Public route answers only from what was retrieved.",
+            "Search runs once (Required), bounded to the official .NET support-policy page; the Public route answers only from what was retrieved.",
             "Web sources lists what was retrieved — retrieved, not independently verified; check the answer against the cited page. The search charge is shown separately from inference.",
             ExampleNeed.PublicWebResearch,
-            "site:learn.microsoft.com What is the newest .NET version listed in Microsoft's official .NET release notes, and its release date? Answer in one sentence citing the page; if the retrieved pages do not say, reply \"not stated in the sources\".",
+            ResearchPrompt,
             WebSourcesMode.Required, "research", "public-research", false, Prefer: ["research"]),
         new("public-writing", "Public writing through Anthropic",
             "Public content may use an approved cloud model; the team pays the configured price.",
@@ -97,8 +134,11 @@ public static class DemoExamples
             "Routed by the coding profile's policy to " + CoderModel + " (local, $0 configured).",
             "Route shows the local coder model; no cloud attempt; cost is $0 configured, infrastructure excluded.",
             ExampleNeed.InternalCoder,
-            "Write a C# extension method Chunk<T>(this IEnumerable<T> source, int size) that yields arrays of at most size items, with XML doc comments and argument validation.",
-            WebSourcesMode.Off, "coding", "internal-code-assist", false, Prefer: ["coding", "code"]),
+            // Code only with one-line XML docs, and an explicit 2048 bound for THIS example only (the composer default stays
+            // 1024): the same prompt then completes on the local coder and, after switching to Public, on a cloud model that
+            // writes longer docs. Where the application or model caps lower, OutputNote says so before the run.
+            "Write a C# extension method Chunk<T>(this IEnumerable<T> source, int size) that yields arrays of at most size items, with argument validation. Use one-line XML doc comments. Reply with the code only, no explanation.",
+            WebSourcesMode.Off, "coding", "internal-code-assist", false, MaxTokens: 2048, Prefer: ["coding", "code"]),
         new("internal-research", "Internal research on the stronger local model",
             "A different workload profile selects a stronger local model — routing by declared workload, not by guessing from the prompt.",
             "Routed by the research profile's policy to " + ResearchModel + " (local).",
@@ -106,12 +146,19 @@ public static class DemoExamples
             ExampleNeed.InternalResearch,
             "For an internal ledger service, compare optimistic and pessimistic concurrency control: when to use each, and two failure modes of each. Keep it under 200 words.",
             WebSourcesMode.Off, "research", "internal-analysis", false, MaxTokens: 2048, Prefer: ["research"]),
-        new("sensitive-refusal", "Sensitive data never goes to the cloud",
-            "Detection escalates a Public request containing an SSN pattern to PII; pinning a cloud model is then refused.",
-            "Refused at policy: PII is never routed to a cloud destination. Nothing is sent to the provider.",
-            "Outcome Refused at Policy with the reason; evidence still names the application, team and profile; no charge. Resolution: remove the marker, or let policy choose (PII → local).",
+        new("sensitive-local", "Sensitive data detected: served locally",
+            "Detection raises a Public request containing a synthetic SSN to PII; with policy choosing, the PII route keeps it on a local model.",
+            "Served locally · sensitive data detected. Nothing leaves the perimeter; the classification is never lowered.",
+            "The chips show Sensitive · PII (detected) and a Local destination. Compare with the next example: the SAME prompt with an explicit external pin is blocked.",
+            ExampleNeed.SensitiveLocal,
+            SensitivePrompt,
+            WebSourcesMode.Off, "writing", "sensitive-local", false, Prefer: ["writing"]),
+        new("sensitive-refusal", "Sensitive data: explicit external attempt is blocked",
+            "The same synthetic sensitive prompt, but the example explicitly pins an external model (shown before you apply it). Policy blocks it before any provider call.",
+            "Blocked by policy · sensitive data cannot go external. Nothing is sent; no charge. This is a governance refusal, not a provider outage.",
+            "Outcome Blocked at Policy with the reason; evidence still names the application, team and workload. Switching workload resets the pin to \"Let policy choose\".",
             ExampleNeed.SensitiveCloudPinRefusal,
-            "Summarize this public support ticket in one sentence: \"Printer on floor 3 jammed again. Reporter SSN " + SyntheticSsn + " (synthetic test marker).\"",
+            SensitivePrompt,
             WebSourcesMode.Off, "writing", "sensitive-check", false, Prefer: ["writing"]),
         new("cache-repeat", "Repeat a request: exact cache hit",
             "An identical request within the cache TTL is answered from the exact cache at $0, still governed and audited.",
@@ -127,6 +174,34 @@ public static class DemoExamples
             ExampleNeed.BudgetRefusal,
             "Write a short paragraph about governed AI spending.",
             WebSourcesMode.Off, "demo", "budget-check", true, Prefer: ["budget"]),
+        new("public-local-research", "Public research: local model + governed web search",
+            "Retrieval and inference are separate decisions: one governed Tavily search (external, charged separately) feeds a LOCAL model.",
+            "Search runs once (Required); the Public workload's policy answers on the local model from the retrieved sources only.",
+            "The run shows an External retrieval chip (Tavily) next to a Local destination, and the search charge separately from inference. Sources are retrieved, not verified.",
+            ExampleNeed.PublicLocalResearch,
+            ResearchPrompt,
+            WebSourcesMode.Required, "research", "public-local-research", false, MaxTokens: 1024, Prefer: ["research"]),
+        new("public-coding-escalation", "Compare local coding with an approved external model",
+            "Synthetic public code runs on the local coder first. Escalating to the stronger external model is an explicit operator action on the same approved policy — never an automatic quality judgement.",
+            "First run: local coder. Then \"Run again on …\" re-runs the same prompt on the approved external target (pinned, recorded separately).",
+            "Compare the two runs' destination, duration and charge. Covenant measures those; whether an answer is better is the operator's judgement.",
+            ExampleNeed.PublicCodingLocalFirst,
+            "Write a Python function slugify(title: str) -> str that lowercases the text, replaces each run of non-alphanumeric characters with one hyphen and trims leading/trailing hyphens. Include three doctest examples. Reply with the code only.",
+            WebSourcesMode.Off, "coding", "public-code-compare", false, MaxTokens: 2048, Prefer: ["coding", "code"]),
+        new("sanitized-record", "Sensitive record: sanitized external call (opt-in)",
+            "A structured record with synthetic identifiers is PII. Only a dedicated, versioned policy lets Covenant build a sanitized payload (placeholders, fixed task text) for an external model; prose and PHI are refused.",
+            "Preview shows exactly what would leave — placeholders only; confirm it; the external model receives only that payload. The classification stays PII.",
+            "The run shows Sensitive · PII, a Sanitized payload chip and the External destination; the evidence records counts by type, never the values. Edit the record (add a free-text field) to see the refusal.",
+            ExampleNeed.SanitizedRecord,
+            SyntheticRecord,
+            WebSourcesMode.Off, "support", "sanitized-triage", false, Prefer: ["record", "sanit", "support"]),
+        new("internal-writing", "Internal writing on a local model",
+            "An internal note is Internal work: the declared writing workload routes it to a local model; nothing leaves the perimeter.",
+            "Routed by the Internal writing workload's policy to a local model ($0 provider charge configured, infrastructure excluded).",
+            "The run shows Internal (workload label) and a Local destination. Switch the same application to its Public writing workload to see a different, approved route.",
+            ExampleNeed.InternalWriting,
+            "Draft a short internal status note for the team: the quarterly access review is complete, two unused service accounts were disabled, and the next review is in March. Three plain-language bullet points.",
+            WebSourcesMode.Off, "writing", "internal-status-note", false, Prefer: ["writing"]),
     ];
 
     public static DemoExample? Find(string? id)
@@ -147,13 +222,14 @@ public static class DemoExamples
         if (tier.Count > 1) return new(null, null, null, [], "ambiguous: policies " + string.Join(", ", tier.Select(p => p.Id)) + " match at the same specificity");
         var policy = tier[0];
         if (policy.Paused) return new(policy, null, null, [], "policy " + policy.Id + " is paused");
-        var eligible = policy.Targets.Where(t => Ineligible(cfg, t, classification) is null).ToList();
+        bool sanitized = PolicyText.IsSanitized(policy);   // ADR-0016: external only for a Covenant-built sanitized payload
+        var eligible = policy.Targets.Where(t => Ineligible(cfg, t, classification, sanitized) is null).ToList();
         if (eligible.Count == 0) return new(policy, null, null, [], "no eligible destination under policy " + policy.Id);
         var conn = FindConnection(cfg, eligible[0].ConnectionId);
         return new(policy, eligible[0], conn, eligible, null);
     }
 
-    public static string? Ineligible(CovenantConfigDto cfg, PolicyTargetDto t, string classification)
+    public static string? Ineligible(CovenantConfigDto cfg, PolicyTargetDto t, string classification, bool sanitizedPolicy = false)
     {
         if (t.Paused) return "route paused";
         var conn = FindConnection(cfg, t.ConnectionId);
@@ -164,7 +240,8 @@ public static class DemoExamples
         if (ComposerRules.BoundaryLabel(conn.Boundary) == "Cloud")
         {
             if (PolicyRoutes.IsLocalOnly(cfg.Mode)) return "cloud excluded in local-only mode";
-            if (PolicyText.IsSensitive(classification)) return "sensitive data never routed to cloud";
+            if (PolicyText.IsSensitive(classification) && !(sanitizedPolicy && string.Equals(classification, "Pii", StringComparison.OrdinalIgnoreCase)))
+                return "sensitive data never routed to cloud";
             if (model.Price is null && cfg.Budgets.Any(b => string.Equals(b.Enforcement, "hard", StringComparison.Ordinal) || b.Enforcement is null))
                 return "unpriced cloud model under a hard budget";
         }
@@ -187,20 +264,95 @@ public static class DemoExamples
     /// <summary>Resolves one example against the applied configuration. Picks the application and profile that satisfy
     /// the example's need (preferring <paramref name="preferredApplication"/>); otherwise lists exactly what is missing.
     /// Never edits configuration and never substitutes a different route than the example claims.</summary>
+    /// <summary>Resolves the example for EXACTLY the given calling application (the composer's selection): it never switches
+    /// the application or its owner. Irrelevant examples (the application has no granted workload of the right kind) come
+    /// back with <see cref="ExampleResolution.Relevant"/> false; relevant but unready ones list what is missing.</summary>
+    public static ExampleResolution ResolveFor(DemoExample ex, string applicationId, CovenantConfigDto? cfg, IReadOnlyList<ApplicationSummaryDto>? apps,
+        IReadOnlyList<BudgetStateDto>? budgets, WebSearchStatusDto? search)
+        => Resolve(ex, cfg, apps, budgets, search, applicationId, strict: true);
+
+    /// <summary>Is the example about something this application actually does — judged from its GRANTED workloads and
+    /// their CONFIGURED routes, not just a matching baseline? Runtime readiness (search credentials, cache TTL, budget
+    /// left) is NOT part of this: a relevant example that cannot run right now is still listed, with what is missing.
+    /// The isolated budget-refusal example is relevant only to an application with its own tiny or exhausted hard budget.</summary>
+    public static bool IsRelevant(DemoExample ex, CovenantConfigDto cfg, ApplicationSummaryDto app, IReadOnlyList<BudgetStateDto>? budgets = null)
+    {
+        string baseline = BaselineFor(ex);
+        var workloads = ComposerRules.GrantedProfiles(app)
+            .Select(g => cfg.Profiles.FirstOrDefault(p => p.Id == g))
+            .Where(p => p is not null && string.Equals(p.Baseline, baseline, StringComparison.Ordinal))
+            .Select(p => (Profile: p!, Route: Route(cfg, baseline, p!.Id)))
+            .ToList();
+        return ex.Need switch
+        {
+            ExampleNeed.PublicWebResearch => workloads.Any(w => w.Profile.WebSearchAllowed),
+            ExampleNeed.PublicAnthropic => workloads.Any(w => IsWritingWorkload(w.Profile) && w.Route.PrimaryConnection is { Kind: "Anthropic" }),
+            // Task-specific examples need a workload DECLARED for that task (id or name), not just a matching model: an
+            // internal-writing workload that happens to use the coder model is not offered the coding example.
+            ExampleNeed.InternalCoder => workloads.Any(w => Declares(w.Profile, Coding) && w.Route.Primary?.ModelId == CoderModel),
+            ExampleNeed.InternalResearch => workloads.Any(w => Declares(w.Profile, Research) && w.Route.Primary?.ModelId == ResearchModel),
+            ExampleNeed.InternalWriting => workloads.Any(w => Declares(w.Profile, Writing) && IsLocal(w.Route)),
+            ExampleNeed.SensitiveCloudPinRefusal => workloads.Any(w => w.Route.Eligible.Any(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud")),
+            ExampleNeed.SensitiveLocal => workloads.Any(w => IsLocal(Route(cfg, "Pii", w.Profile.Id))),
+            ExampleNeed.CacheRepeat => workloads.Any(w => w.Route.Primary is not null),
+            ExampleNeed.BudgetRefusal => workloads.Any(w => w.Route.Primary is not null) && HasIsolatedBudget(cfg, app, budgets),
+            ExampleNeed.PublicLocalResearch => workloads.Any(w => w.Profile.WebSearchAllowed && IsLocal(w.Route)),
+            ExampleNeed.PublicCodingLocalFirst => workloads.Any(w => Declares(w.Profile, Coding) && IsLocal(w.Route) && HasCloudAlternative(cfg, w.Route)),
+            ExampleNeed.SanitizedRecord => workloads.Any(w => w.Route.Policy is { } sp && PolicyText.IsSanitized(sp)),
+            _ => false,
+        };
+    }
+
+    private static readonly string[] Coding = ["cod"];
+    private static readonly string[] Research = ["research"];
+    private static readonly string[] Writing = ["writ"];
+
+    /// <summary>The workload's id or name declares the task (display matching only — routing stays policy-driven).</summary>
+    public static bool Declares(WorkloadProfileDto p, IReadOnlyList<string> words)
+        => words.Any(w => p.Id.Contains(w, StringComparison.OrdinalIgnoreCase) || (p.Name ?? "").Contains(w, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>A declared writing workload: a Public profile without web search whose id or name says writing.</summary>
+    public static bool IsWritingWorkload(WorkloadProfileDto p)
+        => !p.WebSearchAllowed && string.Equals(p.Baseline, "Public", StringComparison.Ordinal)
+           && (p.Id.Contains("writ", StringComparison.OrdinalIgnoreCase) || (p.Name ?? "").Contains("writ", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>A hard budget scoped to this application or its team (not the global one) that is tiny (≤ $0.01 cap) or
+    /// already exhausted — the deliberate set-up for the budget-refusal demonstration.</summary>
+    public static bool HasIsolatedBudget(CovenantConfigDto cfg, ApplicationSummaryDto app, IReadOnlyList<BudgetStateDto>? budgets)
+    {
+        bool Scoped(string scope) => scope == "application:" + app.Id || scope == "team:" + app.Team;
+        bool Hard(string? enforcement) => !string.Equals(enforcement, "warn-only", StringComparison.Ordinal);
+        return cfg.Budgets.Any(b => Scoped(b.Scope) && Hard(b.Enforcement) && b.CapUsd <= 0.01m)
+               || (budgets?.Any(b => Scoped(b.Scope) && Hard(b.Enforcement) && b.RemainingUsd <= 0.0001m) ?? false);
+    }
+
+    private static string BaselineFor(DemoExample ex) => ex.Need switch
+    {
+        ExampleNeed.InternalCoder or ExampleNeed.InternalResearch or ExampleNeed.InternalWriting => "Internal",
+        ExampleNeed.SanitizedRecord => "Pii",
+        _ => "Public",
+    };
+
+    private static bool HasCloudAlternative(CovenantConfigDto cfg, ResolvedRoute r)
+        => r.Eligible.Skip(1).Any(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud");
+
     public static ExampleResolution Resolve(DemoExample ex, CovenantConfigDto? cfg, IReadOnlyList<ApplicationSummaryDto>? apps,
-        IReadOnlyList<BudgetStateDto>? budgets, WebSearchStatusDto? search, string? preferredApplication = null)
+        IReadOnlyList<BudgetStateDto>? budgets, WebSearchStatusDto? search, string? preferredApplication = null, bool strict = false)
     {
         var missing = new List<ExamplePrerequisite>();
         if (cfg is null || apps is null)
             return new(ex, false, null, null, null, null, null, [new("The configuration and applications are not loaded yet.", null, null)]);
         var selectable = apps.Where(a => ComposerRules.WhyNotSelectable(a) is null)
+            .Where(a => !strict || string.Equals(a.Id, preferredApplication, StringComparison.Ordinal))
             .OrderBy(a => string.Equals(a.Id, preferredApplication, StringComparison.Ordinal) ? 0 : 1)
             .ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
         if (selectable.Count == 0)
             return new(ex, false, null, null, null, null, null,
-                [new("No application is enabled for console testing.", "policies#applications-list", "Applications")]);
+                [new(strict ? "The selected application cannot run console requests." : "No application is enabled for console testing.", "policies#applications-list", "Applications")],
+                Relevant: !strict);
+        bool relevant = !strict || IsRelevant(ex, cfg, selectable[0], budgets);
 
-        string baseline = ex.Need is ExampleNeed.InternalCoder or ExampleNeed.InternalResearch ? "Internal" : "Public";
+        string baseline = BaselineFor(ex);
         var candidates = new List<(ApplicationSummaryDto App, WorkloadProfileDto Profile, ResolvedRoute Route, string Pin, int Score)>();
         foreach (var app in selectable)
         {
@@ -213,7 +365,11 @@ public static class DemoExamples
                 if (profile is null || !string.Equals(profile.Baseline, baseline, StringComparison.Ordinal)) continue;
                 var route = Route(cfg, baseline, pid);
                 if (Fits(ex, cfg, app, profile, route, budgets, search) is not { } pin) continue;
-                if (exhausted && ex.Need != ExampleNeed.BudgetRefusal && (PrimaryPriced(route) || ex.WebSources != WebSourcesMode.Off)) continue;
+                if (exhausted && ex.Need != ExampleNeed.BudgetRefusal && (PrimaryPriced(route) || ex.WebSources != WebSourcesMode.Off))
+                {
+                    if (strict) missing.Add(new("This application's budget " + ExhaustedBudget(app, budgets)!.Id + " is exhausted — this example would be refused at Budget.", "budgets", "Budgets"));
+                    continue;
+                }
                 candidates.Add((app, profile, route, pin, Score(ex, app, profile, preferredApplication)));
             }
         }
@@ -223,12 +379,30 @@ public static class DemoExamples
                 .ThenBy(c => c.Profile.Id, StringComparer.Ordinal).First();
             var routeText = ex.Need == ExampleNeed.SensitiveCloudPinRefusal
                 ? RouteText(Route(cfg, "Pii", best.Profile.Id)) + " — the explicit cloud pin is refused"
+                : ex.Need == ExampleNeed.SensitiveLocal
+                    ? RouteText(Route(cfg, "Pii", best.Profile.Id)) + " (after detection raises it to PII)"
                 : RouteText(best.Route);
+            var (title, steps) = Describe(ex, cfg, best.Route);
             return new(ex, true, best.App.Id, best.Profile.Id, best.Pin.Length == 0 ? null : best.Pin, routeText,
-                ComposerRules.PayerText(best.App), [], OutputNote(ex, cfg, best.App.Id, best.Route));
+                ComposerRules.PayerText(best.App), [], OutputNote(ex, cfg, best.App.Id, best.Route), DisplayTitle: title, Steps: steps);
         }
-        missing.AddRange(WhatIsMissing(ex, cfg, selectable, budgets, search, baseline));
-        return new(ex, false, null, null, null, null, null, missing);
+        if (missing.Count == 0) missing.AddRange(WhatIsMissing(ex, cfg, selectable, budgets, search, baseline));
+        return new(ex, false, null, null, null, null, null, missing, Relevant: relevant);
+    }
+
+    /// <summary>Route-derived title and steps (labels from the APPLIED configuration; nothing is claimed available that is not
+    /// an eligible target of the resolved route). Only the local-first comparison example has them today.</summary>
+    private static (string? Title, string? Steps) Describe(DemoExample ex, CovenantConfigDto cfg, ResolvedRoute route)
+    {
+        if (ex.Need != ExampleNeed.PublicCodingLocalFirst || route.Primary is not { } local) return (null, null);
+        var external = route.Eligible.Skip(1).FirstOrDefault(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud");
+        if (external is null) return (null, null);
+        var localLabel = ModelLabels.Friendly(cfg, local.ConnectionId, local.ModelId);
+        var extLabel = ModelLabels.Friendly(cfg, external.ConnectionId, external.ModelId);
+        return ("Compare local coding with " + extLabel,
+            "Step 1 — Run: the request goes to the local " + localLabel + ". Step 2 — only if you choose, after the result: "
+            + "\"Compare with " + extLabel + "\" sends the same request to that approved external model as a second, paid request, "
+            + "recorded separately. Covenant shows where each ran, how long and what it cost; which answer is better is your judgement.");
     }
 
     /// <summary>Preference among fitting candidates: a profile/application named for the example's workload, then the
@@ -273,19 +447,31 @@ public static class DemoExamples
                 if (route.Primary is null || !profile.WebSearchAllowed) return null;
                 return search is { Ready: true } ? "" : null;
             case ExampleNeed.PublicAnthropic:
-                return route.PrimaryConnection is { Kind: "Anthropic" } ? "" : null;
+                // The example claims WRITING routed by a writing workload: a research or demo profile that happens to use
+                // the same cloud model does not qualify.
+                return IsWritingWorkload(profile) && route.PrimaryConnection is { Kind: "Anthropic" } ? "" : null;
             case ExampleNeed.InternalCoder:
-                return route.Primary is { } c && c.ModelId == CoderModel && IsLocal(route) ? "" : null;
+                return Declares(profile, Coding) && route.Primary is { } c && c.ModelId == CoderModel && IsLocal(route) ? "" : null;
             case ExampleNeed.InternalResearch:
-                return route.Primary is { } r && r.ModelId == ResearchModel && IsLocal(route) ? "" : null;
+                return Declares(profile, Research) && route.Primary is { } r && r.ModelId == ResearchModel && IsLocal(route) ? "" : null;
+            case ExampleNeed.InternalWriting:
+                return Declares(profile, Writing) && IsLocal(route) ? "" : null;
             case ExampleNeed.SensitiveCloudPinRefusal:
                 var cloud = route.Eligible.FirstOrDefault(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud");
                 return cloud is null ? null : cloud.ConnectionId + "/" + cloud.ModelId;
+            case ExampleNeed.SensitiveLocal:
+                return IsLocal(Route(cfg, "Pii", profile.Id)) ? "" : null;
             case ExampleNeed.CacheRepeat:
                 return route.Primary is not null && (cfg.Settings?.CacheTtlSeconds ?? 0) > 0 ? "" : null;
             case ExampleNeed.BudgetRefusal:
                 // A $0-priced (local) route reserves nothing, so only a PRICED primary can show a budget refusal.
                 return PrimaryPriced(route) && ExhaustedBudget(app, budgets) is not null ? "" : null;
+            case ExampleNeed.PublicLocalResearch:
+                return profile.WebSearchAllowed && IsLocal(route) && search is { Ready: true } ? "" : null;
+            case ExampleNeed.PublicCodingLocalFirst:
+                return Declares(profile, Coding) && IsLocal(route) && HasCloudAlternative(cfg, route) ? "" : null;
+            case ExampleNeed.SanitizedRecord:
+                return route.Policy is { } sp && PolicyText.IsSanitized(sp) && route.Eligible.Any(t => ComposerRules.BoundaryLabel(FindConnection(cfg, t.ConnectionId)?.Boundary) == "Cloud") ? "" : null;
         }
         return null;
     }
@@ -334,9 +520,27 @@ public static class DemoExamples
             case ExampleNeed.SensitiveCloudPinRefusal:
                 yield return new("No Public profile has an eligible cloud target to pin. This example needs a Public cloud route (Hybrid mode).", "policies", "Policies");
                 break;
+            case ExampleNeed.SensitiveLocal:
+                yield return new("No local route covers PII for this application's Public workloads. Add a PII route to a local model (Policies → Routes); without one, sensitive requests are refused.", "policies", "Policies");
+                break;
             case ExampleNeed.CacheRepeat:
                 if ((cfg.Settings?.CacheTtlSeconds ?? 0) <= 0)
                     yield return new("The exact cache is disabled (TTL 0), so a repeat would NOT be a cache hit. Set a cache TTL under Settings → Operational.", "settings#op-h", "Cache settings");
+                break;
+            case ExampleNeed.PublicLocalResearch:
+                if (search is not { Ready: true })
+                    yield return new("Web search is not ready on the server" + (search is null ? " (status not loaded)." : ": " + (search.Setup.FirstOrDefault() ?? "see Settings → Web search.")),
+                        "settings#ws-h", "Web search settings");
+                yield return new("No Public workload with web search allowed routes to a LOCAL model first. Add one (e.g. 'public-local-research' → a local model) and allow web search on it; search is granted per workload, never to every team.", "policies", "Policies");
+                break;
+            case ExampleNeed.PublicCodingLocalFirst:
+                yield return new("No Public coding workload routes to a local model first with an approved external alternative. Add a route: primary = local coder, fallback = the stronger external model (Policies → Routes).", "policies", "Policies");
+                break;
+            case ExampleNeed.InternalWriting:
+                yield return new("No Internal writing workload routes to a local model. Add an Internal workload named for writing (e.g. 'internal-writing') with a local route, and grant it.", "policies", "Policies");
+                break;
+            case ExampleNeed.SanitizedRecord:
+                yield return new("No sanitized external route exists. Add a PII-baseline workload (e.g. 'support-records'), grant it to the application, then add a PII-only route for it with an external model and turn on \"Sanitized external route\" (Policies → Routes).", "policies", "Policies");
                 break;
             case ExampleNeed.BudgetRefusal:
                 yield return new("No hard budget that applies to a console-testable application on a PRICED Public route is exhausted" + (budgets is null ? " (budgets not loaded)" : "")
@@ -355,6 +559,8 @@ public static class DemoExamples
         var ex = r.Example;
         form.Scenario = null;
         form.ExampleId = ex.Id;
+        form.ExampleApplicationId = r.ApplicationId;
+        form.ExampleProfileId = r.ProfileId;
         form.ApplicationId = r.ApplicationId;
         form.ProfileId = r.ProfileId;
         form.Prompt = ex.Prompt;
@@ -374,15 +580,50 @@ public static class DemoExamples
             form.Mode = RouteMode.Policy;
             form.CatalogModel = null;
         }
+        form.PinnedByExample = r.ModelPin is not null;
+        form.ExampleModelPin = r.ModelPin;
         return true;
+    }
+
+    /// <summary>A workload or application switch: a pin the EXAMPLE set (the explicit external attempt) is cleared back to
+    /// "Let policy choose" — it described the old selection. A pin the operator chose is kept (the composer warns). Returns
+    /// true when something was reset.</summary>
+    public static bool ResetExamplePin(PlaygroundForm form)
+    {
+        if (!form.PinnedByExample) return false;
+        form.Mode = RouteMode.Policy;
+        form.CatalogModel = null;
+        form.PinnedByExample = false;
+        return true;
+    }
+
+    /// <summary>What "Use example" will change in the CURRENT form, shown before it is pressed. Empty = nothing visible changes
+    /// besides the prompt.</summary>
+    public static IReadOnlyList<string> ChangesFor(ExampleResolution r, PlaygroundForm form)
+    {
+        var list = new List<string>();
+        if (!r.Ready) return list;
+        if (!string.Equals(r.ApplicationId, form.ApplicationId, StringComparison.Ordinal)) list.Add("Sender: " + (r.ApplicationId ?? "—"));
+        if (!string.Equals(r.ProfileId, form.ProfileId, StringComparison.Ordinal)) list.Add("Workload: " + (r.ProfileId ?? "application default"));
+        var requested = form.RequestedModel;
+        if (!string.Equals(requested, r.ModelPin, StringComparison.Ordinal))
+            list.Add(r.ModelPin is { } pin ? "Model: explicitly pinned to " + pin + " (an external attempt)" : "Model: let policy choose");
+        if (form.WebSources != r.Example.WebSources) list.Add("Web sources: " + WebSourcesText.Label(r.Example.WebSources));
+        if (r.Example.MaxTokens is { } mt && form.MaxTokens != mt) list.Add("Max output tokens: " + mt.ToString(CultureInfo.InvariantCulture));
+        if (!string.Equals(form.Prompt, r.Example.Prompt, StringComparison.Ordinal)) list.Add(form.Prompt.Length == 0 ? "Prompt: filled" : "Prompt: replaced");
+        return list;
     }
 
     /// <summary>True while the form still holds exactly what the example filled in (labels the run with the example).</summary>
     public static bool StillMatches(DemoExample ex, PlaygroundForm form)
         => string.Equals(form.ExampleId, ex.Id, StringComparison.Ordinal)
+           && string.Equals(form.ExampleApplicationId, form.ApplicationId, StringComparison.Ordinal)
+           && string.Equals(form.ExampleProfileId, form.ProfileId, StringComparison.Ordinal)
            && string.Equals(form.Prompt, ex.Prompt, StringComparison.Ordinal)
            && form.WebSources == ex.WebSources
-           && form.FreshNonce == ex.FreshNonce;
+           && form.FreshNonce == ex.FreshNonce
+           && string.Equals(form.RequestedModel, form.ExampleModelPin, StringComparison.Ordinal)   // routing not edited
+           && (ex.MaxTokens is null || form.MaxTokens == ex.MaxTokens);
 
     public static string Money(decimal v) => v.ToString("0.####", CultureInfo.InvariantCulture);
 }

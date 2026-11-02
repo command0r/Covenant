@@ -112,17 +112,20 @@ public sealed class WebSearchPlannerTests
         var original = new List<ChatMessage> { new(ChatRole.User, "What's the weather in Toronto today?") };
         var grounded = WebSearchGrounding.Ground(original, [hostile], DateTimeOffset.Parse("2026-10-17T13:00:00Z"), StubSearchClient.Retrieved, "Toronto");
 
-        Assert.Equal(3, grounded.Count);
+        // One system message (interoperable), then the user turn: data block, then the question verbatim.
+        Assert.Equal(2, grounded.Count);
         Assert.Equal(ChatRole.System, grounded[0].Role);
         Assert.Contains("UNTRUSTED DATA", grounded[0].Content, StringComparison.Ordinal);
-        Assert.Contains("2026-10-17", grounded[0].Content, StringComparison.Ordinal);                       // current date
+        Assert.Contains("2026-10-17 13:00 UTC", grounded[0].Content, StringComparison.Ordinal);             // current time, not just a date
         Assert.Contains("not contain enough evidence", grounded[0].Content, StringComparison.Ordinal);
-        var block = grounded[1].Content;
+        Assert.Equal(ChatRole.User, grounded[1].Role);
+        var turn = grounded[1].Content;
+        var block = turn[..(turn.IndexOf(WebSearchGrounding.BlockEnd, StringComparison.Ordinal) + WebSearchGrounding.BlockEnd.Length)];
         Assert.StartsWith(WebSearchGrounding.BlockStart, block, StringComparison.Ordinal);
-        Assert.EndsWith(WebSearchGrounding.BlockEnd, block, StringComparison.Ordinal);
-        Assert.Equal(1, Count(block, WebSearchGrounding.BlockStart));                                       // cannot be re-opened…
-        Assert.Equal(1, Count(block, WebSearchGrounding.BlockEnd));                                         // …or closed from inside
-        Assert.Same(original[0], grounded[2]);                                                              // original untouched, last
+        Assert.Equal(1, Count(turn, WebSearchGrounding.BlockStart));                                        // cannot be re-opened…
+        Assert.Equal(1, Count(turn, WebSearchGrounding.BlockEnd));                                          // …or closed from inside
+        Assert.EndsWith(WebSearchGrounding.QuestionHeader + "\n" + original[0].Content, turn, StringComparison.Ordinal);   // question verbatim, after the data
+        Assert.Equal("What's the weather in Toronto today?", original[0].Content);                         // original request untouched
     }
 
     [Fact]
@@ -190,10 +193,11 @@ public sealed class WebSearchStageTests
         Assert.Contains("Toronto", _search.LastQuery.Query, StringComparison.Ordinal);
         // The model received instructions + data block + the original question, unchanged.
         var sent = _cloud.LastMessages;
-        Assert.Equal(3, sent.Count);
+        Assert.Equal(2, sent.Count);
+        Assert.Equal(MEAI.ChatRole.System, sent[0].Role);
         Assert.Contains("UNTRUSTED DATA", sent[0].Text, StringComparison.Ordinal);
         Assert.Contains("https://weather.example.org/toronto", sent[1].Text, StringComparison.Ordinal);
-        Assert.Equal(Weather, sent[2].Text);
+        Assert.EndsWith(Weather, sent[1].Text, StringComparison.Ordinal);
         // Evidence: bounded metadata only; tool call separate from inference attempts.
         Assert.NotNull(e.WebSearch);
         Assert.Equal("required", e.WebSearch!.Mode);

@@ -1,0 +1,81 @@
+@inject Interop Interop
+
+@* Workload (profile) choice for the selected application. Exactly two granted workloads → a compact two-segment radio group
+   (equal segments, icons from configuration: globe = Public with web search, pen = other Public, shield = Internal/sensitive,
+   code = coding), operable with arrow keys / Home / End (WAI-ARIA radio pattern, roving tabindex). One → a static label.
+   Three or more → a normal select (never a fake Public/Internal toggle). None → the server default is stated. *@
+
+@{ var kind = ComposerRules.WorkloadChoice(Granted.Count); }
+@switch (kind)
+{
+    case WorkloadChoiceKind.None:
+        <span class="field-label" id="@(IdPrefix + "-profile-l")">Workload</span>
+        <div class="static-value secondary">@(HasApplication ? "No workload granted — the server applies its default profile" : "Choose an application first")</div>
+        break;
+    case WorkloadChoiceKind.Single:
+        {
+            var p = Profile(Granted[0]);
+            <span class="field-label" id="@(IdPrefix + "-profile-l")">Workload</span>
+            <div class="static-value workload-single" aria-labelledby="@(IdPrefix + "-profile-l")">
+                <Icon Name="@ComposerRules.WorkloadIcon(p)" Size="16" />
+                <strong>@Name(Granted[0])</strong>
+                <span class="subtle">· the only workload granted</span>
+            </div>
+        }
+        break;
+    case WorkloadChoiceKind.Segmented:
+        <span class="field-label" id="@(IdPrefix + "-profile-l")">Workload</span>
+        <div class="seg workload-seg" role="radiogroup" aria-labelledby="@(IdPrefix + "-profile-l")" @onkeydown="OnKeyAsync">
+            @{ var labels = ComposerRules.SegmentLabels(Granted.Select(Profile).ToList(), Granted); }
+            @for (int i = 0; i < Granted.Count; i++)
+            {
+                var id = Granted[i];
+                var on = string.Equals(id, Selected, StringComparison.Ordinal);
+                var label = labels[i];
+                <button type="button" role="radio" id="@SegmentId(i)" aria-checked="@(on ? "true" : "false")" tabindex="@(on || (Selected is null && i == 0) ? "0" : "-1")"
+                        disabled="@Disabled" title="@label.FullName" aria-label="@(label.Short ? label.Text + " — " + label.FullName : null)" @onclick="() => Choose(id)">
+                    <Icon Name="@ComposerRules.WorkloadIcon(Profile(id))" Size="16" />
+                    <span class="seg-text @(label.Short ? "" : "wrap")">@label.Text</span>
+                </button>
+            }
+        </div>
+        break;
+    default:
+        <label for="@(IdPrefix + "-profile")">Workload</label>
+        <select id="@(IdPrefix + "-profile")" class="input" value="@(Selected ?? "")" disabled="@Disabled" @onchange="e => Choose(e.Value?.ToString())">
+            @foreach (var id in Granted)
+            {
+                <option value="@id">@Name(id)</option>
+            }
+        </select>
+        break;
+}
+
+@code {
+    [Parameter, EditorRequired] public IReadOnlyList<string> Granted { get; set; } = [];
+    [Parameter] public IReadOnlyList<WorkloadProfileDto>? Profiles { get; set; }
+    [Parameter] public string? Selected { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public bool HasApplication { get; set; }
+    [Parameter] public string IdPrefix { get; set; } = "cmp";
+    [Parameter] public EventCallback<string?> OnSelect { get; set; }
+
+    private WorkloadProfileDto? Profile(string id) => ComposerRules.Profile(Profiles, id);
+
+    private string Name(string id) => Profile(id)?.Name is { Length: > 0 } n ? n : id;
+
+    private string SegmentId(int i) => IdPrefix + "-wl-" + i.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    private Task Choose(string? id) => Disabled ? Task.CompletedTask : OnSelect.InvokeAsync(id);
+
+    private async Task OnKeyAsync(KeyboardEventArgs e)
+    {
+        // Tab is never intercepted (it leaves the group); only the radio-pattern keys move the selection.
+        if (e.Key is not ("ArrowRight" or "ArrowLeft" or "ArrowUp" or "ArrowDown" or "Home" or "End") || Disabled) return;
+        int current = Math.Max(0, Granted.ToList().IndexOf(Selected ?? ""));
+        int next = ComposerRules.NextIndex(current, Granted.Count, e.Key);
+        if (next < 0) return;
+        await Choose(Granted[next]);
+        try { await Interop.FocusElementAsync(SegmentId(next)); } catch (JSException) { /* focus is a convenience */ }
+    }
+}

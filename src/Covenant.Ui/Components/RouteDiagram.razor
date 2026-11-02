@@ -1,0 +1,48 @@
+@* Three-part route scheme: Sender → Covenant → Destination (Phase 2). Each box has an icon, a heading, one line and an
+   optional secondary line; tone classes are semantic (local teal, external purple, sanitized amber, blocked red, cache
+   neutral) and never the only signal. Expected = the server's dry run for the CURRENT form; actual = one run's evidence. *@
+<figure class="route-scheme @View.State @(Compact ? "compact" : "")"aria-label="@((View.Kind == "expected" ? "Expected route" : "Actual route") + ": " + Describe())">
+    <figcaption class="route-scheme-head">
+        <span class="route-scheme-kind">@(View.Kind == "expected" ? "Expected route" : "Actual route")</span>
+        @if (View.State is "pending" or "stale" or "none" or "unknown")
+        {
+            <span class="jchip @(View.State == "stale" ? "refused" : "neutral")"><span>@StateLabel</span></span>
+        }
+        @if (View.StateText is { } st) { <span class="subtle secondary">@st</span> }
+    </figcaption>
+    <ol class="route-boxes">
+        @foreach (var (box, i) in new[] { View.Sender, View.Covenant, View.Destination }.Select((b, i) => (b, i)))
+        {
+            <li class="route-box @box.Tone">
+                <span class="route-box-title"><Icon Name="@box.Icon" Size="14" /> @box.Title</span>
+                @* Compact hides the secondary line visually; the full text stays in the line's tooltip and the aria-label. *@
+                <span class="route-box-line" title="@(box.Sub is { } t ? box.Line + " — " + t : box.Line)">@box.Line</span>
+                @if (box.Sub is { } sub) { <span class="route-box-sub" title="@sub">@sub</span> }
+            </li>
+            @if (i < 2) { <li class="route-arrow" aria-hidden="true">→</li> }
+        }
+    </ol>
+    @if (View.Badges.Count > 0)
+    {
+        <div class="route-badges">
+            @foreach (var b in View.Badges) { <span class="jchip external"><Icon Name="globe" Size="14" /><span>@b</span></span> }
+        </div>
+    }
+</figure>
+
+@code {
+    [Parameter, EditorRequired] public RouteSchemeView View { get; set; } = default!;
+    /// <summary>Presentation sizing (1280×720): one line per box, secondary text only in tooltip/aria-label.</summary>
+    [Parameter] public bool Compact { get; set; }
+
+    private string StateLabel => View.State switch
+    {
+        "pending" => "Pending",
+        "stale" => "Stale",
+        "none" => "Not previewed",
+        _ => "Unknown",
+    };
+
+    private string Describe() => View.Sender.Line + " to Covenant (" + View.Covenant.Line + ") to " + View.Destination.Line
+        + (View.Destination.Sub is { } s ? " (" + s + ")" : "");
+}

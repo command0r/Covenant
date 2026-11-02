@@ -27,19 +27,28 @@
         <div class="page-head">
             <div class="titles">
                 <h1>Requests</h1>
-                <span class="lede">@ScopeLabel — governed decisions as recorded at processing time.</span>
+                <span class="lede">@HistoryLabel — governed decisions as recorded at processing time.</span>
             </div>
-            <div class="field segment-field">
-                <label for="rq-seg">Audit segment</label>
-                <select id="rq-seg" class="input" value="@(View.SegmentId ?? "")" @onchange="OnSegment" disabled="@(View.Segments is null || _loading)">
-                    <option value="">Current segment</option>
-                    @foreach (var seg in ArchivedSegments)
-                    {
-                        <option value="@seg.Id">@SegmentScope.Option(seg)</option>
-                    }
-                </select>
-                <span class="help">@(View.SegmentsError ?? (View.Segments is null ? "Loading segments…" : ArchivedSegments.Count == 0 ? "No archived segments." : "Archived segments are read-only."))</span>
-            </div>
+            @* "Request history" (usability review): the selector exists only when earlier saved history (archived audit logs)
+               exists. Choosing one changes which records are browsed — it never deletes anything or resets spend. *@
+            @if (ArchivedSegments.Count > 0 || View.SegmentId is not null)
+            {
+                <div class="field segment-field">
+                    <label for="rq-seg">Request history</label>
+                    <select id="rq-seg" class="input" value="@(View.SegmentId ?? "")" @onchange="OnSegment" disabled="@(View.Segments is null || _loading)">
+                        <option value="">Current history</option>
+                        @foreach (var seg in ArchivedSegments)
+                        {
+                            <option value="@seg.Id">@HistoryOption(seg)</option>
+                        }
+                    </select>
+                    <span class="help">Earlier saved history is read-only. Choosing it changes which records you browse; nothing is deleted and spend is not reset.</span>
+                </div>
+            }
+            else if (View.SegmentsError is { } segErr)
+            {
+                <span class="help">@segErr</span>
+            }
             <Button Busy="@_loading" BusyText="Loading…" OnClick="ReloadAsync">Refresh</Button>
         </div>
 
@@ -112,11 +121,33 @@
             </div>
             <Button Size="form" Disabled="@(!View.Criteria.IsActive)" OnClick="ClearFilters">Clear filters</Button>
         </div>
-        <span class="note" role="status">@CoverageText</span>
+        @if (View.Criteria.IsActive)
+        {
+            <div class="active-filters" role="status">
+                <span class="secondary">Filtered by</span>
+                @foreach (var f in RequestFilter.Describe(View.Criteria)) { <span class="chip">@f</span> }
+                <span class="secondary">· showing @Fmt.Int(Filtered.Count) of @Fmt.Int(View.Items.Count) loaded</span>
+                <button type="button" class="btn ghost sm" @onclick="ClearFilters">Clear filters</button>
+            </div>
+        }
+        @if (View.Segment is { } techSeg)
+        {
+            <details class="tech request-history-tech">
+                <summary>Technical: audit segment</summary>
+                <span class="secondary">Segment id <span class="mono">@techSeg.Id</span>@(string.IsNullOrWhiteSpace(techSeg.Label) ? "" : " · " + techSeg.Label) · @Fmt.Int(techSeg.Entries) request records · chain @(techSeg.ChainValid ? "verifies" : "does NOT verify"). The current log is rotated into earlier saved history by the operator; archived logs stay read-only and searchable here.</span>
+            </details>
+        }
+        @if (View.Pager.NewAvailable)
+        {
+            <div class="alert info" role="status">
+                <div class="alert-text"><strong>New requests available</strong><span class="alert-body">They are not inserted while you read an older page, so rows never move under you.</span></div>
+                <button type="button" class="btn sm" @onclick="ShowNewestAsync">Show newest</button>
+            </div>
+        }
 
         <section class="panel flush" aria-labelledby="rq-h">
             <div class="panel-head">
-                <h2 id="rq-h">@(View.Segment is { } hs ? (hs.IsCurrent ? "Requests — current segment" : "Requests — archived segment") : "Requests")</h2>
+                <h2 id="rq-h">@(View.Segment is { } hs ? (hs.IsCurrent ? "Requests — current history" : "Requests — earlier saved history") : "Requests")</h2>
                 <span class="panel-sub">@CountLabel</span>
             </div>
             @if (!View.Loaded)
@@ -171,7 +202,7 @@
                             </tr>
                         </thead>
                         <tbody>
-                            @foreach (var item in Filtered)
+                            @foreach (var item in PageRows)
                             {
                                 var r = item;
                                 var o = OutcomeModel.FromRecord(r);
@@ -195,24 +226,28 @@
                     </table>
                 </div>
             }
-            @if (View.Loaded)
+            @if (View.Loaded && View.Items.Count > 0)
             {
-                <div class="pad btn-row">
-                    @if (View.Items.Count >= RequestsViewState.MaxLoaded)
+                <div class="pad pager" role="navigation" aria-label="Request pages">
+                    <label for="rq-size" class="secondary">Rows per page</label>
+                    <select id="rq-size" class="input pager-size" value="@View.Pager.Size" @onchange="OnPageSize">
+                        @foreach (var size in RequestPager.Sizes) { <option value="@size">@size</option> }
+                    </select>
+                    <button type="button" class="btn sm" disabled="@(!View.Pager.CanPrevious || _loadingMore)" @onclick="PreviousPage">Previous</button>
+                    <button type="button" class="btn sm" disabled="@(!View.Pager.CanNext(Filtered.Count, View.Paging.CanLoadOlder, AtLoadLimit) || _loadingMore)"
+                            aria-busy="@(_loadingMore ? "true" : null)" @onclick="NextPageAsync">@(_loadingMore ? "Loading…" : "Next")</button>
+                    <span class="secondary" role="status">@View.Pager.Label(Filtered.Count, View.Items.Count, View.Criteria.IsActive, View.Paging.CanLoadOlder && !AtLoadLimit)</span>
+                    @if (AtLoadLimit)
                     {
-                        <span class="note warn">Loaded the browser limit of @Fmt.Int(RequestsViewState.MaxLoaded) records. Open a specific request by id, or choose a segment.</span>
-                    }
-                    else if (View.Paging.CanLoadOlder)
-                    {
-                        <Button OnClick="LoadOlderAsync" Busy="@_loadingMore" BusyText="Loading older…">Load older</Button>
+                        <span class="note warn">Browser limit of @Fmt.Int(RequestsViewState.MaxLoaded) loaded records reached. Open a request by id, or choose earlier saved history.</span>
                     }
                     else if (View.Paging.Expired)
                     {
                         <span class="note warn">@RequestPaging.CursorExpiredMessage</span>
                     }
-                    else
+                    else if (!View.Paging.CanLoadOlder && !View.Pager.HasMoreLoaded(Filtered.Count))
                     {
-                        <span class="note">No older records in this segment (the Host sent no next cursor).</span>
+                        <span class="subtle secondary">End of this history.</span>
                     }
                 </div>
             }
@@ -251,6 +286,16 @@
                         <span class="outcome @o.PillKind">@o.Title</span>
                     </div>
                     <span class="secondary">@o.Explanation</span>
+                    <JourneyChipRow Record="rec" />
+                    @if (rec.Redaction is { } red)
+                    {
+                        <span class="secondary">
+                            @(red.Outcome == "applied" ? "Sanitized structured payload sent" : UiSanitizedTitle(red.ReasonCode)):
+                            @(red.Counts.Count == 0 ? "no identifiers replaced" : string.Join(", ", red.Counts.Select(c => c.Count + " " + c.Type)))
+                            · policy <span class="mono">@red.PolicyId</span> · original classification @PolicyText.ClassificationLabel(red.OriginalClassification)
+                            @(red.TransformedClassification is { } tc ? " · detector on the sent payload: " + PolicyText.ClassificationLabel(tc) : "")
+                        </span>
+                    }
                     <span class="note">Recorded when the request was processed. Today's pause, policy or model health does not change it.</span>
                     @if (incomplete is not null)
                     {
@@ -384,6 +429,7 @@
 
                 <section class="drawer-section" aria-label="Audit evidence">
                     <h3>Audit evidence</h3>
+                    <span class="note">Chain integrity proves this record was not altered after it was written. It does not prove the answer was correct or that the processing was compliant.</span>
                     <dl class="facts">
                         <dt>Segment</dt><dd>@(View.Segment is { } ds && IsInLoaded(rec) ? SegmentScope.Label(ds) : "Current segment (exact lookup by id)")@(SegmentChain is { } cv2 && IsInLoaded(rec) ? (cv2 ? " · chain verified" : " · chain verification FAILS") : "")</dd>
                         <dt>Prompt SHA-256</dt><dd class="mono wrap-any">@Fmt.OrNotRecorded(rec.PromptSha256)</dd>
@@ -419,6 +465,7 @@
     });
 
     private bool _loading;
+    private bool _refreshing;
     private bool _loadingMore;
     private string? _loadError;
     private bool _detailLoading;
@@ -431,6 +478,53 @@
 
     private IReadOnlyList<AuditEntryView> Items => View.Items;
     private IReadOnlyList<AuditEntryView> Filtered => RequestFilter.Apply(Items, View.Criteria, DateTimeOffset.UtcNow);
+    private IReadOnlyList<AuditEntryView> PageRows => View.Pager.Slice(Filtered);
+    private bool AtLoadLimit => View.Items.Count >= RequestsViewState.MaxLoaded;
+
+    /// <summary>"Current history · since …" or "Earlier saved history 2026-10-01 · read-only" (from the page's own descriptor).</summary>
+    private string HistoryLabel
+        => View.Segment is { } seg
+            ? (seg.IsCurrent ? "Current history" + (seg.FirstUtc is { } f ? " · since " + Fmt.Utc(f) : "") : "Earlier saved history " + (seg.Label ?? seg.Id) + " · read-only")
+            : View.SegmentId is null ? "Current history" : "Earlier saved history (loading)";
+
+    private static string HistoryOption(AuditSegmentDto seg)
+        => "Earlier saved history · " + (string.IsNullOrWhiteSpace(seg.Label) ? seg.Id : seg.Label)
+           + " (" + seg.Entries.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " records)";
+
+    private void PreviousPage() => View.Pager.Previous();
+
+    /// <summary>Next page: from the loaded records when they reach it; otherwise the next server batch (stable cursor) is
+    /// loaded first — repeatedly while filters hide its records — bounded by the browser limit and cursor exhaustion.</summary>
+    private async Task NextPageAsync()
+    {
+        if (View.Pager.TryNext(Filtered.Count)) return;
+        // Captured before any await: if filters, size, page, history or a reload change meanwhile, this continuation
+        // stops — loaded records stay (same segment, stable cursor), but the NEW list is never advanced by the old click.
+        int epoch = View.Pager.Epoch;
+        var segment = View.SegmentId;
+        while (!View.Pager.HasMoreLoaded(Filtered.Count) && View.Paging.CanLoadOlder && !AtLoadLimit && _loadError is null)
+        {
+            int before = View.Items.Count;
+            await LoadOlderAsync();
+            if (!View.Pager.IsCurrent(epoch) || !string.Equals(View.SegmentId, segment, StringComparison.Ordinal)) return;
+            if (View.Items.Count == before) break;   // nothing new (error, expiry or an empty page): stop
+        }
+        if (View.Pager.IsCurrent(epoch) && string.Equals(View.SegmentId, segment, StringComparison.Ordinal)) View.Pager.TryNext(Filtered.Count);
+    }
+
+    private void OnPageSize(ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n))
+            View.Pager.SetSize(n);
+        View.Pager.Clamp(Filtered.Count);
+    }
+
+    /// <summary>Back to the first page and merge what arrived meanwhile.</summary>
+    private async Task ShowNewestAsync()
+    {
+        View.Pager.Reset();
+        await RefreshNewestAsync();
+    }
 
     private IReadOnlyList<AuditSegmentDto> ArchivedSegments
         => View.Segments is { } all ? all.Where(s => !SegmentScope.IsCurrent(s)).ToList() : [];
@@ -463,18 +557,15 @@
             ? SegmentScope.Label(seg)
             : View.SegmentId is null ? "Current segment" : "Archived segment " + View.SegmentId + " (loading)";
 
-    private string CoverageText
-        => View.Loaded
-            ? SegmentScope.Coverage(ScopeLabel, View.Items.Count, View.Segment?.Entries, View.Paging.CanLoadOlder, View.Criteria.IsActive)
-            : "Filters apply only to the records loaded from the selected segment — never to the whole audit history.";
-
     private string CountLabel
     {
         get
         {
             if (!View.Loaded) return "";
-            var loadedAt = View.LoadedUtc is { } t ? " · loaded " + Fmt.UtcShort(t) + " UTC" : "";
-            return "Showing " + Fmt.Int(Filtered.Count) + " of " + Fmt.Int(View.Items.Count) + " loaded" + loadedAt;
+            var loadedAt = View.LoadedUtc is { } t ? " · updated " + Fmt.UtcShort(t) + " UTC" : "";
+            var fresh = View.LastMergedCount > 0 ? " · " + Fmt.Int(View.LastMergedCount) + " new" : "";
+            // Counts live in the pager line (never a whole-history total); here only freshness.
+            return (_refreshing ? "Refreshing… · " : "") + "Newest first" + fresh + loadedAt;
         }
     }
 
@@ -485,7 +576,10 @@
         {
             _ = Ws.EnsureLoadedAsync();
             await LoadSegmentsAsync();
+            // Every visit shows current evidence: the state survives navigation, so a loaded list is refreshed (newest page
+            // merged on top), never shown stale.
             if (!View.Loaded) await LoadFirstPageAsync();
+            else await RefreshNewestAsync();
         }
     }
 
@@ -514,6 +608,13 @@
             {
                 if (View.Segments is null && View.SegmentsError is null) await LoadSegmentsAsync();
                 if (!View.Loaded && !_loading && _loadError is null) await LoadFirstPageAsync();
+                // Successive completions: the status feed's audit count moved → merge the newest page.
+                else if (View.Loaded && State.LastStatus?.AuditEntries is { } n && n != View.SeenAuditEntries)
+                {
+                    // Rows never shift under the operator: on an older page new records are only announced.
+                    if (View.Pager.MergeLiveArrivals) await RefreshNewestAsync();
+                    else if (View.SegmentId is null) View.Pager.NewAvailable = true;
+                }
                 if (Id is not null && View.SelectedRecord is null && !_detailLoading && !_notFound && _detailError is null)
                     await EnsureDetailAsync();
             }
@@ -566,6 +667,63 @@
         await LoadPageAsync(cursor: null, first: true);
     }
 
+    /// <summary>Fetches the newest page of the CURRENT segment and merges unseen records on top. If the current segment
+    /// changed (archived meanwhile), the list is reloaded instead of mixing segments. Archived segments never change.</summary>
+    private async Task RefreshNewestAsync()
+    {
+        if (!State.Connected || _loading || _refreshing || View.SegmentId is not null || !View.Loaded) return;
+        _refreshing = true;
+        var auditCount = State.LastStatus?.AuditEntries;
+        StateHasChanged();
+        try
+        {
+            var page = await Api.GetRequestsPageAsync(RequestsViewState.PageSize, null, null);
+            if (View.SegmentId is not null) return;   // the operator switched to an archived segment meanwhile
+            // Decided AFTER the await: the operator may have paged on while the fetch ran (or arrived on an older page
+            // restored from navigation). Off the first page nothing is merged or reset — the arrival is only announced.
+            if (!View.Pager.AdmitLiveArrivals())
+            {
+                View.SeenAuditEntries = auditCount;
+                return;
+            }
+            if (View.Segment is { } have && page.Segment is { } got && !string.Equals(have.Id, got.Id, StringComparison.Ordinal))
+            {
+                _refreshing = false;
+                await LoadFirstPageAsync();
+                return;
+            }
+            if (RequestList.NeedsReset(View.Items, page.Items, page.NextCursor))
+            {
+                // More than one page arrived since the last load: restart paging from this newest page so no record falls
+                // into an unreachable gap. Filters and the open detail are kept (they live outside the pages).
+                View.ResetPages(null);
+                if (View.Paging.ApplyPage(page, older: false) != PageResult.Accepted)
+                {
+                    _loadError = View.Paging.Problem;
+                    return;
+                }
+                View.AddPage(page.Items);
+                View.LastMergedCount = page.Items.Count;
+            }
+            else
+            {
+                View.MergeNewest(page.Items);
+            }
+            View.LoadedUtc = DateTimeOffset.UtcNow;
+            View.SeenAuditEntries = auditCount;
+            _loadError = null;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized) { }
+        catch (Exception ex)
+        {
+            _loadError = "Could not refresh the newest requests: " + ex.Message;
+        }
+        finally
+        {
+            _refreshing = false;
+        }
+    }
+
     private async Task LoadOlderAsync()
     {
         if (!View.Paging.CanLoadOlder || View.NextCursor is not { } cursor || _loadingMore) return;
@@ -598,6 +756,11 @@
             }
             View.AddPage(page.Items);
             View.LoadedUtc = DateTimeOffset.UtcNow;
+            if (first)
+            {
+                View.SeenAuditEntries = State.LastStatus?.AuditEntries;
+                View.LastMergedCount = 0;
+            }
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
         {
@@ -771,23 +934,31 @@
 
     // ---- Filter handlers: the criteria record is immutable; each change replaces it. ----
 
-    private void OnIdSearch(ChangeEventArgs e) => View.Criteria = View.Criteria with { IdSearch = e.Value?.ToString() };
+    private void SetCriteria(RequestFilterCriteria c)
+    {
+        View.Criteria = c;
+        View.Pager.Reset();   // a different filter is a different list: back to its first page (new epoch)
+    }
+
+    private void OnIdSearch(ChangeEventArgs e) => SetCriteria(View.Criteria with { IdSearch = e.Value?.ToString() });
 
     private void OnOutcome(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with { Outcome = Enum.TryParse<DisplayOutcome>(e.Value?.ToString(), out var o) ? o : null };
+        => SetCriteria(View.Criteria with { Outcome = Enum.TryParse<DisplayOutcome>(e.Value?.ToString(), out var o) ? o : null });
 
-    private void OnModel(ChangeEventArgs e) => View.Criteria = View.Criteria with { Model = Blank(e.Value?.ToString()) };
+    private void OnModel(ChangeEventArgs e) => SetCriteria(View.Criteria with { Model = Blank(e.Value?.ToString()) });
 
-    private void OnTeam(ChangeEventArgs e) => View.Criteria = View.Criteria with { Team = Blank(e.Value?.ToString()) };
+    private void OnTeam(ChangeEventArgs e) => SetCriteria(View.Criteria with { Team = Blank(e.Value?.ToString()) });
 
-    private void OnApplication(ChangeEventArgs e) => View.Criteria = View.Criteria with { Application = Blank(e.Value?.ToString()) };
+    private void OnApplication(ChangeEventArgs e) => SetCriteria(View.Criteria with { Application = Blank(e.Value?.ToString()) });
 
     private void OnWindow(ChangeEventArgs e)
-        => View.Criteria = View.Criteria with { Window = Enum.TryParse<TimeWindow>(e.Value?.ToString(), out var w) ? w : TimeWindow.All };
+        => SetCriteria(View.Criteria with { Window = Enum.TryParse<TimeWindow>(e.Value?.ToString(), out var w) ? w : TimeWindow.All });
 
-    private void ClearFilters() => View.Criteria = RequestFilterCriteria.None;
+    private void ClearFilters() => SetCriteria(RequestFilterCriteria.None);
 
     private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s;
 
     public void Dispose() => State.Changed -= OnStateChanged;
+
+    private static string UiSanitizedTitle(string? code) => SanitizedRoute.RefusalTitle(code);
 }

@@ -11,7 +11,7 @@
 # Saved Anthropic/Tavily keys are loaded explicitly from covenant-host user-secrets; env values win.
 # LOAD_SAVED_KEYS=0 disables that import. Runtime policy still controls external calls.
 # Isolation: Production environment, its own port and its own state directory
-# (/tmp/covenant-v2-demo-<profile>/: audit log, configuration repository, budget ledger). It never touches
+# (.covenant-local/demo-<profile>/: audit log, configuration repository, budget ledger). It never touches
 # another running instance (e.g. :5100 or :5201) or its files. State persists across runs of the same profile
 # so configuration versions, spend and evidence survive restarts; FRESH=1 moves the old state aside (renamed,
 # never deleted) and starts again from the seed.
@@ -31,8 +31,9 @@ OLLAMA="${OLLAMA:-http://localhost:11434/v1}"
 MODEL="${MODEL:-qwen2.5-coder:7b}"
 CAP="${CAP:-5}"
 OUT="${OUT:-/tmp/covenant-v2-pub}"
-STATE="${STATE:-/tmp/covenant-v2-demo-$PROFILE}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+STATE_EXPLICIT="${STATE+x}"
+STATE="${STATE:-$ROOT/.covenant-local/demo-$PROFILE}"
 
 case "$PROFILE" in local-only) SEED=demo-local-only ;; hybrid) SEED=demo-hybrid ;;
   *) echo "PROFILE must be local-only or hybrid"; exit 1 ;; esac
@@ -60,15 +61,18 @@ if sys.argv[1] not in ids:
 ' "$MODEL"
 echo "ok — $MODEL"
 
-if [[ "$PROFILE" == hybrid && ( "${FRESH:-}" == 1 || ! -f "$STATE/audit.log.config/active.json" ) ]]; then
-  : "${OPENAI_API_KEY:?Hybrid needs OPENAI_API_KEY in the environment}"
-  : "${CLOUD_PRICE_IN_1M:?Hybrid needs CLOUD_PRICE_IN_1M (USD per 1M input tokens, current provider list price)}"
-  : "${CLOUD_PRICE_OUT_1M:?Hybrid needs CLOUD_PRICE_OUT_1M (USD per 1M output tokens)}"
-fi
 CLOUD_MODEL="${CLOUD_MODEL:-gpt-4o-mini}"
 
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "Port $PORT is in use — pick another with PORT=..."; lsof -nP -iTCP:"$PORT" -sTCP:LISTEN; exit 1
+fi
+
+if [[ -z "$STATE_EXPLICIT" ]]; then
+  python3 "$ROOT/scripts/demo-state.py" "/tmp/covenant-v2-demo-$PROFILE" "$STATE"
+fi
+if [[ -f "$STATE/.initialized" && ! -f "$STATE/audit.log.config/active.json" && "${FRESH:-}" != 1 ]]; then
+  echo "Saved configuration is missing from $STATE. Refusing to silently create a local-only demo. Restore the state or explicitly use FRESH=1."
+  exit 1
 fi
 
 if [[ "${FRESH:-}" == "1" && -d "$STATE" ]]; then
@@ -76,6 +80,12 @@ if [[ "${FRESH:-}" == "1" && -d "$STATE" ]]; then
   echo "previous state kept at $STATE.*.previous (not deleted)"
 fi
 mkdir -p "$STATE"
+
+if [[ "$PROFILE" == hybrid && ( "${FRESH:-}" == 1 || ! -f "$STATE/audit.log.config/active.json" ) ]]; then
+  : "${OPENAI_API_KEY:?Hybrid needs OPENAI_API_KEY in the environment}"
+  : "${CLOUD_PRICE_IN_1M:?Hybrid needs CLOUD_PRICE_IN_1M (USD per 1M input tokens, current provider list price)}"
+  : "${CLOUD_PRICE_OUT_1M:?Hybrid needs CLOUD_PRICE_OUT_1M (USD per 1M output tokens)}"
+fi
 
 if [[ "${SKIP_PUBLISH:-}" != "1" ]]; then
   say "2/5 Publishing ($RID, Release, self-contained single file) → $OUT"
@@ -135,6 +145,7 @@ for _ in $(seq 1 60); do
   sleep 0.5
 done
 [[ "$code" == "200" ]] || { echo "No answer on /ui/ (last HTTP '$code'). Log:"; cat "$LOG"; kill $PID; exit 1; }
+touch "$STATE/.initialized"
 
 LAUNCH="http://localhost:$PORT/ui/connect#token=$ADMIN"
 CREDENTIALS="$STATE/.launch-credentials"

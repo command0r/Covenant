@@ -117,20 +117,42 @@ public sealed class PlaygroundState : IDisposable
         Notify();
     }
 
-    public string? Problem => ComposerRules.Problem(Form, _workspace.Applications)
-        ?? (Form.WebSources != WebSourcesMode.Off && SearchReadiness is { Known: true, Possible: false } r
-            ? "Web sources " + WebSourcesText.Label(Form.WebSources) + " cannot run: " + r.Cause + " Choose Off, or fix it first."
-            : null);
+    /// <summary>Why Run is blocked. A blocked search is reported before form details (e.g. the hidden Search location),
+    /// so the operator is never asked to fill a field that is not shown.</summary>
+    public string? Problem
+    {
+        get
+        {
+            var basic = ComposerRules.Problem(Form, _workspace.Applications);
+            var search = Form.WebSources != WebSourcesMode.Off && SearchReadiness is { Known: true, Possible: false } r
+                ? "Web sources " + WebSourcesText.Label(Form.WebSources) + " cannot run: " + r.Cause + " Choose Off, or fix it first."
+                : null;
+            // Application/profile problems first (they decide everything else), then a blocked search, then form details.
+            if (basic is not null && ComposerRules.Problem(new PlaygroundForm { ApplicationId = Form.ApplicationId, ProfileId = Form.ProfileId, Prompt = "x" }, _workspace.Applications) is not null)
+                return basic;
+            // ADR-0016: a sanitized workload shows the exact payload and asks for confirmation before anything leaves.
+            return search ?? basic ?? SanitizedRoute.RunProblem(SanitizedWorkload, Preview, Form, _sanitizedConfirmedKey);
+        }
+    }
 
     /// <summary>Can the current selection search (ONE cause when not)? From the applied configuration and the Host's
     /// readiness report; the runtime check stays authoritative.</summary>
     public SearchReadiness SearchReadiness => WebSourcesText.Readiness(_workspace.WebSearch, _workspace.WebSearchError,
         _workspace.Config?.Config, ComposerRules.Find(_workspace.Applications, Form.ApplicationId), Form.ProfileId);
 
-    /// <summary>Examples resolved against the CURRENT applied configuration.</summary>
-    public IReadOnlyList<ExampleResolution> Examples => DemoExamples.All
-        .Select(e => DemoExamples.Resolve(e, _workspace.Config?.Config, _workspace.Applications, _workspace.Budgets, _workspace.WebSearch, Form.ApplicationId))
-        .ToList();
+    /// <summary>Examples for the SELECTED calling application only (its granted workloads), resolved against the CURRENT
+    /// applied configuration. Applying one never switches the application. With no application selected: none.</summary>
+    public IReadOnlyList<ExampleResolution> Examples => Form.ApplicationId is not { Length: > 0 } appId ? []
+        : DemoExamples.All
+            .Select(e => DemoExamples.ResolveFor(e, appId, _workspace.Config?.Config, _workspace.Applications, _workspace.Budgets, _workspace.WebSearch))
+            .Where(r => r.Relevant)
+            .ToList();
+
+    /// <summary>Drops the example label when it no longer fits the selected application (the prompt text stays).</summary>
+    private void DropIncompatibleExample()
+    {
+        if (Form.ExampleId is { } id && !Examples.Any(r => r.Example.Id == id && r.Ready)) Form.ExampleId = null;
+    }
 
     /// <summary>Host dry run (POST /admin/policies/simulate) for the form as it was when previewed: chosen policy, primary,
     /// approved fallbacks, excluded targets and why. No provider call, no record, no spend.</summary>
@@ -139,7 +161,8 @@ public sealed class PlaygroundState : IDisposable
     /// <summary>Fills the composer from a ready example (never runs) and previews its route.</summary>
     public async Task ApplyExampleAsync(ExampleResolution resolution)
     {
-        if (Running || !DemoExamples.ApplyTo(resolution, Form)) return;
+        // An example is applied only for the application it was resolved for — never a silent owner switch.
+        if (Running || !string.Equals(resolution.ApplicationId, Form.ApplicationId, StringComparison.Ordinal) || !DemoExamples.ApplyTo(resolution, Form)) return;
         PresetNote = null;
         Notify();
         await PreviewRouteAsync();
@@ -166,6 +189,46 @@ public sealed class PlaygroundState : IDisposable
         Notify();
     }
     public bool CanRun => !Running && Problem is null;
+
+    private string? _sanitizedConfirmedKey;
+
+    /// <summary>ADR-0016: the selected workload is reserved for sanitized structured records.</summary>
+    public bool SanitizedWorkload => SanitizedRoute.IsWorkload(_workspace.Config?.Config, Form.ProfileId);
+
+    /// <summary>The operator reviewed the CURRENT preview's sanitized payload (any later form change invalidates it).</summary>
+    public bool SanitizedConfirmed => Preview is { } p && string.Equals(_sanitizedConfirmedKey, p.Key, StringComparison.Ordinal) && p.IsCurrent(Form);
+
+    public void ConfirmSanitized(bool confirmed)
+    {
+        _sanitizedConfirmedKey = confirmed && Preview is { Result.Redaction.Outcome: "applied" } p && p.IsCurrent(Form) ? p.Key : null;
+        Notify();
+    }
+
+    /// <summary>Explicit, operator-chosen re-run of the SAME prompt on another approved target (pinned, no fallback) — and,
+    /// when the plan says so, under another granted workload. Never changes grants or configuration; detection and policy
+    /// run again on the Host. Not an automatic quality judgement.</summary>
+    public async Task EscalateAsync(PlaygroundRun source, EscalationPlan plan)
+    {
+        if (Running || plan.Target is null || !_runs.Contains(source)) return;
+        // Rebuild from the SOURCE run's snapshot (the composer may have been edited or another run selected since), then
+        // re-validate against the latest applications/grants. The composer then shows exactly what is sent.
+        var candidate = new PlaygroundForm();
+        Escalation.ApplySource(candidate, source.Snapshot, plan);
+        if (Escalation.Problem(candidate, source.Snapshot, _workspace.Applications) is { } problem)
+        {
+            EscalationProblem = problem;
+            Notify();
+            return;
+        }
+        EscalationProblem = null;
+        Escalation.ApplySource(Form, source.Snapshot, plan);
+        PresetNote = null;
+        Notify();
+        await RunAsync();
+    }
+
+    /// <summary>Why the last explicit escalation was not sent (latest grants/config refuse it); cleared on the next attempt.</summary>
+    public string? EscalationProblem { get; private set; }
 
     /// <summary>Shows a stored run. Never resubmits.</summary>
     public void Select(PlaygroundRun run)
@@ -196,6 +259,7 @@ public sealed class PlaygroundState : IDisposable
     {
         if (Running) return false;
         var ok = ComposerRules.SelectApplication(Form, _workspace.Applications, id);
+        if (ok) { DropIncompatibleExample(); DemoExamples.ResetExamplePin(Form); }
         PresetNote = null;   // the note was about the preset's own app/profile pick (review round 3)
         Notify();
         return ok;
@@ -205,6 +269,10 @@ public sealed class PlaygroundState : IDisposable
     {
         if (Running) return false;
         var ok = ComposerRules.SelectProfile(Form, _workspace.Applications, profileId);
+        // The example's own external pin described the previous workload: back to "Let policy choose".
+        if (ok) DemoExamples.ResetExamplePin(Form);
+        // An example filled for another workload no longer describes this request (e.g. Internal coding after switching to Public).
+        if (ok && Form.ExampleId is not null && !string.Equals(Form.ExampleProfileId, Form.ProfileId, StringComparison.Ordinal)) Form.ExampleId = null;
         PresetNote = null;
         Notify();
         return ok;

@@ -90,3 +90,29 @@ public sealed class RequestPaging
         return PageResult.Failed;
     }
 }
+
+/// <summary>Loaded-list maintenance for the Requests page (pure).</summary>
+public static class RequestList
+{
+    /// <summary>Inserts the records of a freshly fetched NEWEST page that are not loaded yet at the top, in the page's
+    /// newest-first order; already-loaded records (and their positions) are untouched; the list stays within
+    /// <paramref name="max"/> (oldest dropped). Returns how many were added.</summary>
+    /// <summary>True when a freshly fetched newest page does NOT reach the loaded records (no id in common) while the Host
+    /// says older records exist beyond it: merging would leave an unreachable gap between the new page and the loaded
+    /// ones (the old cursor continues below the OLD first page). The list must then restart from the new first page.</summary>
+    public static bool NeedsReset(IReadOnlyCollection<AuditEntryView> loaded, IReadOnlyCollection<AuditEntryView> newestPage, string? pageNextCursor)
+    {
+        if (loaded.Count == 0 || newestPage.Count == 0 || pageNextCursor is null) return false;
+        var ids = new HashSet<string>(loaded.Select(i => i.Id), StringComparer.Ordinal);
+        return !newestPage.Any(r => ids.Contains(r.Id));
+    }
+
+    public static int MergeNewest(List<AuditEntryView> items, IEnumerable<AuditEntryView> newestFirst, int max)
+    {
+        var seen = new HashSet<string>(items.Select(i => i.Id), StringComparer.Ordinal);
+        var fresh = newestFirst.Where(r => r is not null && seen.Add(r.Id)).ToList();
+        items.InsertRange(0, fresh);
+        if (items.Count > max) items.RemoveRange(max, items.Count - max);
+        return fresh.Count;
+    }
+}

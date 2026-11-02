@@ -1,8 +1,8 @@
 @inject WorkspaceConfig Ws
 
-@* The compact outcome line under the response: outcome, final classification (baseline → escalation, review round 3),
-   actual destination (with Local/Cloud tag), duration, tokens, cost basis and evidence state. The full facts live in the
-   details drawer — not repeated here. "Evidence recorded" = the audit record exists; integrity is verified on Audit & evidence. *@
+@* The compact outcome line under the Actual route scheme: outcome, cost, duration, tokens and evidence state. Sender,
+   classification and destination are in the scheme; the full facts live in the details drawer — not repeated here.
+   "Evidence recorded" = the audit record exists; integrity is verified on Audit & evidence. *@
 <div class="run-summary @(Large ? "large" : "")">
     <div class="run-outcome">
         @if (Run.InFlight)
@@ -11,7 +11,7 @@
         }
         else if (Run.Outcome is { } o)
         {
-            <span class="outcome @o.PillKind">@o.Title</span>
+            <span class="outcome @o.PillKind">@o.Title@(Run.Evidence.Record is { } tr0 && RecordFacts.Truncated(tr0) ? " — truncated" : "")</span>
             <span class="mono subtle secondary">@o.StatusLine</span>
         }
         @if (OnDetails.HasDelegate)
@@ -25,6 +25,16 @@
     {
         <span class="run-explain">@ox.Explanation</span>
     }
+    @* Next to the Actual route scheme: sender, classification, destination, sanitization, search and cache are in its three
+       boxes and badges, so the summary carries only the outcome chip and the facts the scheme does not show. *@
+    @if (!Large && !Run.InFlight && Run.Evidence.Record is { } jr)
+    {
+        <JourneyChipRow Record="jr" OutcomeOnly="true" />
+    }
+    @if (!Run.InFlight && Run.Evidence.Record is { } tr && RecordFacts.TruncationWarning(tr) is { } cut)
+    {
+        <div class="alert warn" role="status"><div class="alert-text"><strong>Truncated</strong><span class="alert-body">@cut</span></div></div>
+    }
     @if (Run.Result?.TransportError is { Length: > 0 } te)
     {
         <span class="note bad">@te</span>
@@ -32,57 +42,19 @@
     @if (Large)
     {
         <dl class="run-facts presentation-facts">
-            <div><dt>Caller · owning team</dt><dd>@(Run.Evidence.Record is { } owner ? (ComposerRules.Find(Ws.Applications, owner.ApplicationId) is { } app ? ComposerRules.ApplicationName(app) : owner.ApplicationId ?? "Not recorded") + " · " + owner.Tags.Team : RunText.AwaitingText(Run))</dd></div>
-            <div><dt>Destination</dt><dd>@if (Run.Evidence.Record is { } record) { var destination = ModelFacts.Destination(record, Ws.Connections); <span class="wrap-any">@destination.Text</span> <BoundaryTag Boundary="@destination.Boundary" /> } else { @RunText.AwaitingText(Run) }</dd></div>
-            <div><dt>Classification</dt><dd>@RunText.Classification(Run)</dd></div>
-            <div><dt>Charged after execution</dt><dd>@RunText.Cost(Run)</dd></div>
+            <div><dt>Estimated charges</dt><dd title="@RunText.Cost(Run)">@(Run.Evidence.Record is { } costRecord ? CostText.CostShort(costRecord) : RunText.AwaitingText(Run))</dd></div>
             <div><dt>Duration</dt><dd>@RunText.Duration(Run)</dd></div>
             <div><dt>Evidence</dt><dd>@{ var evidence = RunText.Evidence(Run); }<span class="dot @evidence.Tone" aria-hidden="true"></span> @evidence.Text</dd></div>
         </dl>
     }
     else
     {
+    @* Only facts the route scheme does not show. Ownership (assigned / charged), cache and the full classification are in
+       Details & evidence. *@
     <dl class="run-facts">
-        <div class="wide">
-            <dt>Classification</dt>
-            <dd>@RunText.Classification(Run)</dd>
-        </div>
-        <div>
-            <dt>Destination</dt>
-            <dd>
-                @if (Run.Evidence.Record is { } rec)
-                {
-                    var d = ModelFacts.Destination(rec, Ws.Connections);
-                    <span class="mono wrap-any">@d.Text</span>
-                    @if (!rec.CacheHit && d.Text != ModelFacts.NoProviderCall && d.Text != ModelFacts.NotRecorded)
-                    {
-                        <BoundaryTag Boundary="@d.Boundary" />
-                    }
-                }
-                else
-                {
-                    <span>@RunText.AwaitingText(Run)</span>
-                }
-            </dd>
-        </div>
-        @if (Run.Evidence.Record is { } own)
-        {
-            <div class="wide">
-                <dt>Requested by · pays <span class="subtle">(assigned before the call)</span></dt>
-                <dd>@Ownership.Assigned(own)</dd>
-            </div>
-            <div class="wide">
-                <dt>Charged <span class="subtle">(finalized after execution)</span></dt>
-                <dd>@Ownership.Finalized(own)</dd>
-            </div>
-            <div><dt>Cache</dt><dd>@Ownership.Cache(own)</dd></div>
-        }
-        <div><dt>Duration</dt><dd>@RunText.Duration(Run)</dd></div>
-        @if (!Large)
-        {
-            <div><dt>Tokens</dt><dd>@RunText.Tokens(Run)</dd></div>
-        }
         <div><dt>Cost</dt><dd>@RunText.Cost(Run)</dd></div>
+        <div><dt>Duration</dt><dd>@RunText.Duration(Run)</dd></div>
+        <div><dt>Tokens</dt><dd>@RunText.Tokens(Run)</dd></div>
         <div>
             <dt>Evidence</dt>
             @{ var ev = RunText.Evidence(Run); }

@@ -234,7 +234,7 @@ public static class OutcomeModel
                     "Policy chose a route but no adapter serves it, so no provider call was made (fail-closed). " + reason,
                     statusLine);
             case "budget":
-                return Make(input, DisplayOutcome.PolicyDenied, "Refused — budget exhausted", reason, statusLine);
+                return Make(input, DisplayOutcome.PolicyDenied, "Refused — exceeds budget", reason, statusLine);
             case "policy":
                 return Make(input, DisplayOutcome.PolicyDenied, "Policy denied", reason, statusLine);
             case null when r.DenialKind is null:

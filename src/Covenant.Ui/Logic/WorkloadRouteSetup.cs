@@ -25,20 +25,27 @@ public static class WorkloadRouteSetup
         new("public-research", "Public research", "Public", "Public research; may use governed web search where allowed."),
         new("internal-coding", "Internal coding", "Internal", "Internal code assistance on a local model."),
         new("internal-research", "Internal research", "Internal", "Internal analysis on a stronger local model."),
+        new("public-coding", "Public coding", "Public", "Synthetic or public code; local first, with an explicit, approved external comparison."),
     ];
 
     /// <summary>The presets a model may serve: a cloud model only Public workloads.</summary>
     public static IReadOnlyList<WorkloadPreset> PresetsFor(ConnectionDto connection)
         => ComposerRules.BoundaryLabel(connection.Boundary) == "Cloud" ? Presets.Where(p => p.Baseline == "Public").ToList() : Presets;
 
-    public static WorkloadRoutePlan Plan(CovenantConfigDto cfg, WorkloadPreset preset, string connectionId, string modelId)
-        => Build(cfg, preset, connectionId, modelId, apply: false);
+    /// <param name="grantTo">Applications the operator EXPLICITLY chose to own this workload. Nothing is granted by
+    /// default — no blanket grants; ids that are not enabled, console-testable applications are ignored.</param>
+    public static WorkloadRoutePlan Plan(CovenantConfigDto cfg, WorkloadPreset preset, string connectionId, string modelId, IReadOnlyCollection<string>? grantTo = null)
+        => Build(cfg, preset, connectionId, modelId, grantTo, apply: false);
 
     /// <summary>Applies the plan to <paramref name="draft"/> when it is allowed; returns the same plan either way.</summary>
-    public static WorkloadRoutePlan ApplyTo(CovenantConfigDto draft, WorkloadPreset preset, string connectionId, string modelId)
-        => Build(draft, preset, connectionId, modelId, apply: true);
+    public static WorkloadRoutePlan ApplyTo(CovenantConfigDto draft, WorkloadPreset preset, string connectionId, string modelId, IReadOnlyCollection<string>? grantTo = null)
+        => Build(draft, preset, connectionId, modelId, grantTo, apply: true);
 
-    private static WorkloadRoutePlan Build(CovenantConfigDto cfg, WorkloadPreset preset, string connectionId, string modelId, bool apply)
+    /// <summary>Applications that may be offered as owners of a workload (enabled; console testing allowed).</summary>
+    public static IReadOnlyList<ApplicationDto> GrantCandidates(CovenantConfigDto cfg)
+        => cfg.Applications.Where(a => a.Enabled && a.ConsoleTesting).OrderBy(a => a.Id, StringComparer.Ordinal).ToList();
+
+    private static WorkloadRoutePlan Build(CovenantConfigDto cfg, WorkloadPreset preset, string connectionId, string modelId, IReadOnlyCollection<string>? chosen, bool apply)
     {
         var conn = cfg.Connections.FirstOrDefault(c => c.Id == connectionId);
         if (conn is null) return Refuse("Connection '" + connectionId + "' is not configured.");
@@ -66,8 +73,11 @@ public static class WorkloadRouteSetup
         var policyId = PolicyEditing.UniqueId(preset.ProfileId, cfg);
         changes.Add("Add policy '" + policyId + "': " + preset.Baseline + " requests of profile '" + preset.ProfileId + "' → " + connectionId + "/" + modelId
                     + (cloud ? " (cloud, priced)" : " (local)") + ". No fallback; other profiles and PII/PHI keep their existing rules.");
-        var grantTo = cfg.Applications.Where(a => a.Enabled && a.ConsoleTesting && !a.GrantedProfiles.Contains(preset.ProfileId, StringComparer.Ordinal)).ToList();
+        var grantTo = GrantCandidates(cfg)
+            .Where(a => chosen is not null && chosen.Contains(a.Id) && !a.GrantedProfiles.Contains(preset.ProfileId, StringComparer.Ordinal)).ToList();
         foreach (var a in grantTo) changes.Add("Grant '" + preset.ProfileId + "' to application '" + a.Id + "' (its other grants and default are unchanged).");
+        if (grantTo.Count == 0 && !cfg.Applications.Any(a => a.GrantedProfiles.Contains(preset.ProfileId, StringComparer.Ordinal)))
+            changes.Add("No application is granted '" + preset.ProfileId + "' yet — choose the calling application that owns this workload, or grant it later under Policies → Applications.");
         if (preset.ProfileId == "public-research")
             changes.Add("Web search stays as configured — allow it on this profile under Policies → Applications & workload profiles if wanted.");
 

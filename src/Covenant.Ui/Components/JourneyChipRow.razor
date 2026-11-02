@@ -1,0 +1,31 @@
+@inject WorkspaceConfig Ws
+
+@* The request journey as semantic chips (text + icon + colour; never colour alone): outcome, data classification and why,
+   workload, actual destination, sanitization / external retrieval / cache, and the cost split. Long technical text is in
+   each chip's tooltip and in Details & evidence. Presentation mode shows only the facts its fact grid does not already show. *@
+@if (Record is { } r)
+{
+    var chips = JourneyChips.For(r, Ws.Connections, Ws.Profiles);
+    if (Presentation) chips = chips.Where(c => c.Label.StartsWith("Public", StringComparison.Ordinal) || c.Label.StartsWith("Internal", StringComparison.Ordinal)
+                                               || c.Label.StartsWith("Sensitive", StringComparison.Ordinal) || c.Label.StartsWith("Sanitiz", StringComparison.Ordinal)
+                                               || c.Label.StartsWith("External retrieval", StringComparison.Ordinal)).ToList();
+    // Next to the route scheme (Playground), only the outcome chip: sender, classification, destination, sanitization, search
+    // and cache are in the scheme's boxes and badges, and the cost is in the summary facts — not repeated.
+    else if (OutcomeOnly) chips = chips.Take(1).ToList();
+    <ul class="journey-chips" aria-label="Request journey">
+        @foreach (var c in chips)
+        {
+            <li class="jchip @c.Tone" title="@c.Title">
+                @if (c.Icon is { } icon) { <Icon Name="@icon" Size="14" /> }
+                <span>@c.Label</span>
+            </li>
+        }
+    </ul>
+}
+
+@code {
+    [Parameter] public AuditEntryView? Record { get; set; }
+    [Parameter] public bool Presentation { get; set; }
+    /// <summary>Only the outcome chip (the route scheme and summary facts show the rest; Details shows everything).</summary>
+    [Parameter] public bool OutcomeOnly { get; set; }
+}

@@ -25,102 +25,70 @@
             </div>
         </div>
 
-        <EditorBar Owner="settings" Subject="Operational settings" ClaimedPaths="@(new[] { "settings", "web_search" })"
-                   ViewHint="Viewing applied operational settings. Edit to change them; they apply to new requests after Save." />
+        <EditorBar Owner="settings" Subject="Settings" ShowEditButton="false" ClaimedPaths="@(new[] { "settings", "web_search" })"
+                   ViewHint="Each section is edited in its own dialog; saving creates a new configuration version." />
+        @if (_notice is { } notice)
+        {
+            <span class="note" role="status">@notice</span>
+        }
 
         <section class="panel" aria-labelledby="op-h">
             <div class="panel-head">
                 <h2 id="op-h">Operational</h2>
-                <span class="panel-sub">Server configuration · applies to new requests after Save &amp; apply · no restart</span>
+                <span class="panel-sub">Cache, evidence retention and rate limits · apply to new requests · no restart</span>
+                <span class="grow"></span>
+                <button type="button" class="btn sm" id="op-edit" disabled="@(!CanEdit || Editor.Applied?.Config?.Settings is null)" @onclick="OpenOperational">Edit…</button>
             </div>
-            @if (Editor.Current?.Settings is not { } st)
+            @if (Editor.Applied?.Config?.Settings is { } st)
             {
-                if (Editor.Loading || (Editor.Applied is null && Editor.LoadError is null))
+                <FactList Inline="true" Facts="@OperationalFacts(st)" />
+                @if (st.PromptPreviewChars is > 0)
                 {
-                    <Skeleton Lines="4" Label="Loading operational settings" />
+                    <span class="note warn">Prompt previews are stored in evidence (@st.PromptPreviewChars characters of every prompt) and cannot be removed later.</span>
                 }
-                else if (Editor.Current is not null)
-                {
-                    <EmptyState Title="No operational settings reported" Body="The active configuration carries no settings object, so there is nothing to edit here." />
-                }
-                else
-                {
-                    <EmptyState Title="Operational settings unavailable" Body="@(Editor.LoadError ?? "The configuration could not be read.")" />
-                }
+            }
+            else if (Editor.Loading || Editor.Applied is null)
+            {
+                <Skeleton Lines="2" Label="Loading operational settings" />
             }
             else
             {
-                <div class="form-grid">
-                    <div class="field">
-                        <label for="s-ttl">Exact-cache TTL (seconds)</label>
-                        <input id="s-ttl" class="input mono" type="number" min="0" disabled="@(!Editing)" @bind="st.CacheTtlSeconds" @bind:after="Editor.Touch" aria-describedby="s-ttl-h" />
-                        <span id="s-ttl-h" class="help">0 disables the cache. A hit still passes auth, classification and policy; it makes no provider call (also while provider calls are paused).</span>
-                        <FieldIssues Issues="@Editor.Issues" Path="settings.cache_ttl_seconds" />
-                    </div>
-                    <div class="field">
-                        <label for="s-max">Cache max entries</label>
-                        <input id="s-max" class="input mono" type="number" min="1" disabled="@(!Editing)" @bind="st.CacheMaxEntries" @bind:after="Editor.Touch" />
-                        <FieldIssues Issues="@Editor.Issues" Path="settings.cache_max_entries" />
-                    </div>
-                    <div class="field">
-                        <label for="s-prev">Prompt preview retained in evidence (characters, 0–500)</label>
-                        <input id="s-prev" class="input mono" type="number" min="0" max="500" disabled="@(!Editing)" @bind="st.PromptPreviewChars" @bind:after="Editor.Touch"
-                               aria-describedby="s-prev-h" aria-invalid="@(st.PromptPreviewChars is < 0 or > 500 ? "true" : "false")" />
-                        <span id="s-prev-h" class="help @(st.PromptPreviewChars is > 0 ? "warn" : "")">
-                            @(st.PromptPreviewChars is > 0
-                                ? "Retention warning: the first " + (st.PromptPreviewChars ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters of EVERY prompt will be stored in the tamper-evident audit log and cannot be removed later. Use 0 unless your retention policy allows prompt content in evidence."
-                                : "0 = no prompt content in evidence (only a SHA-256 fingerprint and length).")
-                        </span>
-                        <FieldIssues Issues="@Editor.Issues" Path="settings.prompt_preview_chars" />
-                    </div>
-                    <div class="field">
-                        <label for="s-trace">Live trace retention (minutes, 1–1440)</label>
-                        <input id="s-trace" class="input mono" type="number" min="1" max="1440" disabled="@(!Editing)" @bind="st.TraceRetentionMinutes" @bind:after="Editor.Touch" />
-                        <span class="help">How long detailed stage events stay replayable. The compact trace summary is kept in the audit record.</span>
-                        <FieldIssues Issues="@Editor.Issues" Path="settings.trace_retention_minutes" />
-                    </div>
-                    <div class="field">
-                        <label for="s-rg">Rate limit — all traffic (requests/minute, 0 = off)</label>
-                        <input id="s-rg" class="input mono" type="number" min="0" disabled="@(!Editing)" @bind="st.RateLimitGlobalPerMinute" @bind:after="Editor.Touch" />
-                        <FieldIssues Issues="@Editor.Issues" Path="settings.rate_limit_global_per_minute" />
-                    </div>
-                    <div class="field">
-                        <label for="s-rt">Rate limit — per team (requests/minute, 0 = off)</label>
-                        <input id="s-rt" class="input mono" type="number" min="0" disabled="@(!Editing)" @bind="st.RateLimitPerTeamPerMinute" @bind:after="Editor.Touch" />
-                        <FieldIssues Issues="@Editor.Issues" Path="settings.rate_limit_per_team_per_minute" />
-                    </div>
-                </div>
+                <span class="secondary muted">The active configuration carries no operational settings.</span>
             }
         </section>
 
-        @* ADR-0015: governed web search. Readiness comes from GET /admin/web-search (the Host); the key is a server-side secret
-           and never appears here. Enabled/limits/price are versioned configuration edited in the same draft. *@
+        @* ADR-0015: readiness from GET /admin/web-search (the key never appears); enabled/limits/price are versioned config. *@
         <section class="panel" aria-labelledby="ws-h">
             <div class="panel-head">
                 <h2 id="ws-h">Web search (Tavily)</h2>
-                <span class="panel-sub">Server configuration · off by default · Public requests only · charged to budgets</span>
+                <span class="panel-sub">Public workloads only · optional per request · charged to budgets</span>
+                <span class="grow"></span>
+                <button type="button" class="btn sm" id="ws-edit" disabled="@(!CanEdit)" @onclick="OpenWebSearch">@(Editor.Applied?.Config?.WebSearch is null ? "Configure…" : "Edit…")</button>
             </div>
             @if (_ws is { } wst)
             {
                 <div class="result-head">
                     <StatusPill Kind="@(wst.Ready ? "served" : "unknown")" Text="@(wst.Ready ? "Ready" : "Not ready")" />
-                    <span class="secondary subtle">Status of the applied configuration@(wst.ConfigVersion is { } wv ? " v" + wv.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")</span>
+                    <span class="secondary">@WebSearchSummary(wst)</span>
                     <button type="button" class="btn ghost sm" @onclick="LoadWebSearchAsync">Refresh</button>
                 </div>
-                <ul class="plain-list secondary">
-                    @foreach (var item in WebSourcesText.Checklist(wst))
-                    {
-                        <li><span class="dot @(item.Ok ? "ok" : "warn")" aria-hidden="true"></span> @item.Label — @(item.Ok ? "yes" : "no")</li>
-                    }
-                </ul>
-                @if (wst.Setup.Count > 0)
+                @if (!wst.Ready)
                 {
-                    <details class="tech" open="@(!wst.Ready)">
-                        <summary>Setup steps</summary>
-                        <ol class="plain-list secondary">
-                            @foreach (var step in wst.Setup) { <li>@step</li> }
-                        </ol>
-                    </details>
+                    <ul class="plain-list secondary">
+                        @foreach (var item in WebSourcesText.Checklist(wst).Where(i => !i.Ok))
+                        {
+                            <li><span class="dot warn" aria-hidden="true"></span> @item.Label — no</li>
+                        }
+                    </ul>
+                    @if (wst.Setup.Count > 0)
+                    {
+                        <details class="tech">
+                            <summary>Setup steps</summary>
+                            <ol class="plain-list secondary">
+                                @foreach (var step in wst.Setup) { <li>@step</li> }
+                            </ol>
+                        </details>
+                    }
                 }
             }
             else if (_wsError is { } wse)
@@ -131,63 +99,76 @@
             {
                 <Skeleton Lines="2" Label="Loading web search status" />
             }
-
-            @if (Editor.Current is { } cur)
-            {
-                if (cur.WebSearch is not { } wcfg)
-                {
-                    <div class="btn-row">
-                        <span class="secondary row-main">Web search is not configured (disabled).</span>
-                        @if (Editing)
-                        {
-                            <button type="button" class="btn" @onclick="() => AddWebSearch(cur)">Configure web search…</button>
-                        }
-                    </div>
-                }
-                else
-                {
-                    <div class="form-grid">
-                        <div class="field">
-                            <label class="switch"><input type="checkbox" disabled="@(!Editing)" @bind="wcfg.Enabled" @bind:after="Editor.Touch" /> Enable web search</label>
-                            <span class="help">Also needs Hybrid mode, the server key, the egress allow-list entry, a price, and a Public profile allowed under Policies → Applications &amp; workload profiles.</span>
-                            <FieldIssues Issues="@Editor.Issues" Path="web_search.enabled" />
-                        </div>
-                        <div class="field">
-                            <label for="ws-price">Price per Tavily credit (USD)</label>
-                            <input id="ws-price" class="input mono" type="number" min="0" step="0.0001" disabled="@(!Editing)" @bind="wcfg.PricePerCreditUsd" @bind:after="Editor.Touch" aria-describedby="ws-price-h" />
-                            <span id="ws-price-h" class="help">From your Tavily plan. A basic search uses 1 credit. Empty = unknown — search stays refused (never treated as $0).</span>
-                            <FieldIssues Issues="@Editor.Issues" Path="web_search.price_per_credit_usd" />
-                        </div>
-                        <div class="field">
-                            <label for="ws-basis">Price basis (optional)</label>
-                            <input id="ws-basis" class="input" maxlength="200" disabled="@(!Editing)" @bind="wcfg.PriceBasis" @bind:after="Editor.Touch" placeholder="e.g. Tavily pay-as-you-go" />
-                            <FieldIssues Issues="@Editor.Issues" Path="web_search.price_basis" />
-                        </div>
-                        <div class="field">
-                            <label for="ws-max">Max results (1–3)</label>
-                            <input id="ws-max" class="input mono" type="number" min="1" max="3" disabled="@(!Editing)" @bind="wcfg.MaxResults" @bind:after="Editor.Touch" />
-                            <FieldIssues Issues="@Editor.Issues" Path="web_search.max_results" />
-                        </div>
-                        <div class="field">
-                            <label for="ws-to">Timeout (seconds, 1–30)</label>
-                            <input id="ws-to" class="input mono" type="number" min="1" max="30" disabled="@(!Editing)" @bind="wcfg.TimeoutSeconds" @bind:after="Editor.Touch" />
-                            <span class="help">One search per request, no retries. A timeout fails the request clearly.</span>
-                            <FieldIssues Issues="@Editor.Issues" Path="web_search.timeout_seconds" />
-                        </div>
-                    </div>
-                }
-            }
             <details class="tech">
                 <summary>How web search is governed</summary>
                 <ul class="plain-list secondary">
-                    <li>The Playground's Web sources control: Off (default), Auto (only when the prompt asks for current information) or Required.</li>
-                    <li>Auth, policy, pause, rate limit and budget run before any search. Internal, PII and PHI requests — or a sensitive query or location — are never searched.</li>
-                    <li>A weather question without a location is answered with a request for one; Covenant never guesses your location.</li>
-                    <li>Exactly one bounded search (up to 3 results). Results are untrusted data for the model, never instructions. If the search fails or finds nothing, the request fails instead of answering from stale knowledge.</li>
-                    <li>Evidence records the search outcome, source hosts and charge — never the query, location or snippets.</li>
+                    <li>Playground → Web sources: Off (default), Auto (only when the prompt asks for current information) or Required.</li>
+                    <li>Auth, policy, pause, rate limit and budget run first. Internal, PII and PHI requests — or a sensitive query or location — are never searched.</li>
+                    <li>Exactly one bounded search; results are untrusted data. If it fails or finds nothing, the request fails rather than answering from stale knowledge.</li>
+                    <li>Evidence records outcome, source hosts and charge — never the query, location or snippets.</li>
                 </ul>
             </details>
         </section>
+
+        @if (_op is { } oe)
+        {
+            var o = oe.Working;
+            <EditDialog Open="true" OpenChanged="@(_ => CloseDialogs())" Title="Operational settings" OpenerId="op-edit" IsDirty="() => oe.IsDirty"
+                        Busy="@_saving" Error="@_saveError" ErrorTitle="@_saveErrorTitle" ErrorTone="@_saveErrorTone" Issues="@_issues"
+                        OnSave="@(() => SaveAsync(oe.BaseVersion, d => EntityEdits.Apply(d, oe), "Console: operational settings edited"))" OnCancel="DiscardScoped">
+                <div class="dialog-section">
+                    <h3>Exact cache</h3>
+                    <div class="form-grid">
+                        <div class="field"><label for="s-ttl">TTL (seconds, 0 = off)</label><input id="s-ttl" class="input mono" type="number" min="0" @bind="o.CacheTtlSeconds" @bind:event="oninput" /></div>
+                        <div class="field"><label for="s-max">Max entries</label><input id="s-max" class="input mono" type="number" min="1" @bind="o.CacheMaxEntries" @bind:event="oninput" /></div>
+                    </div>
+                    <span class="secondary subtle">A hit still passes auth, classification and policy, and makes no provider call.</span>
+                </div>
+                <div class="dialog-section">
+                    <h3>Evidence and trace</h3>
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="s-prev">Prompt preview in evidence (characters, 0–500)</label>
+                            <input id="s-prev" class="input mono" type="number" min="0" max="500" @bind="o.PromptPreviewChars" @bind:event="oninput" />
+                            <span class="help @(o.PromptPreviewChars is > 0 ? "warn" : "")">@(o.PromptPreviewChars is > 0 ? "Stored in the tamper-evident audit log for every prompt; cannot be removed later." : "0 = fingerprint and length only.")</span>
+                        </div>
+                        <div class="field"><label for="s-trace">Live trace retention (minutes, 1–1440)</label><input id="s-trace" class="input mono" type="number" min="1" max="1440" @bind="o.TraceRetentionMinutes" @bind:event="oninput" /></div>
+                    </div>
+                </div>
+                <div class="dialog-section">
+                    <h3>Rate limits (requests per minute, 0 = off)</h3>
+                    <div class="form-grid">
+                        <div class="field"><label for="s-rg">All traffic</label><input id="s-rg" class="input mono" type="number" min="0" @bind="o.RateLimitGlobalPerMinute" @bind:event="oninput" /></div>
+                        <div class="field"><label for="s-rt">Per team</label><input id="s-rt" class="input mono" type="number" min="0" @bind="o.RateLimitPerTeamPerMinute" @bind:event="oninput" /></div>
+                    </div>
+                </div>
+            </EditDialog>
+        }
+
+        @if (_wsEdit is { } we)
+        {
+            var w = we.Working;
+            <EditDialog Open="true" OpenChanged="@(_ => CloseDialogs())" Title="Web search settings" OpenerId="ws-edit" IsDirty="() => we.IsDirty"
+                        Busy="@_saving" Error="@_saveError" ErrorTitle="@_saveErrorTitle" ErrorTone="@_saveErrorTone" Issues="@_issues"
+                        OnSave="@(() => SaveAsync(we.BaseVersion, d => EntityEdits.Apply(d, we), "Console: web search settings edited"))" OnCancel="DiscardScoped">
+                <div class="dialog-section">
+                    <label class="switch"><input type="checkbox" @bind="w.Enabled" /> Enable web search</label>
+                    <span class="secondary subtle">Also needs Hybrid mode, the server key, the egress allow-list entry, a price, and a Public workload that allows it (Policies → Workloads).</span>
+                </div>
+                <div class="dialog-section">
+                    <div class="form-grid">
+                        <div class="field">
+                            <label for="ws-price">Price per Tavily credit (USD)</label>
+                            <input id="ws-price" class="input mono" type="number" min="0" step="0.0001" @bind="w.PricePerCreditUsd" @bind:event="oninput" />
+                            <span class="help">From your Tavily plan; a basic search uses 1 credit. Empty = unknown — search stays refused.</span>
+                        </div>
+                        <div class="field"><label for="ws-basis">Price basis (optional)</label><input id="ws-basis" class="input" maxlength="200" @bind="w.PriceBasis" @bind:event="oninput" placeholder="e.g. Tavily pay-as-you-go" /></div>
+                        <div class="field"><label for="ws-max">Max results (1–3)</label><input id="ws-max" class="input mono" type="number" min="1" max="3" @bind="w.MaxResults" @bind:event="oninput" /></div>
+                        <div class="field"><label for="ws-to">Timeout (seconds, 1–30)</label><input id="ws-to" class="input mono" type="number" min="1" max="30" @bind="w.TimeoutSeconds" @bind:event="oninput" /></div>
+                    </div>
+                </div>
+            </EditDialog>
+        }
 
         <section class="panel" aria-labelledby="apps-link-h">
             <div class="panel-head">
@@ -234,7 +215,7 @@
             <section class="panel" aria-labelledby="diag-h">
                 <div class="panel-head">
                     <h2 id="diag-h">Diagnostics</h2>
-                    <span class="panel-sub">Read-only · startup configuration · restart required to change</span>
+                    <span class="panel-sub">Read-only · live mode and active version, plus startup values (those need a restart to change)</span>
                 </div>
                 <FactList Inline="true" Facts="@SummaryFacts(s)" />
                 <details class="tech">
@@ -325,7 +306,16 @@
     /// <summary>null = not checked yet; true = GET /admin/budgets answered (ADR-0014 ledger); false = 404 (pre-v2 counters).</summary>
     private bool? _ledger;
 
-    private bool Editing => Editor.Editing && Editor.Owner == "settings";
+    private bool CanEdit => Editor.Applied?.Config is not null && !Editor.Saving && !_saving && (!Editor.IsDirty || Editor.Owner == "settings");
+
+    private EntityEdit<OperationalSettingsDto>? _op;
+    private EntityEdit<WebSearchSettingsDto>? _wsEdit;
+    private bool _saving;
+    private string? _saveError;
+    private string? _saveErrorTitle;
+    private string _saveErrorTone = "bad";
+    private IReadOnlyList<ConfigIssueDto>? _issues;
+    private string? _notice;
     private bool CanConfirm => !_resetting && string.Equals(_typed.Trim(), State.EnvironmentLabel, StringComparison.Ordinal);
 
     private string AccountingImpact => _ledger switch
@@ -366,11 +356,87 @@
         }
     }
 
-    private void AddWebSearch(CovenantConfigDto draft)
+    private void ResetResult()
     {
-        if (!Editing || draft.WebSearch is not null) return;
-        draft.WebSearch = new WebSearchSettingsDto { Enabled = false, MaxResults = 3, TimeoutSeconds = 10 };
-        Editor.Touch();
+        _saveError = null;
+        _saveErrorTitle = null;
+        _saveErrorTone = "bad";
+        _issues = null;
+        _notice = null;
+    }
+
+    private void OpenOperational()
+    {
+        if (Editor.Applied?.Config?.Settings is not { } st) return;
+        ResetResult();
+        _op = EntityEdits.Edit(st);
+        _op.BaseVersion = Editor.AppliedVersion;
+    }
+
+    private void OpenWebSearch()
+    {
+        if (Editor.Applied?.Config is not { } cfg) return;
+        ResetResult();
+        _wsEdit = EntityEdits.Edit(cfg.WebSearch);
+        _wsEdit.BaseVersion = Editor.AppliedVersion;
+    }
+
+    private void CloseDialogs()
+    {
+        _op = null;
+        _wsEdit = null;
+    }
+
+    private void DiscardScoped()
+    {
+        Editor.DiscardIfOwner("settings");
+        ResetResult();
+    }
+
+    private async Task SaveAsync(int? openedAt, Func<CovenantConfigDto, string?> change, string summary)
+    {
+        _saving = true;
+        _saveError = null;
+        _issues = null;
+        try
+        {
+            var outcome = await Editor.ApplyScopedAsync("settings", openedAt, change, summary);
+            if (outcome.Succeeded)
+            {
+                _notice = outcome.Message + ".";
+                CloseDialogs();
+                await LoadWebSearchAsync();
+                return;
+            }
+            _saveErrorTitle = outcome.Kind == EditOutcomeKind.Stale ? "The configuration changed meanwhile" : outcome.Kind == EditOutcomeKind.Invalid ? "The Host rejected this change" : "Not saved";
+            _saveErrorTone = outcome.Kind == EditOutcomeKind.Stale ? "warn" : "bad";
+            _saveError = outcome.Message;
+            _issues = outcome.Errors;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private static IReadOnlyList<FactList.Fact> OperationalFacts(OperationalSettingsDto s) =>
+    [
+        new("Exact cache", s.CacheTtlSeconds is > 0 ? s.CacheTtlSeconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + " s · max " + (s.CacheMaxEntries?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "default") + " entries" : "Off"),
+        new("Prompt preview in evidence", s.PromptPreviewChars is > 0 ? s.PromptPreviewChars.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + " characters" : "None (fingerprint only)"),
+        new("Live trace retention", (s.TraceRetentionMinutes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "default") + " min"),
+        new("Rate limits", Limit(s.RateLimitGlobalPerMinute) + " all · " + Limit(s.RateLimitPerTeamPerMinute) + " per team"),
+    ];
+
+    private static string Limit(int? perMinute) => perMinute is > 0 ? perMinute.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/min" : "off";
+
+    private string WebSearchSummary(WebSearchStatusDto s)
+    {
+        var cfg = Editor.Applied?.Config?.WebSearch;
+        if (cfg is null) return "Not configured (disabled).";
+        var price = cfg.PricePerCreditUsd is { } p ? Money.Usd(p) + " per credit" : "no price";
+        return (cfg.Enabled ? "Enabled" : "Disabled") + " · " + price + " · up to " + cfg.MaxResults.ToString(System.Globalization.CultureInfo.InvariantCulture)
+               + " results · " + cfg.TimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture) + " s timeout"
+               + (s.ProfilesAllowed.Count > 0 ? " · allowed on " + string.Join(", ", s.ProfilesAllowed) : "");
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
