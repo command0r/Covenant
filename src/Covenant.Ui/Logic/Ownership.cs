@@ -44,7 +44,7 @@ public static class Ownership
     public static string Cache(AuditEntryView r) => r.CacheOutcome switch
     {
         "hit" => "Hit — served from the exact cache",
-        "miss" => "Miss — looked up, then called the provider",
+        "miss" => "Miss — no matching cached response",
         "bypass_web_search" => "Bypassed — web-search requests never use the cache",
         "disabled" => "Off — the exact cache is disabled",
         "not_reached" => "Not reached — refused before the cache stage",

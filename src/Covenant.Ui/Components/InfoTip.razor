@@ -1,0 +1,12 @@
+@* A small, keyboard-accessible explanation: a native disclosure (Enter/Space toggles, focus stays on the trigger) whose
+   panel floats next to the label. Used for one-line concepts explained once, instead of paragraphs. *@
+<details class="infotip">
+    <summary aria-label="@Label"><Icon Name="info" Size="14" /></summary>
+    <span class="infotip-panel" role="note">@ChildContent</span>
+</details>
+
+@code {
+    /// <summary>Accessible name of the trigger, e.g. "What is an application?".</summary>
+    [Parameter, EditorRequired] public string Label { get; set; } = "";
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

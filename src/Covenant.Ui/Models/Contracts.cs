@@ -287,6 +287,27 @@ public sealed class AuditEntryView
     [JsonPropertyName("PolicyId")] public string? PolicyId { get; set; }
     /// <summary>hit | miss | bypass_web_search | disabled | not_reached (null on older records).</summary>
     [JsonPropertyName("CacheOutcome")] public string? CacheOutcome { get; set; }
+    /// <summary>ADR-0016 sanitized-payload decision (counts and types only). Null when not applicable / older records.</summary>
+    [JsonPropertyName("Redaction")] public AuditRedactionView? Redaction { get; set; }
+}
+
+/// <summary>Core AuditRedaction (ADR-0016): transform identity, authorizing policy, applied | refused with a bounded reason
+/// code, counts per identifier type, the ORIGINAL classification and the informational transformed classification.</summary>
+public sealed class AuditRedactionView
+{
+    [JsonPropertyName("Transform")] public string Transform { get; set; } = "";
+    [JsonPropertyName("PolicyId")] public string? PolicyId { get; set; }
+    [JsonPropertyName("Outcome")] public string Outcome { get; set; } = "";
+    [JsonPropertyName("ReasonCode")] public string? ReasonCode { get; set; }
+    [JsonPropertyName("Counts")] public List<AuditRedactionCountView> Counts { get; set; } = [];
+    [JsonPropertyName("OriginalClassification")] public string? OriginalClassification { get; set; }
+    [JsonPropertyName("TransformedClassification")] public string? TransformedClassification { get; set; }
+}
+
+public sealed class AuditRedactionCountView
+{
+    [JsonPropertyName("Type")] public string Type { get; set; } = "";
+    [JsonPropertyName("Count")] public int Count { get; set; }
 }
 
 /// <summary>Core AuditWebSearch.</summary>
@@ -561,4 +582,9 @@ public sealed class StreamFrameDto
 [JsonSerializable(typeof(PlaygroundSubmissionDto))]
 [JsonSerializable(typeof(WebSearchStatusDto))]
 [JsonSerializable(typeof(RequestSearchDto))]
+// Demo journey iteration (ADR-0016/0017, usage)
+[JsonSerializable(typeof(RecordSchemaDto))]
+[JsonSerializable(typeof(DiscoverModelsRequestDto))]
+[JsonSerializable(typeof(DiscoverModelsResponseDto))]
+[JsonSerializable(typeof(UsageReportDto))]
 public partial class UiJsonContext : JsonSerializerContext;

@@ -21,7 +21,7 @@ public sealed record TargetOption(string ConnectionId, string ModelId, string La
 /// <summary>Wording for policies (spec §5 Policies): definite effective state, never "may use".</summary>
 public static class PolicyText
 {
-    public const string SensitiveNeverCloud = "PII/PHI never route to cloud destinations.";
+    public const string SensitiveNeverCloud = "Raw PII/PHI never routes to external (cloud) destinations; only a sanitized structured-record route (ADR-0016) may, for PII.";
 
     public static string ClassificationLabel(string? c) => (c ?? "").Trim().ToLowerInvariant() switch
     {
@@ -41,6 +41,14 @@ public static class PolicyText
     public static bool IsSensitive(string? c) => (c ?? "").Trim().ToLowerInvariant() is "pii" or "phi";
 
     public static bool CoversSensitive(PolicyDto p) => p.Classifications.Any(IsSensitive);
+
+    /// <summary>ADR-0016 shape: a PII-only, workload-scoped route with a redaction contract may use external models — for a
+    /// Covenant-built sanitized structured payload only (the Host validates and enforces; this only decides what to offer).</summary>
+    public static bool IsSanitized(PolicyDto p)
+        => p.Redaction is { Types.Count: > 0, Tasks.Count: > 0 } && p.Profiles.Count > 0
+           && p.Classifications.Count == 1 && string.Equals(p.Classifications[0], "Pii", StringComparison.OrdinalIgnoreCase);
+
+    public const string SanitizedOnly = "External only as a sanitized structured record (ADR-0016) — never raw PII, never PHI.";
 
     /// <summary>"Fixed + fallback" or "Length-based heuristic (threshold 400 tokens)".</summary>
     public static string StrategyName(PolicyDto p)
@@ -98,7 +106,7 @@ public static class PolicyRoutes
             else if (!conn.Enabled) why = "connection '" + conn.Id + "' is disabled";
             else if (!conn.Models.Any(m => string.Equals(m.ModelId, t.ModelId, StringComparison.Ordinal))) why = "model not permitted on '" + conn.Id + "'";
             else if (boundary == "Cloud" && IsLocalOnly(cfg.Mode)) why = "cloud destination in Local-only mode";
-            else if (boundary == "Cloud" && PolicyText.CoversSensitive(p)) why = "cloud destination for PII/PHI — never eligible";
+            else if (boundary == "Cloud" && PolicyText.CoversSensitive(p) && !PolicyText.IsSanitized(p)) why = "cloud destination for PII/PHI — never eligible";
             list.Add(new TargetState(t, Key(t), boundary, why));
         }
         return list;
@@ -136,7 +144,8 @@ public static class PolicyRoutes
         if (Targets(p, cfg).All(t => !t.Eligible)) list.Add("No eligible target remains: matching requests are refused (never redirected).");
         list.Add("A requested model outside the eligible targets is refused; an override pins one target (no fallback).");
         list.Add("Fallback happens only for the configured transient failures, before any content was streamed, within the attempt and deadline bounds.");
-        if (PolicyText.CoversSensitive(p)) list.Add(PolicyText.SensitiveNeverCloud);
+        if (PolicyText.IsSanitized(p)) list.Add(PolicyText.SanitizedOnly);
+        else if (PolicyText.CoversSensitive(p)) list.Add(PolicyText.SensitiveNeverCloud);
         return list;
     }
 
@@ -155,7 +164,7 @@ public static class PolicyRoutes
                 var key = c.Id + "/" + m.ModelId;
                 if (listed.Contains(key)) continue;
                 string? why = null;
-                if (boundary == "Cloud" && PolicyText.CoversSensitive(p)) why = PolicyText.SensitiveNeverCloud;
+                if (boundary == "Cloud" && PolicyText.CoversSensitive(p) && !PolicyText.IsSanitized(p)) why = PolicyText.SensitiveNeverCloud;
                 else if (boundary == "Cloud" && IsLocalOnly(cfg.Mode)) why = "Cloud destinations cannot execute in Local-only mode.";
                 options.Add(new TargetOption(c.Id, m.ModelId, key + " · " + (boundary ?? "boundary not reported"), boundary, why));
             }

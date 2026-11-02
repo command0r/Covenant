@@ -84,6 +84,14 @@ public sealed class BudgetAttemptGate : IAttemptGate, IToolCallGate
 
     public AttemptAdmission Admit(InferenceContext ctx, RouteTarget target, string attemptId)
     {
+        // ADR-0016 defence in depth, before EVERY attempt (the pre-reserved first one included): a PII/PHI request reaches a
+        // cloud target only with the redact stage's verified, sanitized payload. Refused attempts release their slot.
+        if (EgressGuard.Refusal(ctx, target) is { } egress)
+        {
+            Release(ctx, attemptId);
+            ctx.Trace(RedactStage.Stage, TraceStates.Refused, 0, RedactionReasons.SensitiveEgress, attemptId);
+            return AttemptAdmission.Refused(egress, RedactStage.Stage, RedactionReasons.SensitiveEgress);
+        }
         lock (_gate)
         {
             if (_slots.TryGetValue(attemptId, out var existing) && !existing.Closed && existing.Target == target)

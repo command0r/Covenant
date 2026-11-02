@@ -68,7 +68,7 @@ public static class WebSourcesText
     {
         "search_off" => "Web sources were off.",
         "search_not_triggered" => "Auto: the prompt did not ask for current information, so no search was made.",
-        "location_required" => "A weather question needs a location. Add one in the Location field (or name the place in the prompt) and run again. Nothing was sent externally.",
+        "location_required" => "A weather question needs a location. Add one in the Search location field (or name the place in the prompt) and run again. Nothing was sent externally.",
         "search_not_permitted" => "Web search is not set up for this request; the server's reason is below. Nothing was sent externally.",
         "search_sensitive" => "Refused: only Public requests may be searched, and the query or location must not contain sensitive data. Nothing was sent externally.",
         "search_failed" => "The search failed. No answer was given without sources.",
@@ -150,6 +150,17 @@ public static class WebSourcesText
                 "Enter the price from your Tavily plan under Settings → Web search.", "settings#ws-h", "Set the price");
         var profile = config is null || profileId is null ? null : config.Profiles.FirstOrDefault(p => p.Id == profileId);
         bool allowed = profileId is not null && (profile?.WebSearchAllowed ?? status.ProfilesAllowed.Contains(profileId, StringComparer.Ordinal));
+        if (profile is not null && !string.Equals(profile.Baseline, "Public", StringComparison.Ordinal))
+        {
+            // Correct behaviour, not a setup gap: search is decided independently of where inference runs — a non-Public
+            // workload never searches, even one with an (ADR-0016 sanitized) external inference route.
+            var publicAlt = app is null ? null
+                : ComposerRules.GrantedProfiles(app).FirstOrDefault(g => status.ProfilesAllowed.Contains(g, StringComparer.Ordinal));
+            return SearchReadiness.Blocked(PolicyText.IsSensitive(profile.Baseline)
+                    ? "Web search is unavailable for sensitive (" + PolicyText.ClassificationLabel(profile.Baseline) + ") workloads, independent of their inference route."
+                    : PolicyText.ClassificationLabel(profile.Baseline) + " workloads cannot use web search — it is only for Public workloads, independent of the inference route.",
+                publicAlt is null ? "" : "Switch to a Public workload to search.", null, null, publicAlt, workloadCause: true);
+        }
         if (!allowed)
         {
             var alternative = app is null ? null
@@ -158,14 +169,11 @@ public static class WebSourcesText
             return alternative is not null
                 ? SearchReadiness.Blocked("Workload profile '" + name + "' is not allowed to use web search.",
                     "Switch to an allowed Public profile, or allow this one under Policies → Applications & workload profiles.",
-                    "policies#applications", "Profile permissions", alternative)
+                    "policies#applications", "Profile permissions", alternative, workloadCause: true)
                 : SearchReadiness.Blocked("No workload profile granted to this application may use web search.",
                     "Allow web search on a Public-baseline profile and grant it to this application.",
-                    "policies#applications", "Profile permissions");
+                    "policies#applications", "Profile permissions", workloadCause: true);
         }
-        if (profile is not null && !string.Equals(profile.Baseline, "Public", StringComparison.Ordinal))
-            return SearchReadiness.Blocked("Only Public requests may be searched; this profile's baseline is " + profile.Baseline + ".",
-                "Use a Public-baseline profile for research with web sources.", "policies#applications", "Profile permissions");
         return SearchReadiness.Ok;
     }
 
@@ -181,6 +189,9 @@ public static class WebSourcesText
     }
 
     public static string Count(int n) => n.ToString(CultureInfo.InvariantCulture) + (n == 1 ? " source" : " sources");
+
+    /// <summary>Presentation mode's collapsed Sources line: "Web sources · 3 sources retrieved (not verified) — show".</summary>
+    public static string CompactSummary(int n) => "Web sources · " + Count(n) + " retrieved (not verified) — show";
 
     /// <summary>Readiness checklist of GET /admin/web-search, in the order an operator fixes it.</summary>
     public static IReadOnlyList<(string Label, bool Ok)> Checklist(WebSearchStatusDto s) =>
@@ -199,10 +210,15 @@ public enum SearchProblemKind { None, Setup, MissingLocation, PolicyRefusal, Pro
 /// <summary>One readiness verdict for the composer. <see cref="Possible"/> false ⇒ Auto/Required are not offered as if
 /// they would work; the cause and its single fix are shown instead. <see cref="Known"/> false ⇒ the status could not be
 /// read; the controls stay usable and the Host decides.</summary>
-public sealed record SearchReadiness(bool Possible, bool Known, string? Cause, string? Fix, string? Href, string? HrefLabel, string? SwitchToProfile)
+public sealed record SearchReadiness(bool Possible, bool Known, string? Cause, string? Fix, string? Href, string? HrefLabel, string? SwitchToProfile,
+    bool WorkloadCause = false)
 {
     public static readonly SearchReadiness Ok = new(true, true, null, null, null, null, null);
     public static SearchReadiness Unknown(string why) => new(true, false, why, "The Host still checks every search request.", null, null, null);
-    public static SearchReadiness Blocked(string cause, string fix, string href, string hrefLabel, string? switchTo = null)
-        => new(false, true, cause, fix, href, hrefLabel, switchTo);
+    public static SearchReadiness Blocked(string cause, string fix, string? href, string? hrefLabel, string? switchTo = null, bool workloadCause = false)
+        => new(false, true, cause, fix, href, hrefLabel, switchTo, workloadCause);
+
+    /// <summary>What to show while web sources are OFF: the precise cause in one neutral line (no warning colour — nothing
+    /// was asked yet). The fix and link are shown with it; warning styling only once search is requested.</summary>
+    public string? QuietLine => Possible || !Known ? null : Cause;
 }

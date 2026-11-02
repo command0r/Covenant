@@ -26,6 +26,19 @@ public sealed record RequestFilterCriteria
 
 public static class RequestFilter
 {
+    /// <summary>The active filters as short labels ("Outcome: Served", "Team: research", …) for the visible filter summary.</summary>
+    public static IReadOnlyList<string> Describe(RequestFilterCriteria c)
+    {
+        var l = new List<string>();
+        if (c.Outcome is { } o) l.Add("Outcome: " + OutcomeModel.Label(o));
+        if (!string.IsNullOrWhiteSpace(c.Application)) l.Add("Application: " + c.Application.Trim());
+        if (!string.IsNullOrWhiteSpace(c.Team)) l.Add("Team: " + c.Team.Trim());
+        if (!string.IsNullOrWhiteSpace(c.Model)) l.Add("Model: " + c.Model.Trim());
+        if (!string.IsNullOrWhiteSpace(c.IdSearch)) l.Add("Id contains: " + c.IdSearch.Trim());
+        if (c.Window != TimeWindow.All) l.Add("Time: " + Label(c.Window));
+        return l;
+    }
+
     public static IReadOnlyList<AuditEntryView> Apply(IEnumerable<AuditEntryView> items, RequestFilterCriteria c, DateTimeOffset nowUtc)
     {
         var result = new List<AuditEntryView>();

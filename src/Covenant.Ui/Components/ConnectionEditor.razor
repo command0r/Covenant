@@ -59,7 +59,7 @@
                 }
                 else
                 {
-                    <span><BoundaryTag Boundary="@Form.Boundary" /> <span class="help">@(Form.IsOllama ? "Ollama runs inside the perimeter." : "OpenAI and Anthropic are always Cloud.")</span></span>
+                    <span><BoundaryTag Boundary="@Form.Boundary" /> <span class="help">@(Form.IsOllama ? "Ollama runs inside the perimeter." : "OpenAI and Anthropic are always External (cloud).")</span></span>
                 }
                 <FieldIssues Issues="@Issues" Path="@(Prefix + ".boundary")" />
             </div>
@@ -83,7 +83,7 @@
             <label class="switch"><input type="checkbox" @bind="Form.Enabled" @bind:after="Changed" /> Enabled (eligible for routes)</label>
             <div class="field narrow">
                 <label for="@(P + "-to")">Timeout per attempt (s)</label>
-                <input id="@(P + "-to")" class="input mono" type="number" min="1" max="600" placeholder="120" @bind="Form.TimeoutSeconds" @bind:after="Changed" />
+                <input id="@(P + "-to")" class="input mono" type="number" min="1" max="600" placeholder="120" @bind="Form.TimeoutSeconds" @bind:event="oninput" @bind:after="Changed" />
             </div>
         </div>
     </fieldset>
@@ -144,6 +144,36 @@
         else
         {
             <span class="secondary muted">Enter exact provider model ids. A paid cloud model needs input and output prices — an unknown price is never treated as $0.</span>
+            @if (Form.Kind is "Anthropic" or "OpenAi")
+            {
+                @* ADR-0017: list what the server-side credential can see; selecting only fills the id field. *@
+                <div class="discover-row">
+                    <button type="button" class="btn sm" @onclick="DiscoverAsync" aria-busy="@(_discovering ? "true" : null)"
+                            disabled="@(_discovering || string.IsNullOrWhiteSpace(Form.SecretRef))">
+                        @(_discovering ? "Listing…" : "List models from " + ConnectionRules.KindLabel(Form.Kind))
+                    </button>
+                    @if (_discovery is { Ok: true, Models.Count: > 0 } found)
+                    {
+                        <label for="@(P + "-disc")" class="visually-hidden">Discovered model ids</label>
+                        <select id="@(P + "-disc")" class="input mono" @onchange="OnDiscoveredPick">
+                            <option value="">@(found.Models.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) + " models visible to this credential — choose one…")</option>
+                            @foreach (var dm in found.Models)
+                            {
+                                <option value="@dm.Id">@(dm.Id + (dm.DisplayName is { Length: > 0 } dn && dn != dm.Id ? " · " + dn : ""))</option>
+                            }
+                        </select>
+                    }
+                </div>
+                @if (_discovery is { Ok: false } failed)
+                {
+                    <span class="note warn" role="status">@failed.Message <span class="subtle mono">(@failed.Code)</span> Manual entry below still works.</span>
+                }
+                else if (_discovery is { Ok: true } listed)
+                {
+                    <span class="help">@listed.Note@(listed.Truncated ? " The list was cut at the safety bound." : "")</span>
+                }
+                <ErrorBanner Title="Model listing failed" Message="@_discoveryError" />
+            }
             <div class="field-row">
                 <div class="field">
                     <label for="@(P + "-newm")">Model id</label>
@@ -180,11 +210,11 @@
                                 {
                                     <div class="field">
                                         <label for="@(P + "-in-" + idx)">Input $ / 1M</label>
-                                        <input id="@(P + "-in-" + idx)" class="input mono" type="number" min="0" step="any" @bind="row.InputPer1M" @bind:after="Changed" />
+                                        <input id="@(P + "-in-" + idx)" class="input mono" type="number" min="0" step="any" @bind="row.InputPer1M" @bind:event="oninput" @bind:after="Changed" />
                                     </div>
                                     <div class="field">
                                         <label for="@(P + "-out-" + idx)">Output $ / 1M</label>
-                                        <input id="@(P + "-out-" + idx)" class="input mono" type="number" min="0" step="any" @bind="row.OutputPer1M" @bind:after="Changed" />
+                                        <input id="@(P + "-out-" + idx)" class="input mono" type="number" min="0" step="any" @bind="row.OutputPer1M" @bind:event="oninput" @bind:after="Changed" />
                                     </div>
                                     <div class="field">
                                         <label for="@(P + "-basis-" + idx)">Price basis</label>
@@ -331,6 +361,38 @@
     private bool _probing;
     private string? _probeError;
     private string? _newModel;
+    private bool _discovering;
+    private DiscoverModelsResponseDto? _discovery;
+    private string? _discoveryError;
+
+    private async Task DiscoverAsync()
+    {
+        if (_discovering || string.IsNullOrWhiteSpace(Form.SecretRef)) return;
+        _discovering = true;
+        _discoveryError = null;
+        try
+        {
+            _discovery = await Api.DiscoverModelsAsync(Form.Kind, Form.SecretRef!.Trim());
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
+        {
+            // ConsoleSession disconnects.
+        }
+        catch (Exception ex)
+        {
+            _discoveryError = ex.Message;
+        }
+        finally
+        {
+            _discovering = false;
+        }
+    }
+
+    /// <summary>Discovery only fills the id field; the operator still adds the model and enters its price.</summary>
+    private void OnDiscoveredPick(ChangeEventArgs e)
+    {
+        if (e.Value?.ToString() is { Length: > 0 } id) _newModel = id;
+    }
     private bool _otherSecret;
 
     private string Prefix => DraftIndex is { } i ? IssueIndex.Connection(i) : "connections[?]";

@@ -1,0 +1,119 @@
+@* Focused edit dialog for ONE configuration entity (route, application, workload, budget, settings section): a side panel
+   titled with the entity (Drawer: focus moves in, Tab is trapped, Escape/scrim close, focus returns to the opener), the
+   fields as ChildContent, and a sticky footer with the result and the deliberate actions. Closing with unsaved changes
+   asks first ("Discard changes?"). Save goes through ConfigEditor.ApplyScopedAsync — preview, If-Match, conflict and
+   validation handling stay the versioned path; nothing unrelated is saved. *@
+
+<Drawer Open="@Open" OpenChanged="OnOpenChanged" Title="@Title" OpenerId="@OpenerId" CanClose="CanClose" CloseBlocked="AskDiscard">
+    <ChildContent>
+        @ChildContent
+    </ChildContent>
+    <Footer>
+        @if (Error is { Length: > 0 } err)
+        {
+            <div class="alert @(ErrorTone)" role="alert">
+                <div class="alert-text">
+                    <strong>@(ErrorTitle ?? "Not saved")</strong>
+                    <span class="alert-body">@err</span>
+                    @if (Issues is { Count: > 0 } issues)
+                    {
+                        <ul class="plain-list secondary">
+                            @foreach (var i in issues)
+                            {
+                                <li>@(i.Message + (IssueHelp.For(i.Code) is { } h ? " — " + h : ""))</li>
+                            }
+                        </ul>
+                    }
+                </div>
+            </div>
+        }
+        @if (_confirmDiscard)
+        {
+            <div class="confirm-inline" role="alertdialog" aria-label="Discard changes?">
+                <strong>Discard your changes?</strong>
+                <span class="secondary">Nothing has been saved. The active configuration stays as it is.</span>
+                <div class="btn-row">
+                    <button type="button" class="btn danger sm" @onclick="DiscardAsync">Discard changes</button>
+                    <button type="button" class="btn sm" @onclick="() => _confirmDiscard = false">Keep editing</button>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="btn-row dialog-actions">
+                <button type="button" class="btn @(Danger ? "danger" : "primary")" disabled="@(Busy || SaveDisabled)" aria-busy="@(Busy ? "true" : null)" @onclick="OnSave">
+                    @(Busy ? "Saving…" : SaveLabel)
+                </button>
+                <button type="button" class="btn" disabled="@Busy" @onclick="CancelAsync">Cancel</button>
+                @if (Note is { Length: > 0 } note)
+                {
+                    <span class="secondary subtle">@note</span>
+                }
+            </div>
+        }
+    </Footer>
+</Drawer>
+
+@code {
+    [Parameter] public bool Open { get; set; }
+    [Parameter] public EventCallback<bool> OpenChanged { get; set; }
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string? OpenerId { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    /// <summary>True when the working copy differs from the entity (Cancel then asks first).</summary>
+    [Parameter] public Func<bool>? IsDirty { get; set; }
+    [Parameter] public bool Busy { get; set; }
+    [Parameter] public bool SaveDisabled { get; set; }
+    [Parameter] public string SaveLabel { get; set; } = "Save & apply";
+    [Parameter] public bool Danger { get; set; }
+    [Parameter] public string? Note { get; set; } = "Saving creates a new configuration version.";
+    [Parameter] public string? Error { get; set; }
+    [Parameter] public string? ErrorTitle { get; set; }
+    [Parameter] public string ErrorTone { get; set; } = "bad";
+    [Parameter] public IReadOnlyList<ConfigIssueDto>? Issues { get; set; }
+    [Parameter] public EventCallback OnSave { get; set; }
+    /// <summary>Called when the dialog closes without saving (after a confirmed discard when dirty).</summary>
+    [Parameter] public EventCallback OnCancel { get; set; }
+
+    private bool _confirmDiscard;
+
+    protected override void OnParametersSet()
+    {
+        if (!Open) _confirmDiscard = false;
+    }
+
+    private bool Dirty => IsDirty?.Invoke() ?? false;
+
+    /// <summary>Escape / scrim / Close never discard unsaved work: while dirty they only show the confirmation, and only the
+    /// explicit "Discard changes" button closes without saving.</summary>
+    private bool CanClose() => !Busy && !Dirty;
+
+    private void AskDiscard()
+    {
+        if (!Busy) _confirmDiscard = true;
+    }
+
+    private async Task CancelAsync()
+    {
+        if (Dirty) { _confirmDiscard = true; return; }
+        await CloseAsync();
+    }
+
+    private async Task DiscardAsync()
+    {
+        _confirmDiscard = false;
+        await CloseAsync();
+    }
+
+    private async Task OnOpenChanged(bool open)
+    {
+        if (!open) await CloseAsync();
+    }
+
+    private async Task CloseAsync()
+    {
+        _confirmDiscard = false;
+        await OnCancel.InvokeAsync();
+        await OpenChanged.InvokeAsync(false);
+    }
+}

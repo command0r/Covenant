@@ -177,6 +177,20 @@ public sealed class CacheStage(ResponseCache cache, CacheConfig config) : IPipel
              .Count(candidates.Count);
             foreach (var c in candidates)
                 k.Add(c.AdapterKey).Add(c.ModelId).Add(RequestBounds.OutputTokenBound(ctx, c));
+            if (ctx.Policy.SanitizedPayloadRequired)
+            {
+                // ADR-0016: partition by the transformation identity and key on the BUILT payload — the original values never
+                // enter the key. Without an applied redaction there is nothing safe to key on: callers never reach here
+                // (the redact stage refuses first), and an empty marker makes any such key unusable for reuse.
+                k.Add(RedactionTypes.Transform).Add(ctx.Policy.PolicyId)
+                 .Add(string.Join(",", ctx.Policy.RedactionTypes.Order(StringComparer.Ordinal)))
+                 .Add(string.Join(",", ctx.Policy.RedactionTasks.Order(StringComparer.Ordinal)));
+                IReadOnlyList<ChatMessage> keyed = ctx.Redaction is { Applied: true } r
+                    ? r.Messages!
+                    : new List<ChatMessage> { new(ChatRole.System, "redaction-not-applied:" + Guid.NewGuid().ToString("n")) };
+                k.Messages(keyed);
+                return k.Finish();
+            }
             k.Messages(ctx.Request.Messages);
             return k.Finish();
         }

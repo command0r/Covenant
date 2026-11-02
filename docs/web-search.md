@@ -58,7 +58,9 @@ Settings shows **Ready** when every item in the checklist holds.
    - **Auto**: search only when the prompt asks for current information. Cues include weather, forecast,
      temperature, latest, today, tonight, this week, currently, right now, news, scores and stock price.
    - **Required**: always search first.
-3. **Location** (optional): an explicit place for weather questions.
+3. **Search location** (always visible; greyed out and ignored when web sources are Off): an explicit place for weather questions.
+   - It is sent with the search query and given to the model as the place to answer for.
+   - The console blocks Run for a weather question with no location and no place named in the prompt; the Host enforces the same rule.
    - A weather question with no location, and no place named in the prompt ("weather **in** Toronto"), is answered
      with a request for one **before anything is sent externally**.
    - Covenant never guesses your location: no IP geolocation, no default city.
@@ -70,8 +72,20 @@ Settings shows **Ready** when every item in the checklist holds.
    The `[n]` citations in the answer are the model's own and are not verified; the source list is the evidence. The
    trace shows a **Web search** chip between Budget and Provider.
 
-Example: Web sources **Auto**, Location `Toronto`, prompt *"What's the weather today?"*. Weather answers carry no
+Example: Web sources **Auto**, Search location `Toronto`, prompt *"What's the weather today?"*. Weather answers carry no
 accuracy guarantee.
+
+**What the search query is.** Always the user's own bounded question, so its dates, units and `site:` filters are kept, plus the Search location when the text does not name it. A weather question that states no period of its own (or only "today"/"now") gets today's date appended. "Tomorrow", "next week", a weekday, a month or a year is kept as asked.
+
+**What the model receives.** One system message, which is portable across providers and chat templates. It says:
+- the search has already been done;
+- the current UTC time, and that local dates can differ;
+- the place to answer for, and whether it came from the field or the prompt;
+- that each source's retrieval time is not the page's own observation date;
+- that snippets are untrusted data;
+- to cite `[n]`, and to state specifically what evidence is missing rather than guess.
+
+Any system text from the original request follows under "Application instructions". The last user turn carries the delimited sources, then the question verbatim. The original request (and its evidence hash) is unchanged.
 
 ## 4. What is guaranteed (and tested)
 
@@ -107,3 +121,13 @@ accuracy guarantee.
 | *The search would exceed a budget* | the reservation (price × 1 credit) does not fit | raise the budget or wait for the period to roll over |
 | *The search timed out / was rate-limited (429) / failed* | Tavily did not answer in time or refused | retry later; the request was charged at its reservation if it was sent |
 | *The search returned no usable sources* | zero results, or none with a safe http(s) URL | rephrase; nothing was answered without evidence |
+
+## Capability limits (2026-11-01)
+
+- Web search is requested by the console only. `/v1` callers (OpenAI- and Anthropic-compatible ingress) cannot request
+  it today (ADR-0015 §2).
+- Search is decided per workload (`web_search_allowed` on a Public-baseline profile). It is never granted to every team
+  automatically.
+- Retrieval and inference are independent: a Public research workload may answer on a **local** model from externally
+  retrieved sources. The search is an external call with its own charge; the model call stays local.
+- A sanitized structured-record request (ADR-0016) is PII and is never searched.

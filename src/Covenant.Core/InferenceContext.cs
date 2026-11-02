@@ -148,6 +148,10 @@ public sealed class InferenceContext(InferenceRequest request)
     /// canonical request — and therefore evidence (prompt hash/size/preview) — is never modified. Null ⇒ request messages.</summary>
     public IReadOnlyList<ChatMessage>? ModelMessages { get; set; }
 
+    /// <summary>ADR-0016: the redact stage's decision when the matched policy requires a sanitized payload (null otherwise).
+    /// When applied, <see cref="ModelMessages"/> is exactly its transformed message set.</summary>
+    public RedactionState? Redaction { get; set; }
+
     /// <summary>The messages the provider receives: <see cref="ModelMessages"/> when grounded, else the request's.</summary>
     public IReadOnlyList<ChatMessage> MessagesForModel => ModelMessages ?? Request.Messages;
 

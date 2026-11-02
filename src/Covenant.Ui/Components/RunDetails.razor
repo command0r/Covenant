@@ -15,6 +15,7 @@
             <span class="mono subtle secondary">@o.StatusLine</span>
         </div>
         <span class="secondary">@o.Explanation</span>
+        <JourneyChipRow Record="Run.Evidence.Record" />
         @if (Run.Result?.ErrorReason is { Length: > 0 } why)
         {
             <span class="secondary muted">Server reason: <span class="mono wrap-any">@why</span></span>
@@ -29,7 +30,7 @@
 <section class="drawer-section" aria-label="Request">
     <h3>Request</h3>
     <dl class="facts">
-        <dt>Run as</dt><dd class="mono">@(Run.Snapshot.ApplicationId ?? "Not set")</dd>
+        <dt>Sent as (application)</dt><dd class="mono">@(Run.Snapshot.ApplicationId ?? "Not set")</dd>
         <dt>Workload profile</dt><dd>@(Run.Snapshot.ProfileId is { } pid ? ComposerRules.ProfileLabel(Ws.Profiles, pid) : "Application default (server-side)")</dd>
         <dt>Model</dt><dd class="mono wrap-any">@(Run.Snapshot.RoutingLabel + (Run.Snapshot.Mode == RouteMode.Explicit ? " (test input)" : ""))</dd>
         <dt>Mode</dt><dd>@(Run.Snapshot.Streaming ? "Streamed" : "Buffered")</dd>

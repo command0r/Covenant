@@ -22,7 +22,7 @@
                 <h1>Audit &amp; evidence</h1>
                 <span class="lede">Every governed decision — allowed or refused — is a hash-chained audit record. Integrity is about the record, not about answer quality.</span>
             </div>
-            <Button OnClick="LoadAsync" Busy="@_loading" BusyText="Verifying…" Disabled="@_loading">@(_report is null ? "Verify now" : "Verify again")</Button>
+            <Button OnClick="LoadAsync" Busy="@_loading" BusyText="Checking…" Disabled="@_loading">@(_report is null ? "Check audit integrity" : "Check audit integrity again")</Button>
             <Button Variant="primary" OnClick="ExportAsync" Busy="@_exporting" BusyText="Preparing…" Disabled="@(_report is null || _exporting)">Export verification report</Button>
         </div>
 
@@ -32,7 +32,7 @@
         <section class="panel integrity @(_report is { ChainValid: false } ? "bad" : "")" aria-labelledby="int-h" aria-live="polite">
             <div class="panel-head">
                 <h2 id="int-h">Audit integrity</h2>
-                <span class="panel-sub">Current segment · @(_verifiedAt is { } v ? "verified " + Fmt.Utc(v) : "not verified yet")</span>
+                <span class="panel-sub">Current segment · @(_verifiedAt is { } v ? "checked " + Fmt.Utc(v) + (_checkMs is { } ms ? " · took " + Fmt.Ms(ms) + " (browser-measured)" : "") : "not checked yet")</span>
             </div>
             @if (_report is null && _error is null)
             {
@@ -41,14 +41,18 @@
             else if (_report is { } r)
             {
                 <div class="result-head">
-                    <span class="outcome @(r.ChainValid ? "served" : "failed")">@(r.ChainValid ? "Audit integrity verified" : "Chain verification FAILED")</span>
-                    <span class="secondary subtle">@Fmt.Int(r.Entries) records · @Fmt.Int(r.Allowed) allowed · @Fmt.Int(r.Denied) refused</span>
+                    <span class="outcome @(r.ChainValid ? "served" : "failed")">@(r.ChainValid ? "Integrity check passed" : "Integrity check FAILED")</span>
+                    <span class="secondary subtle">@Fmt.Int(r.Entries) records checked · @Fmt.Int(r.Allowed) allowed · @Fmt.Int(r.Denied) refused</span>
                 </div>
-                @if (r.ChainValid)
-                {
-                    <span class="secondary muted">Every stored record hashes to the next (internal consistency). @EvidenceCompleteness.QualityDisclaimer</span>
-                }
-                else
+                <details class="tech">
+                    <summary>What this checks — and what it does not</summary>
+                    <ul class="plain-list secondary">
+                        <li>For every record of the current segment, in order: its stored link equals the previous record's hash (starting from a fixed genesis value); its own hash equals SHA-256 of the previous hash plus its content; and its content is a readable record.</li>
+                        <li>When anchors are configured: each anchored record count still ends with exactly the anchored head hash, so truncating or rewriting covered history is detected.</li>
+                        <li>It does <strong>not</strong> check answer accuracy, model behaviour, regulatory compliance, traffic that bypassed Covenant, or (without anchors) a whole-log rewrite by someone able to recompute the chain.</li>
+                    </ul>
+                </details>
+                @if (!r.ChainValid)
                 {
                     <div class="alert bad" role="alert">
                         <div class="alert-text">
@@ -199,6 +203,7 @@
     private string? _error;
     private string? _exportError;
     private DateTimeOffset? _verifiedAt;
+    private double? _checkMs;
     private bool _started;
 
     private List<AuditEntryView>? _recent;
@@ -229,10 +234,13 @@
         _loading = true;
         _error = null;
         StateHasChanged();
+        _report = null;   // a fresh run every time: never show the previous result while checking
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             _report = await Api.GetEvidenceAsync();
             _verifiedAt = DateTimeOffset.UtcNow;
+            _checkMs = sw.Elapsed.TotalMilliseconds;
         }
         catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.Unauthorized)
         {

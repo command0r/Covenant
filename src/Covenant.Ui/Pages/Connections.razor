@@ -87,6 +87,9 @@
                         var health = HealthFor(conn, cat);
                         var changed = ChangedInDraft(conn);
                         var routed = RoutedBy(cfg, conn.Id);
+                        @* Compact by default (browser review at 1280×720: one expanded card hid the second provider): name and
+                           boundary with the primary actions, the three status facts, and one line per model with its action in a
+                           right-hand column. Endpoint, credential, used-by, full price basis and health timestamps are in Details. *@
                         <li class="conn-card @(conn.Enabled ? "" : "disabled")">
                             <div class="conn-head">
                                 <span class="conn-icon" aria-hidden="true"><Icon Name="@(ComposerRules.BoundaryLabel(conn.Boundary) == "Cloud" ? "cloud" : "local")" Size="20" /></span>
@@ -100,68 +103,81 @@
                                 {
                                     <span class="changed-flag">@ch</span>
                                 }
+                                <div class="btn-row tight conn-actions">
+                                    <button type="button" class="btn sm" id="@("edit-" + conn.Id)" @onclick="() => EditConnection(conn)" disabled="@(!CanEdit)">Edit</button>
+                                    @if (conn.Endpoint is { Length: > 0 })
+                                    {
+                                        <button type="button" class="btn sm" @onclick="() => TestAsync(conn)" disabled="@_testing.Contains(conn.Id)" aria-busy="@(_testing.Contains(conn.Id) ? "true" : null)">
+                                            @(_testing.Contains(conn.Id) ? "Testing…" : "Test")
+                                        </button>
+                                    }
+                                    <button type="button" class="btn sm" @onclick="() => ToggleEnabled(conn)" disabled="@(!CanEdit)">@(conn.Enabled ? "Disable…" : "Enable…")</button>
+                                </div>
                             </div>
-                            <dl class="facts">
-                                <dt>Endpoint</dt>
-                                <dd class="mono wrap-any">@(conn.Endpoint ?? "Provider default")
-                                    @if (cat is { EndpointAllowListed: false })
+                            <ul class="fact-trio compact" aria-label="Configured, credential and tested status">
+                                @foreach (var f in ConnectionFacts.Trio(conn, cat?.EndpointAllowListed, conn.SecretRef is { } sref ? SecretAvailable(sref, cat) : null, health))
+                                {
+                                    <li title="@(f.Label + ": " + f.Value)"><span class="dot @f.Tone" aria-hidden="true"></span><span class="fact-label">@f.Label</span><span class="fact-value">@f.Value</span></li>
+                                }
+                            </ul>
+                            @if (cat is { EndpointAllowListed: false })
+                            {
+                                <span class="note bad">Endpoint is not on the startup egress allow-list.</span>
+                            }
+                            @if (conn.Models.Count == 0)
+                            {
+                                <span class="muted secondary">No permitted models — this connection serves nothing.</span>
+                            }
+                            else
+                            {
+                                <ul class="conn-models" aria-label="@("Permitted models on " + (conn.DisplayName ?? conn.Id))">
+                                    @foreach (var m in conn.Models)
                                     {
-                                        <span class="note bad"> · not on the startup egress allow-list</span>
+                                        var price = Money.Price(m.Price?.InputPer1M, m.Price?.OutputPer1M);
+                                        var note = RegisteredNote(cat, m.ModelId);
+                                        <li>
+                                            <span class="conn-model" title="@(m.ModelId + " · " + price + (m.Price?.Basis is { Length: > 0 } tb ? " (" + tb + ")" : "") + note)">
+                                                <span class="mono">@m.ModelId</span> <span class="subtle">· @ShortPrice(m.Price?.InputPer1M, m.Price?.OutputPer1M)</span>@if (note.Length > 0) { <span class="note bad">@note</span> }
+                                            </span>
+                                            <span class="conn-model-action"><WorkloadRouteAction Connection="conn" ModelId="@m.ModelId" /></span>
+                                        </li>
                                     }
-                                </dd>
-                                <dt>Permitted models</dt>
-                                <dd>
-                                    @if (conn.Models.Count == 0)
+                                </ul>
+                            }
+                            <details class="tech conn-details">
+                                <summary>Details — endpoint, credential, used by, price basis, health</summary>
+                                <dl class="facts">
+                                    <dt>Endpoint</dt>
+                                    <dd class="mono wrap-any">@(conn.Endpoint ?? "Provider default")</dd>
+                                    @if (conn.SecretRef is { } sr)
                                     {
-                                        <span class="muted">None — this connection serves nothing</span>
+                                        <dt>Credential</dt>
+                                        <dd><span class="mono">@sr</span> · @SecretText(sr, cat)</dd>
                                     }
-                                    else
-                                    {
+                                    <dt>Used by</dt>
+                                    <dd>@(routed.Count == 0 ? "No policy routes" : string.Join(", ", routed))</dd>
+                                    <dt>Price basis</dt>
+                                    <dd>
                                         <ul class="inline-list">
                                             @foreach (var m in conn.Models)
                                             {
-                                                <li><span class="mono wrap-any">@m.ModelId</span> <span class="subtle">· @Money.Price(m.Price?.InputPer1M, m.Price?.OutputPer1M)@(m.Price?.Basis is { Length: > 0 } b ? " (" + b + ")" : "")</span>@RegisteredNote(cat, m.ModelId)
-                                                    <WorkloadRouteAction Connection="conn" ModelId="@m.ModelId" /></li>
+                                                <li><span class="mono wrap-any">@m.ModelId</span> <span class="subtle">· @Money.Price(m.Price?.InputPer1M, m.Price?.OutputPer1M)@(m.Price?.Basis is { Length: > 0 } b ? " (" + b + ")" : "")</span></li>
                                             }
                                         </ul>
+                                    </dd>
+                                    <dt>Health</dt>
+                                    <dd><span class="indicator"><span class="dot @health.Tone" aria-hidden="true"></span>@health.Summary</span></dd>
+                                    @foreach (var (label, value) in health.Details)
+                                    {
+                                        <dt>@label</dt><dd class="wrap-any">@value</dd>
                                     }
-                                </dd>
-                                @if (conn.SecretRef is { } sr)
+                                </dl>
+                                <span class="note">A probe shows the endpoint answered; only a governed call shows a model served. GET /v1/models is not a health check.</span>
+                                @if (conn.Endpoint is not { Length: > 0 })
                                 {
-                                    <dt>Credential</dt>
-                                    <dd><span class="mono">@sr</span> · @SecretText(sr, cat)</dd>
+                                    <span class="note">Test: provider default endpoints are not probed — run a governed Public request in the Playground.</span>
                                 }
-                                <dt>Used by</dt>
-                                <dd>@(routed.Count == 0 ? "No policy routes" : string.Join(", ", routed))</dd>
-                                <dt>Health</dt>
-                                <dd>
-                                    <span class="indicator"><span class="dot @health.Tone" aria-hidden="true"></span>@health.Summary</span>
-                                    <details class="tech">
-                                        <summary>Timestamps</summary>
-                                        <dl class="facts">
-                                            @foreach (var (label, value) in health.Details)
-                                            {
-                                                <dt>@label</dt><dd class="wrap-any">@value</dd>
-                                            }
-                                        </dl>
-                                        <span class="note">A probe shows the endpoint answered; only a governed call shows a model served. GET /v1/models is not a health check.</span>
-                                    </details>
-                                </dd>
-                            </dl>
-                            <div class="btn-row tight">
-                                <button type="button" class="btn sm" id="@("edit-" + conn.Id)" @onclick="() => EditConnection(conn)" disabled="@(!CanEdit)">Edit</button>
-                                @if (conn.Endpoint is { Length: > 0 })
-                                {
-                                    <button type="button" class="btn sm" @onclick="() => TestAsync(conn)" disabled="@_testing.Contains(conn.Id)" aria-busy="@(_testing.Contains(conn.Id) ? "true" : null)">
-                                        @(_testing.Contains(conn.Id) ? "Testing…" : "Test")
-                                    </button>
-                                }
-                                else
-                                {
-                                    <span class="secondary subtle">Test: provider default endpoints are not probed — run a governed Public request in the Playground.</span>
-                                }
-                                <button type="button" class="btn sm" @onclick="() => ToggleEnabled(conn)" disabled="@(!CanEdit)">@(conn.Enabled ? "Disable…" : "Enable…")</button>
-                            </div>
+                            </details>
                             @if (_testErrors.TryGetValue(conn.Id, out var terr))
                             {
                                 <span class="note bad" role="status">Test failed to run: @terr</span>
@@ -264,16 +280,28 @@
         return ConnectionHealth.Summarize(conn.Enabled, models, probe.Probe, probe.Probe is null ? null : probe.At, endpointHealth, DateTimeOffset.UtcNow);
     }
 
+    /// <summary>One-line price for the compact model row; the full basis is in Details and the row's tooltip.</summary>
+    private static string ShortPrice(decimal? input, decimal? output)
+        => input is null || output is null ? "unpriced"
+           : input == 0m && output == 0m ? "$0 provider charge"
+           : "in " + Money.Usd(input.Value) + " · out " + Money.Usd(output.Value) + " /1M";
+
     private static string RegisteredNote(CatalogConnectionDto? cat, string modelId)
     {
         var m = cat?.Models.FirstOrDefault(x => string.Equals(x.ModelId, modelId, StringComparison.Ordinal));
         return m is { Registered: false } ? " · no provider client (refused at the provider stage)" : "";
     }
 
-    private string SecretText(string secretRef, CatalogConnectionDto? cat)
+    private bool? SecretAvailable(string secretRef, CatalogConnectionDto? cat)
     {
         bool? available = cat?.SecretAvailable;
         if (available is null && Editor.Applied?.Secrets is { } map && map.TryGetValue(secretRef, out var s)) available = s.Available;
+        return available;
+    }
+
+    private string SecretText(string secretRef, CatalogConnectionDto? cat)
+    {
+        bool? available = SecretAvailable(secretRef, cat);
         return available switch
         {
             true => "available on the server (value never shown)",

@@ -156,6 +156,21 @@ public sealed record EditOutcome(EditOutcomeKind Kind, string Message, int? Vers
 
 /// <summary>Maps a config write's HTTP answer (status + body text) onto <see cref="EditOutcome"/>. Pure: the
 /// service hands it the raw response, so every branch is unit-tested. Success is ONLY a 2xx carrying a version.</summary>
+/// <summary>When the console's applied configuration must be re-read because the Host reports another active version
+/// (another tab, the API, a rollback). Pure, so the rule is unit-tested.</summary>
+public static class ConfigFreshness
+{
+    /// <summary>Reload when the live version is known and differs from the loaded one — at most once per live version
+    /// (<paramref name="lastReloadFor"/>), so a Host whose status and config disagree cannot cause a reload loop.</summary>
+    public static bool ShouldReload(int? liveVersion, int? appliedVersion, int? lastReloadFor)
+        => liveVersion is { } live && appliedVersion is { } applied && live != applied && lastReloadFor != live;
+
+    /// <summary>After a reload, a CLEAN draft based on an older version is dropped (it would only show stale values); a
+    /// dirty draft and a focused (scoped) dialog edit are kept — their saves are refused by the opened-at/If-Match checks.</summary>
+    public static bool DropCleanDraft(int? draftBaseVersion, int? appliedVersion, bool dirty, bool scoped)
+        => !dirty && !scoped && draftBaseVersion is { } b && appliedVersion is { } a && b != a;
+}
+
 public static class EditOutcomes
 {
     public static EditOutcome FromResponse(int status, string? body, bool rollback = false)
@@ -196,6 +211,10 @@ public static class EditOutcomes
                     "HTTP " + V(status) + (reason is null ? "" : ": " + reason) + " — nothing is assumed applied.");
         }
     }
+
+    /// <summary>A write that lost against a newer active version: the applied configuration must be reloaded before any new
+    /// edit starts (the stale edit itself is never rebased).</summary>
+    public static bool RequiresReload(EditOutcome o) => o.Kind == EditOutcomeKind.Stale;
 
     /// <summary>"Configuration changed since you started editing (now v8)."</summary>
     public static string StaleMessage(int? activeVersion)
@@ -274,7 +293,7 @@ public static class IssueHelp
         "endpoint_not_allow_listed" =>
             "The endpoint's host:port is not on the startup egress allow-list. Add it to Providers:ProbeAllowList in the Host's startup configuration and restart Covenant; the console cannot widen where Covenant may connect.",
         "boundary_not_approved" =>
-            "A Local connection's endpoint must be listed in Providers:LocalEndpoints (or the legacy Local:Endpoint) at startup; OpenAI and Anthropic connections are always Cloud. Add host:port there and restart.",
+            "A Local connection's endpoint must be listed in Providers:LocalEndpoints (or the legacy Local:Endpoint) at startup; OpenAI and Anthropic connections are always External (cloud). Add host:port there and restart.",
         "secret_unavailable" =>
             "The referenced secret is not set on the server. Set it in the Host's environment or vault (for Secrets:openai the environment variable is Secrets__openai) and restart; the console never sees or stores secret values.",
         "invalid_secret_ref" =>
@@ -282,7 +301,7 @@ public static class IssueHelp
         "cloud_in_local_only" =>
             "Local-only mode cannot execute cloud connections. Switch to Hybrid on the Policies page, or keep this connection disabled.",
         "sensitive_cloud_target" =>
-            "PII/PHI never route to cloud destinations. Remove the cloud target from this policy.",
+            "Raw PII/PHI never routes to external destinations. Remove the external target, or — for a PII-only route of a dedicated PII workload — turn on the sanitized structured-record route (ADR-0016).",
         "unpriced_paid_target_under_hard_budget" =>
             "A paid target needs input and output prices while a hard budget applies — an unknown price is never treated as $0.",
         "client_unbuildable" =>

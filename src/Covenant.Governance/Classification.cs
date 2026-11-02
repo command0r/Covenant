@@ -1,10 +1,11 @@
-using System.Text.RegularExpressions;
 using Covenant.Core;
 
 namespace Covenant.Governance;
 
-/// <summary>Classification plus WHAT triggered it (a rule name, never content) — the signal goes into evidence.</summary>
-public sealed record ClassificationResult(DataClassification Classification, string? Signal);
+/// <summary>Classification plus WHAT triggered it (a rule name, never content) — the signal goes into evidence.
+/// <paramref name="Incomplete"/> (ADR-0018): inspection could not complete (size, time/work bound, malformed input). The
+/// request must then be REFUSED — its classification is unknown, and no content may reach any provider or tool.</summary>
+public sealed record ClassificationResult(DataClassification Classification, string? Signal, bool Incomplete = false);
 
 /// <summary>Derives a data classification from request content. Implementations must fail closed (escalate when unsure).</summary>
 public interface IDataClassifier
@@ -12,25 +13,14 @@ public interface IDataClassifier
     ClassificationResult Classify(InferenceRequest request);
 }
 
-/// <summary>First-slice pattern classifier, deliberately conservative — NOT a real DLP; it makes the
-/// classification → policy seam real and testable. Swap behind <see cref="IDataClassifier"/> later.</summary>
-public sealed partial class RegexDataClassifier : IDataClassifier
+/// <summary>Compatibility name for the classifier the Host composes. Since ADR-0018 it IS the local, bounded, normalized,
+/// fail-closed inspector (<see cref="LocalSensitiveDataInspector"/>) — the first-slice hyphen-SSN / PHI-keyword rules are
+/// gone. Not comprehensive DLP: see <see cref="InspectionSignals.Coverage"/>.</summary>
+public sealed class RegexDataClassifier : IDataClassifier
 {
-    public ClassificationResult Classify(InferenceRequest request)
-    {
-        var text = string.Join('\n', request.Messages.Select(m => m.Content));
-        if (PhiPattern().IsMatch(text)) return new(DataClassification.Phi, "PHI keyword (MRN / diagnosis / patient id)");
-        if (PiiPattern().IsMatch(text)) return new(DataClassification.Pii, "US SSN pattern");
-        return new(DataClassification.Internal, null);
-    }
+    private readonly LocalSensitiveDataInspector _inspector = new();
 
-    // US SSN — illustrative only.
-    [GeneratedRegex(@"\b\d{3}-\d{2}-\d{4}\b", RegexOptions.Compiled)]
-    private static partial Regex PiiPattern();
-
-    // Naive PHI markers — illustrative only.
-    [GeneratedRegex(@"\b(MRN|diagnosis|patient\s+id)\b", RegexOptions.IgnoreCase | RegexOptions.Compiled)]
-    private static partial Regex PhiPattern();
+    public ClassificationResult Classify(InferenceRequest request) => _inspector.Classify(request);
 }
 
 /// <summary>Pipeline stage: classifies the request and records the result on the context.
@@ -43,6 +33,16 @@ public sealed class ClassifyStage(IDataClassifier classifier) : IPipelineStage
     public async Task InvokeAsync(InferenceContext ctx, PipelineDelegate next, CancellationToken ct)
     {
         var result = classifier.Classify(ctx.Request);
+        if (result.Incomplete)
+        {
+            // ADR-0018: unknown is not "PHI, send it to the local model" — nothing is sent anywhere. The classification stays
+            // the restrictive default and is reported as NOT evaluated; the signal names the reason, never content.
+            ctx.ClassificationSignal = result.Signal;
+            ctx.ClassificationEvaluated = false;
+            ctx.Deny("sensitive-data inspection could not complete (input too large or too complex) — refused; nothing was sent",
+                DenialKind.Governance, code: TraceReasons.InspectionIncomplete);
+            return;
+        }
         if (ctx.Configuration is null)
         {
             ctx.Classification = result.Classification;

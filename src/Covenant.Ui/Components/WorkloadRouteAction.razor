@@ -14,7 +14,7 @@ else
 {
     var current = Editor.Current;
     var preset = WorkloadRouteSetup.Presets.FirstOrDefault(p => p.ProfileId == _profile);
-    var plan = current is null || preset is null ? null : WorkloadRouteSetup.Plan(current, preset, Connection.Id, ModelId);
+    var plan = current is null || preset is null ? null : WorkloadRouteSetup.Plan(current, preset, Connection.Id, ModelId, _grants);
     <div class="workload-route" role="group" aria-label="@("Route a workload to " + ModelId)">
         <div class="field">
             <label for="@_id">Workload for <span class="mono">@ModelId</span></label>
@@ -27,9 +27,23 @@ else
             </select>
             @if (ComposerRules.BoundaryLabel(Connection.Boundary) == "Cloud")
             {
-                <span class="help">Cloud models serve Public workloads only.</span>
+                <span class="help">Here, external (cloud) models serve Public workloads only. A sanitized PII route is configured under Policies → Routes.</span>
             }
         </div>
+        @if (current is not null)
+        {
+            <fieldset class="inline-fieldset">
+                <legend class="field-label">Calling application that owns this workload (optional; nothing is granted unless chosen)</legend>
+                @foreach (var a in WorkloadRouteSetup.GrantCandidates(current))
+                {
+                    var appId = a.Id;
+                    <label class="switch">
+                        <input type="checkbox" checked="@_grants.Contains(appId)" @onchange="e => ToggleGrant(appId, e)" />
+                        @ProfileEditing.ApplicationName(a.Id, a.DisplayName) <span class="subtle">· team @a.Team</span>
+                    </label>
+                }
+            </fieldset>
+        }
         @if (plan is { Ok: false })
         {
             <span class="note warn" role="status">@plan.Problem</span>
@@ -59,10 +73,18 @@ else
 
     private bool CanEdit => Editor.Applied is not null && !Editor.Saving && (!Editor.Editing || Editor.Owner == "connections" || !Editor.IsDirty);
 
+    private readonly HashSet<string> _grants = new(StringComparer.Ordinal);
+
+    private void ToggleGrant(string appId, ChangeEventArgs e)
+    {
+        if (e.Value is bool b && b) _grants.Add(appId); else _grants.Remove(appId);
+    }
+
     private void Close()
     {
         _open = false;
         _profile = null;
+        _grants.Clear();
         _error = null;
     }
 
@@ -74,7 +96,7 @@ else
             _error = "Another page is editing the configuration — finish or discard that draft first.";
             return;
         }
-        var result = WorkloadRouteSetup.ApplyTo(draft, preset, Connection.Id, ModelId);
+        var result = WorkloadRouteSetup.ApplyTo(draft, preset, Connection.Id, ModelId, _grants);
         if (!result.Ok)
         {
             _error = result.Problem;

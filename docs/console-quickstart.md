@@ -14,9 +14,10 @@ The console needs only the **admin token**. The separate **application key** is 
 
 ## Run a request
 
-1. Open **Overview** or **Playground**.
-2. Select the application under **Run as** and its workload profile.
-3. Write a prompt and click **Run**. The answer appears on the same page.
+1. **Overview** shows totals, setup checks, activity and recent outcomes. Click **Open Playground** to run something.
+2. In **Playground**, choose **Send a request as** (the application; its team pays) and a workload.
+3. Pick one of the 2–3 **Recommended** examples for that application, or write a prompt. Diagnostic examples (cache, refusal, cloud research) are under **More examples**.
+4. Click **Run**. After a local result, **Compare with <model>** re-sends the same request to the approved external model as a second, paid request. That is your choice; Covenant does not judge which answer is better.
 
 Use an **Internal** profile for internal work. Use a **Public** profile for genuinely public content. Profiles establish the starting classification; detection can raise it. The current detector recognises specific patterns, not every possible secret or sensitive fact.
 
@@ -59,8 +60,9 @@ Adding a connection alone does not change routing. **Local-only** blocks cloud c
 ## Know what happened
 
 - **Playground trace:** the steps that actually ran, including search, refusal and provider attempts.
+- **Requests:** 25 rows per page by default (10/25/50/100); **Previous/Next** load more of the current history as needed. "Showing 1–25 of N loaded" counts only what is loaded, never the whole history. While you read an older page, new requests are announced (**Show newest**) instead of shifting rows. **Request history** appears only when earlier saved (archived) history exists; choosing it changes which records you browse and never deletes anything or resets spend.
 - **Requests → View:** one request's classification, route, attempts, cost and audit record.
-- **Budgets → Edit:** change caps and enforcement, preview, then apply. Local inference has no per-call provider charge; hardware and electricity are not included.
+- **Budgets:** Global covers every application. A team or application cap is an additional, smaller ceiling over the same charges; one charge counts against all applicable budgets and is never added up as separate spend. A very low hard cap is marked **Low spending cap** (its tooltip states the effect). **Edit** changes caps and enforcement (preview, then apply). Local inference has no per-call provider charge; hardware and electricity are not included.
 - **Audit & evidence:** verify the audit chain and export evidence. “Evidence recorded” means the record exists; chain verification checks its integrity.
 - **Pause new provider calls:** blocks new paid/external work through the pipeline. It does not erase history or reset budgets.
 

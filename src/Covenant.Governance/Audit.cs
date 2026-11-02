@@ -39,6 +39,22 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
             // Review round 2 (B2): the request-level basis describes the TOTAL — "reported" only when every charged
             // attempt is reported; one shared estimated basis stays that basis; differing bases are "mixed".
             if (ctx.Attempts.Count > 0 || ctx.ToolCalls.Count > 0) ctx.CostBasis = CostBases.Aggregate(ctx.Attempts, ctx.ToolCalls, ctx.CostBasis);
+            // ADR-0016: what the fingerprint/preview may describe. A built sanitized payload replaces the original prompt;
+            // a refused redaction (or any PII/PHI request) records no preview at all — pattern masking cannot remove
+            // unknown free-text identifiers — and a refused redaction records no fingerprint (a structured record's hash is
+            // guessable from a small value space).
+            // A workload reserved for sanitized records (ADR-0016) never records its raw input, whatever stage refused it.
+            bool sanitizedWorkload = ctx.Configuration is { } boundCfg && ctx.ProfileId is { } pid
+                && boundCfg.Config.Policies.Any(p => p.Enabled && p.Redaction is not null && p.Profiles.Contains(pid, StringComparer.Ordinal));
+            IReadOnlyList<ChatMessage>? evidenceMessages = ctx.Redaction switch
+            {
+                { Applied: true } applied => applied.Messages,
+                not null => null,
+                null when sanitizedWorkload => null,
+                null => ctx.Request.Messages,
+            };
+            bool previewAllowed = previewChars > 0 && evidenceMessages is not null
+                                  && (ctx.Redaction is { Applied: true } || ctx.Classification < DataClassification.Pii);
             var servedAttempt = ctx.ServedTarget is { } st
                 ? ctx.Attempts.LastOrDefault(a => a.Outcome == "served" && a.ConnectionId == st.AdapterKey && a.ModelId == st.ModelId)
                 : null;
@@ -56,12 +72,12 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 DurationMs: (_clock.GetUtcNow() - ctx.StartedUtc).TotalMilliseconds,
                 // Size + fingerprint, never content: the SHA-256 proves WHICH prompt this entry is
                 // about (holder of the text can verify), while the text itself stays in the data plane.
-                PromptChars: ctx.Request.Messages.Sum(m => m.Content.Length),
-                PromptSha256: Convert.ToHexString(SHA256.HashData(
-                    Encoding.UTF8.GetBytes(string.Join('\n', ctx.Request.Messages.Select(m => m.Content))))).ToLowerInvariant(),
+                PromptChars: (evidenceMessages ?? ctx.Request.Messages).Sum(m => m.Content.Length),
+                PromptSha256: evidenceMessages is null ? null : Convert.ToHexString(SHA256.HashData(
+                    Encoding.UTF8.GetBytes(string.Join('\n', evidenceMessages.Select(m => m.Content))))).ToLowerInvariant(),
                 Signal: ctx.ClassificationSignal,
-                PromptPreview: previewChars > 0
-                    ? Truncate(string.Join(" ⏎ ", ctx.Request.Messages.Select(m => m.Content)), previewChars)
+                PromptPreview: previewAllowed
+                    ? Truncate(string.Join(" ⏎ ", evidenceMessages!.Select(m => m.Content)), previewChars)
                     : null,
                 CacheHit: ctx.ServedFromCache,
                 SchemaVersion: 2,
@@ -95,7 +111,8 @@ public sealed class AuditStage(IAuditSink sink, TimeProvider? clock = null, int 
                 WebSearch: v3 ? ctx.WebSearch?.ToAudit() : null,
                 ToolCalls: v3 && ctx.ToolCalls.Count > 0 ? ctx.ToolCalls.Select(t => t.ToAudit()).ToList() : null,
                 PolicyId: v3 ? ctx.Policy?.PolicyId : null,
-                CacheOutcome: v3 ? ctx.CacheOutcome ?? CacheOutcomes.NotReached : null);
+                CacheOutcome: v3 ? ctx.CacheOutcome ?? CacheOutcomes.NotReached : null,
+                Redaction: v3 ? ctx.Redaction?.ToAudit() : null);
 
             // CancellationToken.None: a cancelled request must still produce its audit record.
             await sink.EnqueueAsync(entry, CancellationToken.None);

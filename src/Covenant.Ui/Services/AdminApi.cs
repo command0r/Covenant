@@ -32,8 +32,17 @@ public sealed class AdminApi(HttpClient http, AppState state)
     public Task<StatusReport> GetStatusAsync(CancellationToken ct = default)
         => GetAsync("/admin/status", UiJsonContext.Default.StatusReport, ct);
 
-    public Task<EvidenceReport> GetEvidenceAsync(CancellationToken ct = default)
-        => GetAsync("/admin/evidence", UiJsonContext.Default.EvidenceReport, ct);
+    /// <summary>GET /admin/evidence — the Host re-walks the hash chain (and anchors) on every call; no-cache makes sure the
+    /// browser never answers "Check audit integrity" from a cached earlier result.</summary>
+    public async Task<EvidenceReport> GetEvidenceAsync(CancellationToken ct = default)
+    {
+        using var request = NewRequest(HttpMethod.Get, "/admin/evidence");
+        request.Headers.CacheControl = new System.Net.Http.Headers.CacheControlHeaderValue { NoCache = true, NoStore = true };
+        using var response = await http.SendAsync(request, ct);
+        await EnsureSuccessAsync(response, ct);
+        return await response.Content.ReadFromJsonAsync(UiJsonContext.Default.EvidenceReport, ct)
+               ?? throw new ApiException(response.StatusCode, "Empty response from /admin/evidence");
+    }
 
     public Task<RequestsResponse> GetRequestsAsync(int limit = 200, CancellationToken ct = default)
         => GetAsync($"/admin/requests?limit={limit}", UiJsonContext.Default.RequestsResponse, ct);
@@ -123,6 +132,21 @@ public sealed class AdminApi(HttpClient http, AppState state)
     /// With <see cref="SimulateRequestDto.Config"/> set, the Host validates that candidate (422 when invalid).</summary>
     public Task<SimulateResponseDto> SimulateAsync(SimulateRequestDto body, CancellationToken ct = default)
         => PostAsync("/admin/policies/simulate", body, UiJsonContext.Default.SimulateRequestDto, UiJsonContext.Default.SimulateResponseDto, ct);
+
+    /// <summary>POST /admin/connections/discover-models (ADR-0017): lists what the server-side credential can see. Discovery
+    /// is not approval and not pricing; a failure is a normal answer (ok=false, bounded code), never thrown.</summary>
+    public Task<DiscoverModelsResponseDto> DiscoverModelsAsync(string kind, string secretRef, CancellationToken ct = default)
+        => PostAsync("/admin/connections/discover-models", new DiscoverModelsRequestDto { Kind = kind, SecretRef = secretRef },
+            UiJsonContext.Default.DiscoverModelsRequestDto, UiJsonContext.Default.DiscoverModelsResponseDto, ct);
+
+    /// <summary>GET /admin/usage — aggregation of recorded evidence for a window, grouped by team | application | profile.</summary>
+    public Task<UsageReportDto> GetUsageAsync(string window, string group, string? segment = null, CancellationToken ct = default)
+        => GetAsync("/admin/usage?window=" + Uri.EscapeDataString(window) + "&group=" + Uri.EscapeDataString(group)
+                    + (segment is null ? "" : "&segment=" + Uri.EscapeDataString(segment)), UiJsonContext.Default.UsageReportDto, ct);
+
+    /// <summary>GET /admin/redaction/schema (ADR-0016): the covenant.record.v1 fields and fixed tasks.</summary>
+    public Task<RecordSchemaDto> GetRedactionSchemaAsync(CancellationToken ct = default)
+        => GetAsync("/admin/redaction/schema", UiJsonContext.Default.RecordSchemaDto, ct);
 
     /// <summary>GET /admin/budgets/{id}/requests — settled contributions of the budget's scope in its current period.</summary>
     public Task<BudgetRequestsDto> GetBudgetRequestsAsync(string budgetId, int limit = 100, CancellationToken ct = default)

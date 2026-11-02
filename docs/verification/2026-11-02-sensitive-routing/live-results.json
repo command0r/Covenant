@@ -1,0 +1,194 @@
+[
+  {
+    "name": "hyphen-blocked",
+    "ok": true,
+    "id": "req_62d9d4927e6c4359b20b0a46d617523a",
+    "effect": "Deny",
+    "classification": "Pii",
+    "signal": "US SSN pattern",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Pii'"
+  },
+  {
+    "name": "compact-blocked",
+    "ok": true,
+    "id": "req_5f39b68c944343a7b63701bfee17a737",
+    "effect": "Deny",
+    "classification": "Pii",
+    "signal": "possible identifier (standalone 9-digit number)",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Pii'"
+  },
+  {
+    "name": "partial-blocked",
+    "ok": true,
+    "id": "req_586946e7c18f4e0bb0ef2f441e1e734e",
+    "effect": "Deny",
+    "classification": "Pii",
+    "signal": "US SSN (masked, partial or unseparated, with context)",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Pii'"
+  },
+  {
+    "name": "unicode-blocked",
+    "ok": true,
+    "id": "req_e85768840d054d09bc1c2ab663783d9b",
+    "effect": "Deny",
+    "classification": "Pii",
+    "signal": "US SSN pattern",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Pii'"
+  },
+  {
+    "name": "phi-blocked",
+    "ok": true,
+    "id": "req_8243331bd13f411da64e69f65012ee94",
+    "effect": "Deny",
+    "classification": "Phi",
+    "signal": "health information about an identifiable person",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Phi'"
+  },
+  {
+    "name": "json-blocked",
+    "ok": true,
+    "id": "req_948a22ebeddd4d289eb9dcdffc9c9d0b",
+    "effect": "Deny",
+    "classification": "Pii",
+    "signal": "labelled identifier field (SSN / taxpayer id)",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Pii'"
+  },
+  {
+    "name": "hyphen-local",
+    "ok": true,
+    "id": "req_0b148cf7faea43f399b68bed07761554",
+    "effect": "Allow",
+    "classification": "Pii",
+    "signal": "US SSN pattern",
+    "model": "qwen2.5-coder:7b",
+    "attempts": [
+      {
+        "AttemptId": "att_1",
+        "ConnectionId": "ollama",
+        "ModelId": "qwen2.5-coder:7b",
+        "Outcome": "served",
+        "ErrorClass": null,
+        "DurationMs": 1246.4788,
+        "CostUsd": 0.0,
+        "CostBasis": "zero_priced",
+        "ReservedUsd": 0.0,
+        "Overrun": false,
+        "EffectiveMaxOutputTokens": 64,
+        "Truncated": null
+      }
+    ],
+    "search": {
+      "Mode": "off",
+      "Triggered": false,
+      "Cue": null,
+      "Outcome": "skipped",
+      "ReasonCode": "search_off",
+      "SourceCount": null,
+      "SourceHosts": null,
+      "DurationMs": null
+    },
+    "reason": "allowed"
+  },
+  {
+    "name": "compact-local",
+    "ok": true,
+    "id": "req_d65cb9e609cc4e1e9edbb7f0ace199f7",
+    "effect": "Allow",
+    "classification": "Pii",
+    "signal": "possible identifier (standalone 9-digit number)",
+    "model": "qwen2.5-coder:7b",
+    "attempts": [
+      {
+        "AttemptId": "att_1",
+        "ConnectionId": "ollama",
+        "ModelId": "qwen2.5-coder:7b",
+        "Outcome": "served",
+        "ErrorClass": null,
+        "DurationMs": 1162.4582,
+        "CostUsd": 0.0,
+        "CostBasis": "zero_priced",
+        "ReservedUsd": 0.0,
+        "Overrun": false,
+        "EffectiveMaxOutputTokens": 64,
+        "Truncated": null
+      }
+    ],
+    "search": {
+      "Mode": "off",
+      "Triggered": false,
+      "Cue": null,
+      "Outcome": "skipped",
+      "ReasonCode": "search_off",
+      "SourceCount": null,
+      "SourceHosts": null,
+      "DurationMs": null
+    },
+    "reason": "allowed"
+  },
+  {
+    "name": "phi-local",
+    "ok": true,
+    "id": "req_d24a63b22f8e4c4cb304d2294dec2421",
+    "effect": "Allow",
+    "classification": "Phi",
+    "signal": "health information about an identifiable person",
+    "model": "qwen2.5-coder:7b",
+    "attempts": [
+      {
+        "AttemptId": "att_1",
+        "ConnectionId": "ollama",
+        "ModelId": "qwen2.5-coder:7b",
+        "Outcome": "served",
+        "ErrorClass": null,
+        "DurationMs": 4625.7171,
+        "CostUsd": 0.0,
+        "CostBasis": "zero_priced",
+        "ReservedUsd": 0.0,
+        "Overrun": false,
+        "EffectiveMaxOutputTokens": 64,
+        "Truncated": null
+      }
+    ],
+    "search": {
+      "Mode": "off",
+      "Triggered": false,
+      "Cue": null,
+      "Outcome": "skipped",
+      "ReasonCode": "search_off",
+      "SourceCount": null,
+      "SourceHosts": null,
+      "DurationMs": null
+    },
+    "reason": "allowed"
+  },
+  {
+    "name": "sensitive-search-blocked",
+    "ok": true,
+    "id": "req_5afa880a3f3b4c558b84b5d78891df3f",
+    "effect": "Deny",
+    "classification": "Pii",
+    "signal": "labelled identifier field (SSN / taxpayer id)",
+    "model": null,
+    "attempts": [],
+    "search": {},
+    "reason": "model 'anthropic/claude-sonnet-5-5' not permitted for classification 'Pii'"
+  }
+]

@@ -17,6 +17,10 @@
             <div class="drawer-body">
                 @ChildContent
             </div>
+            @if (Footer is not null)
+            {
+                <div class="drawer-footer">@Footer</div>
+            }
         </div>
     </div>
 }
@@ -30,6 +34,12 @@
     /// <summary>Element id to return focus to on close.</summary>
     [Parameter] public string? OpenerId { get; set; }
     [Parameter] public RenderFragment? ChildContent { get; set; }
+    /// <summary>Optional guard for Escape / scrim / Close: false keeps the panel open and raises <see cref="CloseBlocked"/>
+    /// (e.g. a dirty edit dialog asks "Discard changes?").</summary>
+    [Parameter] public Func<bool>? CanClose { get; set; }
+    [Parameter] public EventCallback CloseBlocked { get; set; }
+    /// <summary>Optional sticky footer (dialog actions), always visible below the scrolling body.</summary>
+    [Parameter] public RenderFragment? Footer { get; set; }
 
     private readonly string _id = "drawer-" + Guid.NewGuid().ToString("n")[..8];
     private bool _wasOpen;
@@ -56,6 +66,11 @@
     private async Task RequestClose()
     {
         if (!Open) return;
+        if (CanClose is not null && !CanClose())
+        {
+            await CloseBlocked.InvokeAsync();
+            return;
+        }
         Open = false;
         await OpenChanged.InvokeAsync(false);
     }
@@ -72,11 +87,17 @@
         catch (JSException) { /* page may be unloading */ }
     }
 
+    /// <summary>A dialog the parent removes from the tree (e.g. an entity EditDialog closed by clearing its state) is disposed
+    /// while open: release the focus trap AND return focus to the opener, exactly as a normal close does.</summary>
     public async ValueTask DisposeAsync()
     {
-        if (_wasOpen)
+        if (!_wasOpen) return;
+        _wasOpen = false;
+        try
         {
-            try { await Interop.ReleaseFocusAsync(_id); } catch (Exception) { /* disposing */ }
+            await Interop.ReleaseFocusAsync(_id);
+            if (OpenerId is not null) await Interop.FocusElementAsync(OpenerId);
         }
+        catch (Exception) { /* page may be unloading */ }
     }
 }

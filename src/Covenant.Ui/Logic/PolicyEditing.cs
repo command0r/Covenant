@@ -39,6 +39,30 @@ public static class PolicyEditing
     public static IReadOnlyList<TargetOption> TargetOptions(IEnumerable<string> classifications, CovenantConfigDto cfg)
         => PolicyRoutes.Options(new PolicyDto { Classifications = classifications.ToList() }, cfg);
 
+    /// <summary>Target options for an edited route, honouring its ADR-0016 sanitized contract (external models offered for a
+    /// PII-only, workload-scoped route only while the contract is on).</summary>
+    public static IReadOnlyList<TargetOption> TargetOptionsFor(PolicyDto route, CovenantConfigDto cfg)
+        => PolicyRoutes.Options(new PolicyDto { Classifications = route.Classifications.ToList(), Profiles = route.Profiles.ToList(), Redaction = route.Redaction }, cfg);
+
+    /// <summary>Turns the sanitized contract on (all identifier types, two tasks) or off. Off also removes external targets'
+    /// eligibility (the save is refused until they are replaced — never silently dropped).</summary>
+    public static void SetSanitized(PolicyDto route, bool on)
+        => route.Redaction = on ? route.Redaction ?? new RedactionPolicyDto { Types = ["email", "phone", "us_ssn"], Tasks = ["triage_case", "reply_outline"] } : null;
+
+    /// <summary>Problems with the sanitized contract in the dialog (the Host validation stays authoritative).</summary>
+    public static string? SanitizedProblem(PolicyDto route, CovenantConfigDto cfg)
+    {
+        if (route.Redaction is not { } red) return null;
+        if (route.Classifications.Count != 1 || !string.Equals(route.Classifications[0], "Pii", StringComparison.OrdinalIgnoreCase))
+            return "A sanitized route must match exactly the PII classification (never PHI).";
+        if (route.Profiles.Count == 0) return "Choose the dedicated workload(s) — a sanitized route is never a global PII rule.";
+        if (route.Profiles.Select(id => cfg.Profiles.FirstOrDefault(p => p.Id == id)).FirstOrDefault(p => p is not null && !string.Equals(p.Baseline, "Pii", StringComparison.OrdinalIgnoreCase)) is { } wrong)
+            return "Workload " + (wrong.Name ?? wrong.Id) + " must have baseline PII to be used by a sanitized route.";
+        if (!red.Types.Contains("us_ssn")) return "Identifier types must include US SSN (the detector flags it).";
+        if (red.Tasks.Count == 0) return "Choose at least one allowed task.";
+        return null;
+    }
+
     /// <summary>Every reason the form cannot be added to the draft (empty = ready).</summary>
     public static IReadOnlyList<string> Problems(NewPolicyForm f, CovenantConfigDto cfg)
     {

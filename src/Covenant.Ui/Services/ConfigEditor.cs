@@ -36,6 +36,18 @@ public sealed class ConfigEditor : IDisposable
         _catalog = catalog;
         _session = session;
         _state.Disconnected += Clear;
+        _state.Changed += OnStateChanged;
+    }
+
+    private int? _reloadedForLive;
+
+    /// <summary>The status feed reports the Host's active version: when it differs from the loaded one (an API save,
+    /// another tab, a rollback), re-read it so open pages never keep showing — or start editing from — a stale version.</summary>
+    private void OnStateChanged()
+    {
+        if (!_state.Connected || Loading || Applied is null) return;
+        if (ConfigFreshness.ShouldReload(_state.LastStatus?.ConfigVersion, Applied.Version, _reloadedForLive))
+            _ = EnsureLoadedAsync();
     }
 
     public event Action? Changed;
@@ -96,7 +108,11 @@ public sealed class ConfigEditor : IDisposable
     {
         if (!_state.Connected) return Task.CompletedTask;
         if (_loading is { IsCompleted: false } running) return running;
-        if (!force && Applied is not null) return Task.CompletedTask;
+        // Not forced: still reload when the Host's known live version differs from the loaded one, so a page opened
+        // after an external change never silently uses the stale applied configuration (once per live version).
+        int? live = _state.LastStatus?.ConfigVersion;
+        if (!force && Applied is not null && !ConfigFreshness.ShouldReload(live, Applied.Version, _reloadedForLive)) return Task.CompletedTask;
+        if (!force && live is not null) _reloadedForLive = live;
         _loading = LoadAsync();
         return _loading;
     }
@@ -107,6 +123,14 @@ public sealed class ConfigEditor : IDisposable
         {
             var env = await _api.GetConfigAsync();
             Applied = env;
+            // Dirty drafts and focused dialog edits keep their base (their saves are refused by the opened-at/If-Match
+            // checks); a clean draft of an older version is dropped so the page shows the new applied configuration.
+            if (Session is { } d && ConfigFreshness.DropCleanDraft(d.BaseVersion, env.Version, d.IsDirty, _scoped))
+            {
+                Session = null;
+                Owner = null;
+                ResetResults();
+            }
             LoadError = null;
             EndpointMissing = false;
             LoadedUtc = DateTimeOffset.UtcNow;
@@ -126,6 +150,8 @@ public sealed class ConfigEditor : IDisposable
         }
         finally
         {
+            // A transient failure must not suppress retries for this active version.
+            if (LoadError is not null) _reloadedForLive = null;
             Notify();
         }
     }
@@ -157,6 +183,7 @@ public sealed class ConfigEditor : IDisposable
     {
         Session = null;
         Owner = null;
+        _scoped = false;
         ResetResults();
         Notify();
     }
@@ -257,6 +284,67 @@ public sealed class ConfigEditor : IDisposable
         Saving = false;
         Notify();
         return outcome;
+    }
+
+    /// <summary>A FOCUSED edit (entity dialog): starts a fresh draft from the applied version, applies ONLY
+    /// <paramref name="change"/>, previews it (POST validate) and saves it (PUT with If-Match). Refused when another
+    /// unsaved draft exists — a focused edit never saves unrelated changes. On a validation error or conflict the draft
+    /// is kept so the dialog can show the issues; the dialog's Cancel calls <see cref="DiscardIfOwner"/>.</summary>
+    /// <param name="change">Mutates the fresh draft; returns a problem (nothing saved, draft discarded) or null.</param>
+    /// <param name="openedAtVersion">Active version when the dialog opened; a save onto any other version is refused as stale
+    /// (the Host's If-Match then also guards the PUT itself).</param>
+    public async Task<EditOutcome> ApplyScopedAsync(string owner, int? openedAtVersion, Func<CovenantConfigDto, string?> change, string summary)
+    {
+        if (Applied?.Config is null) return new EditOutcome(EditOutcomeKind.Failed, "The configuration is not loaded yet.");
+        if (EntityEdits.StaleCheck(openedAtVersion, Applied.Version) is { } stale)
+            return await AfterScopedConflictAsync(new EditOutcome(EditOutcomeKind.Stale, stale, Applied.Version));
+        if (Session is { IsDirty: true } && !(Owner == owner && _scoped))
+            return new EditOutcome(EditOutcomeKind.Failed,
+                "Another unsaved draft exists" + (Owner is null ? "" : " (" + Owner + ")") + ". Save or discard it first — this dialog never saves unrelated changes.");
+        Discard();
+        if (!BeginEdit(owner) || Session is not { } s) return new EditOutcome(EditOutcomeKind.Failed, "Could not start editing.");
+        _scoped = true;
+        if (change(s.Draft) is { } problem)
+        {
+            Discard();
+            return new EditOutcome(EditOutcomeKind.Failed, problem);
+        }
+        if (!s.IsDirty)
+        {
+            Discard();
+            return new EditOutcome(EditOutcomeKind.Failed, "Nothing changed — there is nothing to save.");
+        }
+        Touch();
+        var valid = await ValidateAsync();
+        if (Conflict is { } c) return await AfterScopedConflictAsync(new EditOutcome(EditOutcomeKind.Stale, c.Message, c.ActiveVersion));
+        if (!valid)
+            return new EditOutcome(EditOutcomeKind.Invalid,
+                ValidationError ?? "The Host rejected this change. Nothing was applied; the active version is unchanged.",
+                Validation?.ActiveVersion, Validation?.Errors, Validation?.Warnings);
+        var outcome = await SaveAsync(summary);
+        if (outcome.Succeeded) _scoped = false;
+        if (EditOutcomes.RequiresReload(outcome)) return await AfterScopedConflictAsync(outcome);
+        return outcome;
+    }
+
+    /// <summary>A focused edit hit a newer active version (validation's stale_base_version warning, PUT 412, or the
+    /// opened-at check): drop the scoped draft built on the old version and reload the APPLIED configuration, so Cancel →
+    /// reopen starts from the current version. The dialog's own working copy is untouched (never rebased), and its Save
+    /// stays refused because it was opened on the older version.</summary>
+    private async Task<EditOutcome> AfterScopedConflictAsync(EditOutcome stale)
+    {
+        if (_scoped) Discard();
+        await EnsureLoadedAsync(force: true);
+        var now = Applied?.Version;
+        return now is { } v && stale.Version != v ? stale with { Version = v } : stale;
+    }
+
+    private bool _scoped;
+
+    /// <summary>Drops a draft left by a focused edit of <paramref name="owner"/> (dialog Cancel after a failed save).</summary>
+    public void DiscardIfOwner(string owner)
+    {
+        if (Owner == owner && _scoped) { _scoped = false; Discard(); }
     }
 
     private async Task AfterActivationAsync(int version, bool rollback)
@@ -379,6 +467,7 @@ public sealed class ConfigEditor : IDisposable
 
     private void Clear()
     {
+        _reloadedForLive = null;
         Applied = null;
         LoadError = null;
         EndpointMissing = false;
@@ -395,5 +484,9 @@ public sealed class ConfigEditor : IDisposable
 
     private void Notify() => Changed?.Invoke();
 
-    public void Dispose() => _state.Disconnected -= Clear;
+    public void Dispose()
+    {
+        _state.Disconnected -= Clear;
+        _state.Changed -= OnStateChanged;
+    }
 }

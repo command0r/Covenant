@@ -4,7 +4,7 @@ Scope: how Covenant is tested. The governance layer is the product; test it hard
 
 ## Priority (highest first)
 1. **Governance unit tests** — policy decisions, classification routing, attribution math, budget enforcement. Deterministic, no live model calls (mock adapters at the contract boundary).
-2. **Fail-closed tests (mandatory)** — no policy match → deny; budget exceeded → block/fallback per config; PII/PHI → never routed to a public provider; misconfig → refuse to start.
+2. **Fail-closed tests (mandatory)** — no policy match → deny; budget exceeded → block/fallback per config; raw PII/PHI → never routed to a public provider (the only exception is the ADR-0016 sanitized structured-record payload, PII only, profile-scoped; prove raw values never leave); misconfig → refuse to start.
 3. **Adapter contract tests** — canonical ↔ provider round-trips, SSE streaming, error mapping, usage accounting, per provider.
 4. **Audit tests** — every request yields a complete, ordered, tamper-evident entry; tampering is detectable.
 5. **Pipeline integration** — end-to-end happy path plus the full P0 demo flow.

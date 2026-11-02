@@ -1,0 +1,49 @@
+@inject PlaygroundState Pg
+
+@* ADR-0016 preview: the exact payload that WOULD leave (placeholders only), what was replaced, the supported fields and the
+   fixed tasks — or the specific, actionable refusal. A preview is never authorization: the Host re-validates at Run. *@
+<section class="sanitized @(Redaction.Outcome == "applied" ? "applied" : "refused")" aria-label="Sanitized payload preview">
+    @if (Redaction.Outcome == "applied")
+    {
+        <strong><Icon Name="shield" Size="16" /> Sanitized payload — this is all that leaves</strong>
+        <span class="secondary">
+            @(string.Join(" · ", Redaction.Counts.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Value + " " + kv.Key + " replaced")))
+            · classification stays <strong>Sensitive · PII</strong>
+        </span>
+        <ol class="sanitized-messages">
+            @foreach (var m in Redaction.Messages)
+            {
+                <li><span class="subtle mono">@(m.Role?.ToLowerInvariant())</span><pre class="mono">@m.Content</pre></li>
+            }
+        </ol>
+        <label class="switch">
+            <input type="checkbox" checked="@Pg.SanitizedConfirmed" @onchange="e => Pg.ConfirmSanitized(e.Value is true)" disabled="@Pg.Running" />
+            I reviewed this payload; send it to the approved external model.
+        </label>
+    }
+    else
+    {
+        <strong><Icon Name="cross" Size="16" /> @SanitizedRoute.RefusalTitle(Redaction.ReasonCode)</strong>
+        <span>@Redaction.Reason</span>
+        <span class="secondary">Nothing would leave. You can still Run to record the refusal; fix the record to use the sanitized route.</span>
+    }
+    @if (Redaction.Schema is { } schema)
+    {
+        <details class="tech">
+            <summary>Supported fields and tasks (@schema.Id)</summary>
+            <ul class="plain-list secondary">
+                @foreach (var f in schema.Fields)
+                {
+                    <li><span class="mono">@f.Name</span> — @(f.Kind == "identifier" ? "identifier, replaced by a placeholder" : f.Allowed is { } al ? "one of " + string.Join(", ", al) : f.Range)</li>
+                }
+            </ul>
+            <span class="secondary">Tasks: @string.Join(", ", (schema.PolicyTasks ?? schema.Tasks.Select(t => t.Id ?? "").ToList()))</span>
+            <span class="help">Example (synthetic): <code class="wrap-any">@schema.Example</code></span>
+            <span class="help">@(schema.Limits ?? SanitizedRoute.Limits)</span>
+        </details>
+    }
+</section>
+
+@code {
+    [Parameter, EditorRequired] public SimulatedRedactionDto Redaction { get; set; } = default!;
+}
