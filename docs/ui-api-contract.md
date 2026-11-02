@@ -112,6 +112,7 @@ Properties are snake_case. Enum values are always written as:
 | `strategy` | RoutingStrategy | `"fixed"`, `"length-heuristic"` |
 | `period` | BudgetPeriod | `"none"`, `"daily"`, `"monthly"` |
 | `enforcement` | BudgetEnforcement | `"hard"`, `"warn-only"` |
+| `sensitive_data_action` | SensitiveDataAction | `"route"` (default; absent ⇒ route), `"reject"` (ADR-0019) |
 | `kind` | ProviderKind | `"Ollama"`, `"OpenAiCompatible"`, `"OpenAi"`, `"Anthropic"` (C# names) |
 | `boundary` | Boundary | `"Local"`, `"Cloud"` (C# names) |
 | `classifications[]`, `baseline` | DataClassification | `"Public"`, `"Internal"`, `"Pii"`, `"Phi"` (C# names) |
@@ -319,6 +320,11 @@ model-invoked tool. `/v1` is unchanged (always `web_search` off).
   "timeout_seconds":1–30 (default 10), "price_per_credit_usd":decimal|null, "price_basis"?:string ≤ 200,
   "price_effective_date"?:"yyyy-MM-dd" }`. The console must round-trip it on every save.
 - `profiles[].web_search_allowed`: bool, default false. Only a **Public**-baseline profile may carry it.
+- `profiles[].sensitive_data_action` (ADR-0019): `"route"` (default) | `"reject"`. With `reject`, a request that detection
+  raises to PII/PHI is refused at the classify stage (reason code `sensitive_data_rejected`) — before policy, cache,
+  search and provider. Valid only on a Public/Internal baseline (`sensitive_action_requires_non_sensitive_baseline`).
+  The console must round-trip it on every save. `POST /admin/policies/simulate` then answers `decision: "refuse"`,
+  `refused_at_stage: "classify"` and `suggested_profiles` (granted workloads whose policy would route it).
 - Validation codes: `search_profile_not_public` (`profiles[i].web_search_allowed`), `invalid_setting`
   (`web_search.max_results|timeout_seconds|price_per_credit_usd|price_basis`); when enabled: `search_requires_hybrid`,
   `search_unpriced` (unknown price is not $0), `secret_unavailable` (`Tavily:ApiKey` not set),

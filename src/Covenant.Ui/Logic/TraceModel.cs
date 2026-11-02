@@ -100,6 +100,8 @@ public static class TraceModel
         ("cache", TraceStepState.Passed, "cache_miss") => "Miss",
         ("cache", TraceStepState.Skipped, "cache_disabled") => "Off",
         ("cache", TraceStepState.Skipped, "web_search_bypass") => "Bypassed",
+        ("classify", TraceStepState.Refused, "sensitive_data_rejected") => "Rejected",
+        ("classify", TraceStepState.Refused, "inspection_incomplete") => "Not inspected",
         ("search", TraceStepState.Skipped, "search_off") => "Off",
         ("search", TraceStepState.Skipped, "search_not_triggered") => "Not needed",
         ("attribution", TraceStepState.Skipped, _) => "No usage",
@@ -110,6 +112,8 @@ public static class TraceModel
     /// <summary>A sentence for the popover when the step's state alone would mislead.</summary>
     public static string? OutcomeNote(TraceStepView s) => (s.Stage, s.State, s.ReasonCode) switch
     {
+        ("classify", TraceStepState.Refused, "sensitive_data_rejected") => "Sensitive data was detected and this workload rejects it (ADR-0019): refused before routing, cache, web search and any model. Nothing was sent.",
+        ("classify", TraceStepState.Refused, "inspection_incomplete") => "Inspection could not complete within its bounds: refused, classification not evaluated. Nothing was sent.",
         ("attribution", TraceStepState.Skipped, _) => "No provider answer to price. The request is still recorded with its application, team and workload; any reservation was released or settled by the budget stage.",
         ("cache", TraceStepState.Skipped, "cache_disabled") => "The exact cache is disabled (TTL 0): no lookup was made.",
         ("cache", TraceStepState.Passed, "cache_miss") => "Looked up; no identical recent request — continued to the provider.",

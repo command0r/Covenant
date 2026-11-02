@@ -270,6 +270,17 @@ public static class ConfigAdminApi
             return Refuse("sensitive-data inspection could not complete (input too large or too complex): the request would be refused; nothing would be sent",
                 resolved.ProfileId, resolved.Baseline);
         var final = ClassificationRules.Combine(resolved.Baseline, detected);
+        // ADR-0019: the same rule and reason as the classify stage — refused before policy; no route is evaluated or shown.
+        if (SensitiveDataRules.Rejects(cfg, resolved.ProfileId, final))
+            return new SimulateResponse
+            {
+                DryRun = true, ConfigVersion = cfg.Version, ApplicationId = app.Id, Profile = resolved.ProfileId,
+                Classification = final.ToString(), Baseline = resolved.Baseline.ToString(), DetectedSignal = detected.Signal,
+                Eligible = [], Decision = "refuse", Fallbacks = [],
+                Reason = SensitiveDataRules.Explain(cfg, app, resolved.ProfileId!, final, detected.Signal),
+                RefusedAtStage = "classify",
+                SuggestedProfiles = SensitiveDataRules.Suggestions(cfg, app, resolved.ProfileId, final).ToList(),
+            };
         var outcome = PolicyEngineV2.Evaluate(cfg, final, resolved.ProfileId, body.Model, messages);
 
         var eligible = new List<SimulatedTarget>();

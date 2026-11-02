@@ -75,12 +75,19 @@ public static class RouteSchemes
         if (activeVersion is { } v && r.ConfigVersion is { } pv && pv != v)
             return new("expected", "stale", "The configuration changed (v" + pv + " → v" + v + ") — preview again.", sender, CovenantPending, DestinationUnknown, searchBadge);
 
+        // ADR-0019: the workload rejects detected sensitive data — refused at Classify, before policy; nothing would run
+        // (no search either, so no search badge).
+        bool rejected = string.Equals(r.RefusedAtStage, "classify", StringComparison.Ordinal);
         var covenant = new SchemeBox("Covenant",
             ClassLine(r.Classification, r.Baseline, r.DetectedSignal, evaluated: r.Classification != "Not evaluated"),
-            Join(r.PolicyId is { } pid ? "policy " + pid : null, r.Redaction is { Outcome: "applied" } ? "builds a sanitized structured payload" : null),
+            rejected ? "rejected at Classify: this workload does not accept detected sensitive data"
+                : Join(r.PolicyId is { } pid ? "policy " + pid : null, r.Redaction is { Outcome: "applied" } ? "builds a sanitized structured payload" : null),
             r.DetectedSignal is not null ? "blocked" : "neutral", "policies");
 
         SchemeBox destination;
+        if (rejected)
+            return new("expected", "ready", "Server dry run on configuration v" + (r.ConfigVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "?") + " — runtime checks still apply.",
+                sender, covenant, new("Destination", "Rejected — nothing would be sent", r.Reason, "blocked", "cross"), []);
         if (!string.Equals(r.Decision, "route", StringComparison.Ordinal))
             destination = new("Destination", "Blocked — would not be contacted", r.Reason, "blocked", "cross");
         else if (r.Redaction is { Outcome: "refused" } red)
@@ -162,7 +169,10 @@ public static class RouteSchemes
             destination = new("Destination", "Provider failed — no answer", Join(contacted, r.Reason), "blocked", "cross");
         else
             destination = new("Destination", "Blocked — model not contacted", Join(
-                r.StoppedAtStage is { Length: > 0 } st ? "refused at " + TraceModel.Label(st) : null,
+                // ADR-0019: evaluated, sensitive, stopped at Classify = the workload rejected the detected sensitive data.
+                evaluated && r.StoppedAtStage == "classify" && PolicyText.IsSensitive(r.Classification)
+                    ? "rejected at Classify: this workload does not accept detected sensitive data"
+                    : r.StoppedAtStage is { Length: > 0 } st ? "refused at " + TraceModel.Label(st) : null,
                 searches.Count > 0 ? "a web search was made before the refusal" : null), "blocked", "cross");
 
         return new("actual", "ready", "From this run's audit record" + (r.ConfigVersion is { } v ? " (configuration v" + v + ")" : "") + ".",

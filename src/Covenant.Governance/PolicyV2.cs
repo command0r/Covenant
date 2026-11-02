@@ -95,6 +95,11 @@ public static class PolicyEngineV2
             && cfg.Config.Policies.Any(p => p.Enabled && p.Redaction is not null && p.Profiles.Contains(profileId, StringComparer.Ordinal)))
             return PolicyOutcome.Deny($"workload profile '{Evidence.Bounded(profileId)}' is reserved for sanitized structured records and must have a PII baseline");
 
+        // ADR-0019 (defence in depth; the classify stage refuses first): a workload that rejects detected sensitive data
+        // never has PII/PHI routed — also what impact previews and route summaries show for it.
+        if (SensitiveDataRules.Rejects(cfg, profileId, classification))
+            return PolicyOutcome.Deny($"workload '{Evidence.Bounded(profileId!)}' rejects detected sensitive data ({classification}): refused, nothing is sent");
+
         var matches = Match(cfg.Config, classification, profileId);
         if (matches.Count == 0)
             return PolicyOutcome.Deny($"no permitted route for classification '{classification}'");

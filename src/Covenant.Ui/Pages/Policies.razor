@@ -171,7 +171,7 @@
                             <li class="entity-row simple">
                                 <div class="entity-main">
                                     <strong class="wrap-any"><Icon Name="@ComposerRules.WorkloadIcon(wl)" Size="16" /> @(wl.Name ?? wl.Id)</strong>
-                                    <span class="secondary subtle"><span class="mono">@wl.Id</span> · baseline @PolicyText.ClassificationLabel(wl.Baseline)@(wl.WebSearchAllowed ? " · web search allowed" : "") · used by @(usage.GrantedTo.Count == 0 ? "no application" : string.Join(", ", usage.GrantedTo))</span>
+                                    <span class="secondary subtle"><span class="mono">@wl.Id</span> · baseline @PolicyText.ClassificationLabel(wl.Baseline)@(wl.WebSearchAllowed ? " · web search allowed" : "")@(ProfileEditing.RejectsSensitive(wl) ? " · rejects detected sensitive data" : "") · used by @(usage.GrantedTo.Count == 0 ? "no application" : string.Join(", ", usage.GrantedTo))</span>
                                 </div>
                                 <span class="entity-state">
                                     @{ var dest = WorkloadDestination.For(cfg, wl); }
@@ -418,6 +418,18 @@
                             <input type="checkbox" checked="@wp.WebSearchAllowed" disabled="@(!string.Equals(wp.Baseline, "Public", StringComparison.Ordinal) && !wp.WebSearchAllowed)" @onchange="@(e => wp.WebSearchAllowed = e.Value is bool b && b)" />
                             Allow web search (Public workloads only)
                         </label>
+                        @* ADR-0019: server-side, versioned; the gateway enforces it for every caller (console and API). *@
+                        <div class="field">
+                            <label for="wd-sens">When sensitive data is detected</label>
+                            @{ var sensDisabled = PolicyText.IsSensitive(wp.Baseline); }
+                            <select id="wd-sens" class="input" value="@(ProfileEditing.RejectsSensitive(wp) ? ProfileEditing.ActionReject : ProfileEditing.ActionRoute)"
+                                    disabled="@sensDisabled" aria-describedby="wd-sens-h"
+                                    @onchange="@(e => ProfileEditing.SetSensitiveAction(wp, e.Value?.ToString()))">
+                                <option value="@ProfileEditing.ActionRoute">Route by policy (PII/PHI stay local)</option>
+                                <option value="@ProfileEditing.ActionReject">Reject the request</option>
+                            </select>
+                            <span id="wd-sens-h" class="help">@(sensDisabled ? "A PII/PHI workload is sensitive by declaration; its requests are always routed by the sensitive-data policy." : ProfileEditing.SensitiveActionExplained)</span>
+                        </div>
                     </div>
                     @if (!we.IsNew)
                     {
@@ -711,6 +723,7 @@
         if (e.IsNew && !ConnectionRules.IsValidId(w.Id)) p.Add("Enter a workload id (letters, digits, '.', '_' or '-').");
         if (string.IsNullOrWhiteSpace(w.Name)) p.Add("Enter a name.");
         if (w.WebSearchAllowed && !string.Equals(w.Baseline, "Public", StringComparison.Ordinal)) p.Add("Only a Public workload may use web search.");
+        if (ProfileEditing.RejectsSensitive(w) && PolicyText.IsSensitive(w.Baseline)) p.Add("Only a Public or Internal workload can reject detected sensitive data.");
         return p;
     }
 
@@ -732,6 +745,8 @@
         if (!ProfileEditing.IsBaseline(baseline)) return;
         w.Baseline = baseline;
         if (!string.Equals(baseline, "Public", StringComparison.Ordinal)) w.WebSearchAllowed = false;
+        // ADR-0019: a PII/PHI workload cannot reject "detected" sensitive data — back to the default.
+        if (PolicyText.IsSensitive(baseline) && ProfileEditing.RejectsSensitive(w)) w.SensitiveDataAction = ProfileEditing.ActionRoute;
     }
 
     /// <summary>Primary/fallback from the selectors; an empty primary is reported by RouteProblem (Save stays disabled).</summary>

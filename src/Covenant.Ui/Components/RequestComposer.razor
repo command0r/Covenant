@@ -82,6 +82,7 @@
                         <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="ResetToPolicy">Let policy choose</button>
                     </div>
                 }
+                @* ADR-0019: the rejection sentence (and never the old "stricter (local) rule" copy) comes from WorkloadDestination.Note. *@
                 @if (dest.Note is { } dn)
                 {
                     <span class="help">@(dn + (dest.Href is null ? "" : " "))@if (dest.Href is { } nh) { <a href="@nh">@dest.HrefLabel</a> }</span>

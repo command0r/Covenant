@@ -127,6 +127,9 @@ public sealed class WorkloadProfileDto
     [JsonPropertyName("description")] public string? Description { get; set; }
     /// <summary>ADR-0015: this profile may use web search. Only a Public-baseline profile may carry it.</summary>
     [JsonPropertyName("web_search_allowed")] public bool WebSearchAllowed { get; set; }
+    /// <summary>ADR-0019: "route" | "reject" — what happens when detection raises a request under this workload to PII/PHI.
+    /// Null (older Host) = "route". Kept as received on save so the console never drops it.</summary>
+    [JsonPropertyName("sensitive_data_action")] public string? SensitiveDataAction { get; set; }
 }
 
 public sealed class PolicyDto
@@ -450,6 +453,10 @@ public sealed class SimulateResponseDto
     [JsonPropertyName("explanation")] public string? Explanation { get; set; }
     /// <summary>ADR-0016: the sanitized payload that WOULD be sent, or why it is refused. Never authorization.</summary>
     [JsonPropertyName("redaction")] public SimulatedRedactionDto? Redaction { get; set; }
+    /// <summary>ADR-0019: "classify" when the workload rejects the detected sensitive data (refused before policy); else null.</summary>
+    [JsonPropertyName("refused_at_stage")] public string? RefusedAtStage { get; set; }
+    /// <summary>ADR-0019: granted workloads under which the Host's policy engine WOULD route this request's classification.</summary>
+    [JsonPropertyName("suggested_profiles")] public List<string>? SuggestedProfiles { get; set; }
 }
 
 public sealed class SimulatedRedactionDto

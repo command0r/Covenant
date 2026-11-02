@@ -44,6 +44,9 @@ public static class JourneyChips
             chips.Add(new("Provider unavailable", "refused", "cross", r.Reason));
         else if (r.DenialKind == "Cancelled")
             chips.Add(new("Cancelled", "refused", "cross", r.Reason));
+        else if (sensitive && r.StoppedAtStage == "classify")
+            // ADR-0019: the workload rejects detected sensitive data — refused before routing; a governance decision, not an outage.
+            chips.Add(new("Rejected · this workload does not accept sensitive data", "sensitive", "cross", r.Reason));
         else if (sensitive && r.StoppedAtStage is "policy" or "redact")
             chips.Add(new("Blocked · sensitive data cannot go external", "sensitive", "cross", r.Reason));
         else

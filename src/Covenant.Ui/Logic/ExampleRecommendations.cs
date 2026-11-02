@@ -26,12 +26,20 @@ public static partial class ExampleRecommendations
         "budget-refusal",
     ];
 
+    /// <summary>ADR-0019 demonstration pair: the same sensitive prompt served locally on an Internal workload and rejected on a
+    /// Public one. Recommended together — never one without the other — when the application's configuration shows BOTH (an
+    /// Internal workload approved for sensitive data and a Public workload that rejects it).</summary>
+    public static readonly IReadOnlyList<string> SensitivePair = ["sensitive-local", "sensitive-public-rejected"];
+
     public static ExampleGroups Split(IReadOnlyList<ExampleResolution> relevant)
     {
-        var recommended = relevant
-            .Where(r => Primary.Contains(r.Example.Id))
-            .OrderBy(r => IndexOf(r.Example.Id))
-            .Take(Max)
+        var pair = SensitivePair.Select(id => relevant.FirstOrDefault(r => r.Example.Id == id)).ToList();
+        bool showPair = pair.All(r => r is not null);
+        var recommended = (showPair ? pair.Select(r => r!) : Enumerable.Empty<ExampleResolution>())
+            .Concat(relevant
+                .Where(r => Primary.Contains(r.Example.Id))
+                .OrderBy(r => IndexOf(r.Example.Id))
+                .Take(Max - (showPair ? SensitivePair.Count : 0)))
             .ToList();
         if (recommended.Count == 0) recommended = relevant.Take(2).ToList();   // no task-specific fit: the first generic ones
         var more = relevant.Where(r => !recommended.Contains(r)).ToList();
@@ -43,6 +51,21 @@ public static partial class ExampleRecommendations
         for (int i = 0; i < Primary.Count; i++) if (Primary[i] == id) return i;
         return int.MaxValue;
     }
+}
+
+/// <summary>The example selector's value (pure; ExamplePicker). The operator's pick wins while it still describes the form; the
+/// form's own example label (set by "Use example", or by a twin relabel after a workload switch — DemoExamples.AfterWorkloadChange)
+/// is shown otherwise. The select, the "Fill again"/"Use example" button and the summary therefore always name the SAME example
+/// (browser review: a relabelled twin showed the placeholder while its buttons stayed).</summary>
+public static class ExampleSelection
+{
+    /// <summary>Value the selector shows (null = the placeholder).</summary>
+    public static string? Shown(string? picked, string? formExampleId) => picked ?? formExampleId;
+
+    /// <summary>After an application or workload switch: a pick that no longer is the form's example follows the form's
+    /// (possibly relabelled) example, or clears when the form has none.</summary>
+    public static string? AfterSwitch(string? picked, string? formExampleId)
+        => picked is not null && !string.Equals(picked, formExampleId, StringComparison.Ordinal) ? formExampleId : picked;
 }
 
 /// <summary>Human labels for configured models — never an availability claim: the label comes from the APPLIED configuration

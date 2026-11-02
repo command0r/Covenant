@@ -21,6 +21,12 @@ public sealed record WorkloadDestinationView(
 
 public static class WorkloadDestination
 {
+    /// <summary>Route action (default): detection escalates and the PII/PHI policy (local) decides.</summary>
+    public const string StricterRuleNote = "If the prompt contains sensitive data, detection raises it and the stricter (local) rule applies.";
+
+    /// <summary>Reject action (ADR-0019).</summary>
+    public const string RejectNote = "This workload rejects detected sensitive data (PII/PHI): such a request is refused at the gateway, never rerouted.";
+
     public static WorkloadDestinationView For(CovenantConfigDto? cfg, WorkloadProfileDto? profile, string? requestedModel = null)
     {
         if (cfg is null) return Fail("Configuration not loaded yet.", null, null);
@@ -35,12 +41,16 @@ public static class WorkloadDestination
         var fallbacks = route.Eligible.Skip(1).Select(t => t.ConnectionId + "/" + t.ModelId).ToList();
         string? note = null;
         bool isPublic = string.Equals(baseline, "Public", StringComparison.Ordinal);
+        // ADR-0019: a workload that rejects detected sensitive data never applies "the stricter (local) rule" — that copy would
+        // contradict the gateway's refusal, so it is replaced by the rejection sentence.
+        bool rejects = ProfileEditing.RejectsSensitive(profile);
         if (isPublic && boundary == "Local")
             note = PolicyRoutes.IsLocalOnly(cfg.Mode)
                 ? "Public work runs locally: this configuration is Local-only. Cloud needs Hybrid mode and an approved cloud route."
                 : "Public means cloud-eligible, not cloud: this workload's policy routes it to a local model.";
-        else if (isPublic && boundary == "Cloud")
-            note = "If the prompt contains sensitive data, detection raises it and the stricter (local) rule applies.";
+        else if (isPublic && boundary == "Cloud" && !rejects)
+            note = StricterRuleNote;
+        if (rejects) note = note is null ? RejectNote : note + " " + RejectNote;
         if (route.Policy is { } sp && PolicyText.IsSanitized(sp))
             note = "Sanitized workload: only a covenant.record.v1 structured record leaves, as placeholders; prose and PHI are refused. Preview shows the exact payload.";
         // A pinned model is announced by the composer's own pin warning (with "Let policy choose"); not repeated here.

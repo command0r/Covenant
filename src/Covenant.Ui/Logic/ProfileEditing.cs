@@ -198,6 +198,8 @@ public static class ProfileEditing
         if (!IsBaseline(baseline)) return "Choose a baseline: Public, Internal, PII or PHI.";
         if (profile.WebSearchAllowed && !string.Equals(baseline, "Public", StringComparison.Ordinal))
             return "Turn off web search for this profile first — only a Public-baseline profile may search (ADR-0015).";
+        if (RejectsSensitive(profile) && PolicyText.IsSensitive(baseline))
+            return "Set \"When sensitive data is detected\" to Route first — a PII/PHI workload cannot reject sensitive data (ADR-0019).";
         profile.Baseline = baseline;
         return null;
     }
@@ -211,6 +213,33 @@ public static class ProfileEditing
         profile.WebSearchAllowed = allowed;
         return null;
     }
+
+    // ---- ADR-0019: action on detected sensitive data ----
+
+    public const string ActionRoute = "route";
+    public const string ActionReject = "reject";
+
+    /// <summary>The workload rejects requests that detection raises to PII/PHI (null / "route" = routed by policy).</summary>
+    public static bool RejectsSensitive(WorkloadProfileDto? p) => string.Equals(p?.SensitiveDataAction, ActionReject, StringComparison.Ordinal);
+
+    /// <summary>Sets the action. "reject" only on a Public or Internal baseline (the Host validates too): on a PII/PHI
+    /// baseline every request is sensitive by declaration.</summary>
+    public static string? SetSensitiveAction(WorkloadProfileDto profile, string? action)
+    {
+        bool reject = string.Equals(action, ActionReject, StringComparison.Ordinal);
+        if (reject && PolicyText.IsSensitive(profile.Baseline))
+            return "Only a Public or Internal workload can reject detected sensitive data — a PII/PHI workload is sensitive by declaration.";
+        profile.SensitiveDataAction = reject ? ActionReject : ActionRoute;
+        return null;
+    }
+
+    /// <summary>One line for lists and the composer.</summary>
+    public static string SensitiveActionText(WorkloadProfileDto? p) => RejectsSensitive(p)
+        ? "rejects detected sensitive data"
+        : "detected sensitive data is routed by policy (local only)";
+
+    public const string SensitiveActionExplained =
+        "When local detection finds PII or PHI in a request under this workload: Route lets the PII/PHI policy decide (sensitive data never goes to an external model, except an opt-in sanitized record route). Reject refuses the request before routing, cache, web search or any model, and tells the caller which workload would accept it.";
 
     public const string WebSearchExplained =
         "Web search sends a bounded query to Tavily for Public requests only, and only when web search is enabled in Settings. The search is charged to your budgets.";

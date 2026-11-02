@@ -1,0 +1,107 @@
+[
+  {
+    "name": "ssn",
+    "profile": "internal-default",
+    "ok": true,
+    "effect": "Allow",
+    "classification": "Pii",
+    "stage": null,
+    "reason": "allowed",
+    "attempts": [
+      {
+        "AttemptId": "att_1",
+        "ConnectionId": "ollama",
+        "ModelId": "qwen2.5-coder:7b",
+        "Outcome": "served",
+        "ErrorClass": null,
+        "DurationMs": 1013.2126,
+        "CostUsd": 0.0,
+        "CostBasis": "zero_priced",
+        "ReservedUsd": 0.0,
+        "Overrun": false,
+        "EffectiveMaxOutputTokens": 128,
+        "Truncated": null
+      }
+    ]
+  },
+  {
+    "name": "ssn",
+    "profile": "public-demo",
+    "ok": true,
+    "effect": "Deny",
+    "classification": "Pii",
+    "stage": "classify",
+    "reason": "sensitive data detected (PII: US SSN pattern): workload 'public-demo' rejects detected sensitive data \u2014 refused before routing, cache, web search or any model; nothing was sent. To process it on an approved route, choose workload 'internal-default'.",
+    "attempts": []
+  },
+  {
+    "name": "compact",
+    "profile": "internal-default",
+    "ok": true,
+    "effect": "Allow",
+    "classification": "Pii",
+    "stage": null,
+    "reason": "allowed",
+    "attempts": [
+      {
+        "AttemptId": "att_1",
+        "ConnectionId": "ollama",
+        "ModelId": "qwen2.5-coder:7b",
+        "Outcome": "served",
+        "ErrorClass": null,
+        "DurationMs": 263.7005,
+        "CostUsd": 0.0,
+        "CostBasis": "zero_priced",
+        "ReservedUsd": 0.0,
+        "Overrun": false,
+        "EffectiveMaxOutputTokens": 128,
+        "Truncated": null
+      }
+    ]
+  },
+  {
+    "name": "compact",
+    "profile": "public-demo",
+    "ok": true,
+    "effect": "Deny",
+    "classification": "Pii",
+    "stage": "classify",
+    "reason": "sensitive data detected (PII: possible identifier (standalone 9-digit number)): workload 'public-demo' rejects detected sensitive data \u2014 refused before routing, cache, web search or any model; nothing was sent. To process it on an approved route, choose workload 'internal-default'.",
+    "attempts": []
+  },
+  {
+    "name": "phi",
+    "profile": "internal-default",
+    "ok": true,
+    "effect": "Allow",
+    "classification": "Phi",
+    "stage": null,
+    "reason": "allowed",
+    "attempts": [
+      {
+        "AttemptId": "att_1",
+        "ConnectionId": "ollama",
+        "ModelId": "qwen2.5-coder:7b",
+        "Outcome": "served",
+        "ErrorClass": null,
+        "DurationMs": 93.831,
+        "CostUsd": 0.0,
+        "CostBasis": "zero_priced",
+        "ReservedUsd": 0.0,
+        "Overrun": false,
+        "EffectiveMaxOutputTokens": 128,
+        "Truncated": null
+      }
+    ]
+  },
+  {
+    "name": "phi",
+    "profile": "public-demo",
+    "ok": true,
+    "effect": "Deny",
+    "classification": "Phi",
+    "stage": "classify",
+    "reason": "sensitive data detected (PHI: health information about an identifiable person): workload 'public-demo' rejects detected sensitive data \u2014 refused before routing, cache, web search or any model; nothing was sent. To process it on an approved route, choose workload 'internal-default'.",
+    "attempts": []
+  }
+]

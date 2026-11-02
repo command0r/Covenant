@@ -269,10 +269,9 @@ public sealed class PlaygroundState : IDisposable
     {
         if (Running) return false;
         var ok = ComposerRules.SelectProfile(Form, _workspace.Applications, profileId);
-        // The example's own external pin described the previous workload: back to "Let policy choose".
-        if (ok) DemoExamples.ResetExamplePin(Form);
-        // An example filled for another workload no longer describes this request (e.g. Internal coding after switching to Public).
-        if (ok && Form.ExampleId is not null && !string.Equals(Form.ExampleProfileId, Form.ProfileId, StringComparison.Ordinal)) Form.ExampleId = null;
+        // The prompt is kept. The example's own external pin is reset; the example label is kept only for an exact twin on the
+        // new workload (the Internal/Public sensitive pair), otherwise cleared — never a stale example claim (pure, tested).
+        if (ok) DemoExamples.AfterWorkloadChange(Form, Examples);
         PresetNote = null;
         Notify();
         return ok;

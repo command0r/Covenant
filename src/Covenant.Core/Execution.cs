@@ -65,6 +65,10 @@ public static class TraceReasons
     /// <summary>Classify stage: local sensitive-data inspection could not complete (ADR-0018) — refused, nothing sent.</summary>
     public const string InspectionIncomplete = "inspection_incomplete";
 
+    /// <summary>Classify stage (ADR-0019): detection raised the request to PII/PHI and its workload rejects detected
+    /// sensitive data — refused before policy, cache, search and provider; nothing sent.</summary>
+    public const string SensitiveDataRejected = "sensitive_data_rejected";
+
     /// <summary>Default code of a denial when the denying stage did not name a finer one.</summary>
     public static string ForDenial(DenialKind kind) => kind switch
     {
