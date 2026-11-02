@@ -52,7 +52,8 @@ public static class StartupEgress
     /// secret reference's value, Auth:Keys values and Admin:Token. Values stay in this closure; never logged.</summary>
     public static Func<string, string> Redactor(IConfiguration config)
     {
-        var values = new List<string?> { config["OpenAI:ApiKey"], config["Anthropic:ApiKey"], config["Local:ApiKey"], config["Admin:Token"] };
+        var values = new List<string?> { config["OpenAI:ApiKey"], config["Anthropic:ApiKey"], config["Local:ApiKey"], config["Admin:Token"],
+            config[WebSearchEgress.SecretKey] };
         foreach (var child in config.GetSection("Secrets").GetChildren()) values.Add(child.Value);
         foreach (var child in config.GetSection("Auth:Keys").GetChildren()) values.Add(child["Key"]);
         return SecretRedaction.ForValues(values);

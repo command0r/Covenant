@@ -258,7 +258,7 @@ public sealed class FallbackTests
                 Retry = new RetrySettings { MaxAttempts = 3, DeadlineMs = 60_000 },
             }).ToList(),
         });
-        var (ctx, e) = await rig.RunAsync("Customer SSN 078-05-1120 needs a summary.", profile: "public-demo");
+        var (ctx, e) = await rig.RunAsync("Customer SSN 000-12-3456 needs a summary.", profile: "public-demo");
 
         Assert.Equal(DataClassification.Pii, e.Classification);
         Assert.Equal(DenialKind.UpstreamFailure, ctx.DenialKind);

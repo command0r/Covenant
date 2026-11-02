@@ -33,6 +33,7 @@ public static class ChatCompletions
         }
         finally
         {
+            if (buffer is not null && ctx.WebSearch is { } search) buffer.AttachSearch(WebSearchApi.View(request.RequestId!, search));
             buffer?.Complete(traces!.Clock.GetUtcNow());
         }
     }
@@ -174,6 +175,10 @@ public sealed class PlaygroundRequest
     [JsonPropertyName("workflow")] public string? Workflow { get; set; }
     [JsonPropertyName("use_case")] public string? UseCase { get; set; }
     [JsonPropertyName("client_request_id")] public string? ClientRequestId { get; set; }
+    /// <summary>ADR-0015: "off" (default) | "auto" | "required".</summary>
+    [JsonPropertyName("web_search")] public string? WebSearch { get; set; }
+    /// <summary>ADR-0015: explicit location for location-dependent questions (e.g. weather); never inferred.</summary>
+    [JsonPropertyName("location")] public string? Location { get; set; }
 }
 
 /// <summary>client_request_id de-duplication (ADR-0012): a resubmission within 10 minutes is answered 409 with the ORIGINAL
@@ -242,8 +247,19 @@ public static class PlaygroundApi
         // (and subscribe to the live trace) before the first response byte.
         if (!IsValidClientRequestId(body.ClientRequestId))
             return $"client_request_id is required: 1–{MaxClientRequestIdChars} chars of [A-Za-z0-9_-]";
+        if (ParseWebSearch(body.WebSearch) is null) return "web_search must be off, auto or required";
+        if (body.Location is { Length: > 100 }) return "location is too long (at most 100 characters)";
         return null;
     }
+
+    /// <summary>"off"/null/empty ⇒ Off; "auto" ⇒ Auto; "required" ⇒ Required; anything else ⇒ null (invalid).</summary>
+    public static WebSearchMode? ParseWebSearch(string? value) => (value ?? "off").Trim().ToLowerInvariant() switch
+    {
+        "" or "off" => WebSearchMode.Off,
+        "auto" => WebSearchMode.Auto,
+        "required" => WebSearchMode.Required,
+        _ => null,
+    };
 
     public static bool IsValidClientRequestId(string? id)
         => id is { Length: > 0 and <= MaxClientRequestIdChars } && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_');
@@ -309,7 +325,8 @@ public static class PlaygroundApi
                 Credential: null,
                 MaxOutputTokens: body.MaxTokens,
                 RequestId: requestId,
-                RequestedProfile: string.IsNullOrWhiteSpace(body.ProfileId) ? null : body.ProfileId.Trim());
+                RequestedProfile: string.IsNullOrWhiteSpace(body.ProfileId) ? null : body.ProfileId.Trim(),
+                WebSearch: new WebSearchRequest(ParseWebSearch(body.WebSearch) ?? WebSearchMode.Off, string.IsNullOrWhiteSpace(body.Location) ? null : body.Location));
             var ctx = new InferenceContext(request);
             using var lease = SnapshotLease.Bind(runtime, ctx);   // ADR-0011: one configuration version for the whole request
             var team = ctx.Configuration?.FindApplication(appId)?.Team ?? "unknown";

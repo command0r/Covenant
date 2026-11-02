@@ -2,6 +2,7 @@
 @inject AppState State
 @inject PlaygroundState Pg
 @inject Interop Interop
+@inject NavigationManager Nav
 @implements IDisposable
 
 <div class="shell">
@@ -24,10 +25,20 @@
 </div>
 
 @code {
-    protected override void OnInitialized() => State.Changed += OnChanged;
+    private bool _navigationPending = true;
+    protected override void OnInitialized()
+    {
+        State.Changed += OnChanged;
+        Nav.LocationChanged += OnLocationChanged;
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
+        if (_navigationPending)
+        {
+            _navigationPending = false;
+            await Interop.ResetPageScrollAsync(new Uri(Nav.Uri).Fragment);
+        }
         if (!firstRender) return;
         // Browser-local console preference (Settings → Console preferences); absent = streaming.
         try
@@ -36,6 +47,15 @@
         }
         catch (JSException) { /* storage unavailable: keep the default */ }
     }
+    private void OnLocationChanged(object? sender, Microsoft.AspNetCore.Components.Routing.LocationChangedEventArgs args)
+    {
+        _navigationPending = true;
+        _ = InvokeAsync(StateHasChanged);
+    }
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
-    public void Dispose() => State.Changed -= OnChanged;
+    public void Dispose()
+    {
+        State.Changed -= OnChanged;
+        Nav.LocationChanged -= OnLocationChanged;
+    }
 }

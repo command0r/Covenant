@@ -1,0 +1,40 @@
+    @if (Record.WebSearch is not null || Record.ToolCalls is { Count: > 0 })
+    {
+        <section class="drawer-section" aria-label="Web search">
+            <h3>Web search</h3>
+            @if (!string.IsNullOrWhiteSpace(Status)) { <span class="secondary">@Status</span> }
+            @if (Record.WebSearch is { } w)
+            {
+                <dl class="facts">
+                    <dt>Mode</dt><dd class="mono">@w.Mode @(w.Cue is { Length: > 0 } cue ? "· cue " + cue : "")</dd>
+                    <dt>Outcome</dt><dd class="mono">@w.Outcome @(w.ReasonCode is { Length: > 0 } rc ? "· " + rc : "")</dd>
+                    <dt>Sources (recorded)</dt><dd>@(w.SourceCount is { } n ? WebSourcesText.Count(n) + (w.SourceHosts is { Count: > 0 } hs ? " · " + string.Join(", ", hs) : "") : "None")</dd>
+                    @if (w.DurationMs is { } wd)
+                    {
+                        <dt>Duration</dt><dd>@Fmt.Ms(wd) (server-measured)</dd>
+                    }
+                </dl>
+            }
+            @if (Record.ToolCalls is { Count: > 0 } tools)
+            {
+                <ol class="attempt-list">
+                    @foreach (var t in tools)
+                    {
+                        <li>
+                            <span class="mono">@t.ToolCallId</span>
+                            <span class="mono">@(t.Tool + " · " + t.Provider)</span>
+                            <span>@(t.Outcome + (t.ErrorClass is { } tec ? " · " + tec : ""))</span>
+                            <span class="subtle">@CostText.ToolCost(t)</span>
+                        </li>
+                    }
+                </ol>
+            }
+            <span class="note">Evidence records only bounded search metadata — never the query, the location or the snippets.</span>
+        </section>
+    }
+
+
+@code {
+    [Parameter, EditorRequired] public AuditEntryView Record { get; set; } = default!;
+    [Parameter] public string? Status { get; set; }
+}

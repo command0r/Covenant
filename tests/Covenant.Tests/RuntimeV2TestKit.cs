@@ -47,6 +47,8 @@ internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatCl
 
     public int Calls => Volatile.Read(ref _calls);
     public MEAI.ChatOptions? LastOptions { get; private set; }
+    /// <summary>The messages of the most recent call (ADR-0015 grounding assertions).</summary>
+    public IReadOnlyList<MEAI.ChatMessage> LastMessages { get; private set; } = [];
     public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     /// <summary>Invoked when a call starts (before its behaviour), e.g. to trip the pause between attempts.</summary>
     public Action? OnCall { get; set; }
@@ -70,6 +72,7 @@ internal sealed class StubChatClient(string reply = "stub reply") : MEAI.IChatCl
     {
         Interlocked.Increment(ref _calls);
         LastOptions = options;
+        LastMessages = messages.ToList();
         OnCall?.Invoke();
         Entered.TrySetResult();
         var (mode, error) = Next();
@@ -162,7 +165,7 @@ internal sealed class V2Rig
     public RuntimeSnapshot Snapshot { get; set; } = null!;
 
     public static V2Rig Build(CovenantConfig config, IReadOnlyDictionary<string, MEAI.IChatClient> clients, TimeProvider? clock = null,
-        ResponseCache? cache = null, BudgetLedger? ledger = null, InMemoryLedgerStore? store = null)
+        ResponseCache? cache = null, BudgetLedger? ledger = null, InMemoryLedgerStore? store = null, IWebSearchClient? search = null, bool withSearch = false)
     {
         store ??= new InMemoryLedgerStore();
         ledger ??= new BudgetLedger(store, clock: clock);
@@ -188,6 +191,7 @@ internal sealed class V2Rig
             new RateLimitStage(new RateCounter(), new RateCounter(), new RateLimitConfig()),
             new PauseStage(kill),
             new BudgetStage(kill, ledger),
+            .. (withSearch || search is not null ? new IPipelineStage[] { new WebSearchStage(search, new RegexDataClassifier()) } : Array.Empty<IPipelineStage>()),
             new ProviderCallStage(new ChatClientRegistry(clients), health, classifier: SdkProviderFailureClassifier.Shared),
             new AttributionStage(new PriceBook(new Dictionary<string, (decimal, decimal)>())),
         ]);
@@ -195,11 +199,11 @@ internal sealed class V2Rig
     }
 
     public async Task<(InferenceContext Ctx, AuditEntry Entry)> RunAsync(string prompt, string? profile = null, string key = "demo-key",
-        bool stream = false, int? maxTokens = null, string? model = null, CancellationToken ct = default)
+        bool stream = false, int? maxTokens = null, string? model = null, CancellationToken ct = default, WebSearchRequest? webSearch = null)
     {
         var ctx = new InferenceContext(new InferenceRequest("caller", [new ChatMessage(ChatRole.User, prompt)], model,
             new AttributionTags("self-declared", "wf", "uc"), Stream: stream, Credential: key, MaxOutputTokens: maxTokens,
-            RequestId: $"req_{Guid.NewGuid():n}", RequestedProfile: profile));
+            RequestId: $"req_{Guid.NewGuid():n}", RequestedProfile: profile, WebSearch: webSearch));
         ctx.Configuration = Snapshot;
         ctx.ConfigVersion = Snapshot.Version;
         var deltas = new System.Text.StringBuilder();

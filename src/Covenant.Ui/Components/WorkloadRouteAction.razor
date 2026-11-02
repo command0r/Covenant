@@ -1,0 +1,87 @@
+@inject ConfigEditor Editor
+
+@* "Route a workload here…" for one configured model (Connections). Explicit and additive: shows exactly what would be
+   added (profile, profile-scoped policy, grants) or why it is refused, then puts it into the configuration DRAFT for the
+   normal Preview impact → Save & apply. Never edits existing rules, never invents a price, never sends Internal work to
+   a cloud model. *@
+
+@if (!_open)
+{
+    <button type="button" class="btn ghost sm" disabled="@(!CanEdit)" @onclick="() => _open = true"
+            title="Add a workload profile and a policy that routes it to this model (draft only)">Route a workload here…</button>
+}
+else
+{
+    var current = Editor.Current;
+    var preset = WorkloadRouteSetup.Presets.FirstOrDefault(p => p.ProfileId == _profile);
+    var plan = current is null || preset is null ? null : WorkloadRouteSetup.Plan(current, preset, Connection.Id, ModelId);
+    <div class="workload-route" role="group" aria-label="@("Route a workload to " + ModelId)">
+        <div class="field">
+            <label for="@_id">Workload for <span class="mono">@ModelId</span></label>
+            <select id="@_id" class="input" value="@_profile" @onchange="e => _profile = e.Value?.ToString()">
+                <option value="" disabled>Choose a workload…</option>
+                @foreach (var p in WorkloadRouteSetup.PresetsFor(Connection))
+                {
+                    <option value="@p.ProfileId">@(p.Name + " (" + p.Baseline + ")")</option>
+                }
+            </select>
+            @if (ComposerRules.BoundaryLabel(Connection.Boundary) == "Cloud")
+            {
+                <span class="help">Cloud models serve Public workloads only.</span>
+            }
+        </div>
+        @if (plan is { Ok: false })
+        {
+            <span class="note warn" role="status">@plan.Problem</span>
+        }
+        else if (plan is { } ok)
+        {
+            <ul class="plain-list secondary">
+                @foreach (var c in ok.Changes) { <li>@c</li> }
+            </ul>
+        }
+        @if (_error is { } err) { <span class="note bad" role="status">@err</span> }
+        <div class="btn-row tight">
+            <button type="button" class="btn sm primary" disabled="@(plan is not { Ok: true } || !CanEdit)" @onclick="() => ApplyAsync(preset!)">Add to draft and preview impact</button>
+            <button type="button" class="btn sm" @onclick="Close">Cancel</button>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public ConnectionDto Connection { get; set; } = default!;
+    [Parameter, EditorRequired] public string ModelId { get; set; } = "";
+
+    private readonly string _id = "wr-" + Guid.NewGuid().ToString("n")[..8];
+    private bool _open;
+    private string? _profile;
+    private string? _error;
+
+    private bool CanEdit => Editor.Applied is not null && !Editor.Saving && (!Editor.Editing || Editor.Owner == "connections" || !Editor.IsDirty);
+
+    private void Close()
+    {
+        _open = false;
+        _profile = null;
+        _error = null;
+    }
+
+    private async Task ApplyAsync(WorkloadPreset preset)
+    {
+        _error = null;
+        if (!Editor.BeginEdit("connections") || Editor.Draft is not { } draft)
+        {
+            _error = "Another page is editing the configuration — finish or discard that draft first.";
+            return;
+        }
+        var result = WorkloadRouteSetup.ApplyTo(draft, preset, Connection.Id, ModelId);
+        if (!result.Ok)
+        {
+            _error = result.Problem;
+            return;
+        }
+        Editor.Touch();
+        Close();
+        await Editor.ValidateAsync();
+    }
+}

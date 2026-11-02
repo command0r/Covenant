@@ -140,6 +140,20 @@ public sealed class AdminApi(HttpClient http, AppState state)
         catch (JsonException) { return (raw.Status, null); }
     }
 
+    /// <summary>GET /admin/web-search (ADR-0015): readiness and setup steps; never the key.</summary>
+    public Task<WebSearchStatusDto> GetWebSearchStatusAsync(CancellationToken ct = default)
+        => GetAsync("/admin/web-search", UiJsonContext.Default.WebSearchStatusDto, ct);
+
+    /// <summary>GET /admin/requests/{id}/search (ADR-0015): the sources actually retrieved. 404 = the request did not ask
+    /// for web sources, or its transient record expired.</summary>
+    public async Task<(int Status, RequestSearchDto? Search)> GetRequestSearchAsync(string requestId, CancellationToken ct = default)
+    {
+        var raw = await SendRawAsync(HttpMethod.Get, "/admin/requests/" + Uri.EscapeDataString(requestId) + "/search", null, null, ct);
+        if (raw.Status != 200) return (raw.Status, null);
+        try { return (raw.Status, JsonSerializer.Deserialize(raw.Body, UiJsonContext.Default.RequestSearchDto)); }
+        catch (JsonException) { return (raw.Status, null); }
+    }
+
     /// <summary>GET /admin/audit/segments — the current segment plus archived siblings (ids only).</summary>
     public Task<List<AuditSegmentDto>> GetSegmentsAsync(CancellationToken ct = default)
         => GetAsync("/admin/audit/segments", UiJsonContext.Default.ListAuditSegmentDto, ct);

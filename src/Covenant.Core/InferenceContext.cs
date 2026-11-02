@@ -82,6 +82,8 @@ public sealed class InferenceContext(InferenceRequest request)
 
     /// <summary>Set by the cache stage on a hit: served without any provider call, cost $0.</summary>
     public bool ServedFromCache { get; set; }
+    /// <summary>What the exact cache did for this request (<see cref="CacheOutcomes"/>); null = cache stage not reached.</summary>
+    public string? CacheOutcome { get; set; }
 
     public bool IsDenied => DenialReason is not null;
 
@@ -135,6 +137,20 @@ public sealed class InferenceContext(InferenceRequest request)
     /// <summary>Every provider attempt that was actually started, in order.</summary>
     public List<AttemptRecord> Attempts { get; } = [];
 
+    // ---- Governed web search (ADR-0015). Additive; null/empty when the request did not ask for web sources. ----
+    /// <summary>Search facts (set by the search stage when the request asked for web sources).</summary>
+    public WebSearchState? WebSearch { get; set; }
+
+    /// <summary>Non-inference tool calls charged to this request (today: one web search at most).</summary>
+    public List<ToolCallRecord> ToolCalls { get; } = [];
+
+    /// <summary>Messages actually sent to the model when they differ from the request (grounded by search results). The
+    /// canonical request — and therefore evidence (prompt hash/size/preview) — is never modified. Null ⇒ request messages.</summary>
+    public IReadOnlyList<ChatMessage>? ModelMessages { get; set; }
+
+    /// <summary>The messages the provider receives: <see cref="ModelMessages"/> when grounded, else the request's.</summary>
+    public IReadOnlyList<ChatMessage> MessagesForModel => ModelMessages ?? Request.Messages;
+
     /// <summary>The target whose attempt produced <see cref="Response"/> (primary or an approved fallback).</summary>
     public RouteTarget? ServedTarget { get; set; }
 
@@ -165,6 +181,32 @@ public sealed class InferenceContext(InferenceRequest request)
     public IReadOnlyList<string> StageOrder { get; set; } = [];
 
     public void MarkStageEntered(string stage) => _enteredStages.Add(stage);
+
+    private string? _pendingStageSkip;
+
+    /// <summary>The running stage declares it had nothing to do (bounded reason code): the pipeline reports it as
+    /// "skipped" instead of "passed" when it hands over or returns.</summary>
+    public void MarkCurrentStageSkipped(string reasonCode) => _pendingStageSkip = reasonCode;
+
+    /// <summary>The current stage passed with a specific outcome worth showing (e.g. cache "cache_miss"); emitted as the
+    /// reason code of its "passed" event instead of a bare Passed.</summary>
+    public void MarkCurrentStagePassed(string reasonCode) => _pendingStagePass = reasonCode;
+
+    private string? _pendingStagePass;
+
+    internal string? TakeStagePass()
+    {
+        var s = _pendingStagePass;
+        _pendingStagePass = null;
+        return s;
+    }
+
+    internal string? TakeStageSkip()
+    {
+        var s = _pendingStageSkip;
+        _pendingStageSkip = null;
+        return s;
+    }
 
     /// <summary>Emits one trace event (server UTC time). Bounded: events beyond <see cref="MaxTraceEvents"/> are dropped.</summary>
     public void Trace(string stage, string state, double? durationMs = null, string? reasonCode = null, string? attemptId = null, string? target = null,

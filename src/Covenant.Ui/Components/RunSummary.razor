@@ -21,7 +21,7 @@
             </button>
         }
     </div>
-    @if (!Run.InFlight && Run.Outcome is { } ox)
+    @if (!Large && !Run.InFlight && Run.Outcome is { } ox)
     {
         <span class="run-explain">@ox.Explanation</span>
     }
@@ -29,6 +29,19 @@
     {
         <span class="note bad">@te</span>
     }
+    @if (Large)
+    {
+        <dl class="run-facts presentation-facts">
+            <div><dt>Caller · owning team</dt><dd>@(Run.Evidence.Record is { } owner ? (ComposerRules.Find(Ws.Applications, owner.ApplicationId) is { } app ? ComposerRules.ApplicationName(app) : owner.ApplicationId ?? "Not recorded") + " · " + owner.Tags.Team : RunText.AwaitingText(Run))</dd></div>
+            <div><dt>Destination</dt><dd>@if (Run.Evidence.Record is { } record) { var destination = ModelFacts.Destination(record, Ws.Connections); <span class="wrap-any">@destination.Text</span> <BoundaryTag Boundary="@destination.Boundary" /> } else { @RunText.AwaitingText(Run) }</dd></div>
+            <div><dt>Classification</dt><dd>@RunText.Classification(Run)</dd></div>
+            <div><dt>Charged after execution</dt><dd>@RunText.Cost(Run)</dd></div>
+            <div><dt>Duration</dt><dd>@RunText.Duration(Run)</dd></div>
+            <div><dt>Evidence</dt><dd>@{ var evidence = RunText.Evidence(Run); }<span class="dot @evidence.Tone" aria-hidden="true"></span> @evidence.Text</dd></div>
+        </dl>
+    }
+    else
+    {
     <dl class="run-facts">
         <div class="wide">
             <dt>Classification</dt>
@@ -52,6 +65,18 @@
                 }
             </dd>
         </div>
+        @if (Run.Evidence.Record is { } own)
+        {
+            <div class="wide">
+                <dt>Requested by · pays <span class="subtle">(assigned before the call)</span></dt>
+                <dd>@Ownership.Assigned(own)</dd>
+            </div>
+            <div class="wide">
+                <dt>Charged <span class="subtle">(finalized after execution)</span></dt>
+                <dd>@Ownership.Finalized(own)</dd>
+            </div>
+            <div><dt>Cache</dt><dd>@Ownership.Cache(own)</dd></div>
+        }
         <div><dt>Duration</dt><dd>@RunText.Duration(Run)</dd></div>
         @if (!Large)
         {
@@ -64,6 +89,7 @@
             <dd><span class="dot @ev.Tone" aria-hidden="true"></span> @ev.Text</dd>
         </div>
     </dl>
+    }
 </div>
 
 @code {

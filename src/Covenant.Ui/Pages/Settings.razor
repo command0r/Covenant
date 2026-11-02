@@ -25,7 +25,7 @@
             </div>
         </div>
 
-        <EditorBar Owner="settings" Subject="Operational settings" ClaimedPaths="@(new[] { "settings" })"
+        <EditorBar Owner="settings" Subject="Operational settings" ClaimedPaths="@(new[] { "settings", "web_search" })"
                    ViewHint="Viewing applied operational settings. Edit to change them; they apply to new requests after Save." />
 
         <section class="panel" aria-labelledby="op-h">
@@ -91,6 +91,102 @@
                     </div>
                 </div>
             }
+        </section>
+
+        @* ADR-0015: governed web search. Readiness comes from GET /admin/web-search (the Host); the key is a server-side secret
+           and never appears here. Enabled/limits/price are versioned configuration edited in the same draft. *@
+        <section class="panel" aria-labelledby="ws-h">
+            <div class="panel-head">
+                <h2 id="ws-h">Web search (Tavily)</h2>
+                <span class="panel-sub">Server configuration · off by default · Public requests only · charged to budgets</span>
+            </div>
+            @if (_ws is { } wst)
+            {
+                <div class="result-head">
+                    <StatusPill Kind="@(wst.Ready ? "served" : "unknown")" Text="@(wst.Ready ? "Ready" : "Not ready")" />
+                    <span class="secondary subtle">Status of the applied configuration@(wst.ConfigVersion is { } wv ? " v" + wv.ToString(System.Globalization.CultureInfo.InvariantCulture) : "")</span>
+                    <button type="button" class="btn ghost sm" @onclick="LoadWebSearchAsync">Refresh</button>
+                </div>
+                <ul class="plain-list secondary">
+                    @foreach (var item in WebSourcesText.Checklist(wst))
+                    {
+                        <li><span class="dot @(item.Ok ? "ok" : "warn")" aria-hidden="true"></span> @item.Label — @(item.Ok ? "yes" : "no")</li>
+                    }
+                </ul>
+                @if (wst.Setup.Count > 0)
+                {
+                    <details class="tech" open="@(!wst.Ready)">
+                        <summary>Setup steps</summary>
+                        <ol class="plain-list secondary">
+                            @foreach (var step in wst.Setup) { <li>@step</li> }
+                        </ol>
+                    </details>
+                }
+            }
+            else if (_wsError is { } wse)
+            {
+                <span class="note warn">@wse</span>
+            }
+            else
+            {
+                <Skeleton Lines="2" Label="Loading web search status" />
+            }
+
+            @if (Editor.Current is { } cur)
+            {
+                if (cur.WebSearch is not { } wcfg)
+                {
+                    <div class="btn-row">
+                        <span class="secondary row-main">Web search is not configured (disabled).</span>
+                        @if (Editing)
+                        {
+                            <button type="button" class="btn" @onclick="() => AddWebSearch(cur)">Configure web search…</button>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="form-grid">
+                        <div class="field">
+                            <label class="switch"><input type="checkbox" disabled="@(!Editing)" @bind="wcfg.Enabled" @bind:after="Editor.Touch" /> Enable web search</label>
+                            <span class="help">Also needs Hybrid mode, the server key, the egress allow-list entry, a price, and a Public profile allowed under Policies → Applications &amp; workload profiles.</span>
+                            <FieldIssues Issues="@Editor.Issues" Path="web_search.enabled" />
+                        </div>
+                        <div class="field">
+                            <label for="ws-price">Price per Tavily credit (USD)</label>
+                            <input id="ws-price" class="input mono" type="number" min="0" step="0.0001" disabled="@(!Editing)" @bind="wcfg.PricePerCreditUsd" @bind:after="Editor.Touch" aria-describedby="ws-price-h" />
+                            <span id="ws-price-h" class="help">From your Tavily plan. A basic search uses 1 credit. Empty = unknown — search stays refused (never treated as $0).</span>
+                            <FieldIssues Issues="@Editor.Issues" Path="web_search.price_per_credit_usd" />
+                        </div>
+                        <div class="field">
+                            <label for="ws-basis">Price basis (optional)</label>
+                            <input id="ws-basis" class="input" maxlength="200" disabled="@(!Editing)" @bind="wcfg.PriceBasis" @bind:after="Editor.Touch" placeholder="e.g. Tavily pay-as-you-go" />
+                            <FieldIssues Issues="@Editor.Issues" Path="web_search.price_basis" />
+                        </div>
+                        <div class="field">
+                            <label for="ws-max">Max results (1–3)</label>
+                            <input id="ws-max" class="input mono" type="number" min="1" max="3" disabled="@(!Editing)" @bind="wcfg.MaxResults" @bind:after="Editor.Touch" />
+                            <FieldIssues Issues="@Editor.Issues" Path="web_search.max_results" />
+                        </div>
+                        <div class="field">
+                            <label for="ws-to">Timeout (seconds, 1–30)</label>
+                            <input id="ws-to" class="input mono" type="number" min="1" max="30" disabled="@(!Editing)" @bind="wcfg.TimeoutSeconds" @bind:after="Editor.Touch" />
+                            <span class="help">One search per request, no retries. A timeout fails the request clearly.</span>
+                            <FieldIssues Issues="@Editor.Issues" Path="web_search.timeout_seconds" />
+                        </div>
+                    </div>
+                }
+            }
+            <details class="tech">
+                <summary>How web search is governed</summary>
+                <ul class="plain-list secondary">
+                    <li>The Playground's Web sources control: Off (default), Auto (only when the prompt asks for current information) or Required.</li>
+                    <li>Auth, policy, pause, rate limit and budget run before any search. Internal, PII and PHI requests — or a sensitive query or location — are never searched.</li>
+                    <li>A weather question without a location is answered with a request for one; Covenant never guesses your location.</li>
+                    <li>Exactly one bounded search (up to 3 results). Results are untrusted data for the model, never instructions. If the search fails or finds nothing, the request fails instead of answering from stale knowledge.</li>
+                    <li>Evidence records the search outcome, source hosts and charge — never the query, location or snippets.</li>
+                </ul>
+            </details>
         </section>
 
         <section class="panel" aria-labelledby="apps-link-h">
@@ -224,6 +320,8 @@
     private bool _resetting;
     private string? _resetError;
     private ResetResponse? _resetResult;
+    private WebSearchStatusDto? _ws;
+    private string? _wsError;
     /// <summary>null = not checked yet; true = GET /admin/budgets answered (ADR-0014 ledger); false = 404 (pre-v2 counters).</summary>
     private bool? _ledger;
 
@@ -240,10 +338,39 @@
     protected override async Task OnInitializedAsync()
     {
         State.Changed += OnChanged;
+        Interop.ThemeChanged += OnThemeChanged;
         Editor.Changed += OnChanged;
         Pg.Changed += OnChanged;
         await Editor.EnsureLoadedAsync();
         await CheckLedgerAsync();
+        await LoadWebSearchAsync();
+    }
+
+    private async Task LoadWebSearchAsync()
+    {
+        if (!State.Connected) return;
+        try
+        {
+            _ws = await Api.GetWebSearchStatusAsync();
+            _wsError = null;
+        }
+        catch (ApiException ex) when (ex.Status == System.Net.HttpStatusCode.NotFound)
+        {
+            _ws = null;
+            _wsError = "This Host does not support governed web search (GET /admin/web-search is missing).";
+        }
+        catch (Exception ex)
+        {
+            _ws = null;
+            _wsError = "Web search status unavailable: " + ex.Message;
+        }
+    }
+
+    private void AddWebSearch(CovenantConfigDto draft)
+    {
+        if (!Editing || draft.WebSearch is not null) return;
+        draft.WebSearch = new WebSearchSettingsDto { Enabled = false, MaxResults = 3, TimeoutSeconds = 10 };
+        Editor.Touch();
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -370,11 +497,14 @@
         Nav.NavigateTo("connect");
     }
 
+    private void OnThemeChanged(string theme) { _theme = theme; _ = InvokeAsync(StateHasChanged); }
+
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
 
     public void Dispose()
     {
         State.Changed -= OnChanged;
+        Interop.ThemeChanged -= OnThemeChanged;
         Editor.Changed -= OnChanged;
         Pg.Changed -= OnChanged;
     }

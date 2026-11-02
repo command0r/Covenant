@@ -95,7 +95,11 @@ public sealed class InferencePipeline
             if (!handedOver)
             {
                 handedOver = true;
-                c.Trace(stageName, TraceStates.Passed, watch.Elapsed.TotalMilliseconds);
+                // A stage that had nothing to do (e.g. web search Off / not triggered) reports "skipped" with its reason,
+                // never a misleading "passed".
+                var skip = c.TakeStageSkip();
+                var pass = c.TakeStagePass();
+                c.Trace(stageName, skip is null ? TraceStates.Passed : TraceStates.Skipped, watch.Elapsed.TotalMilliseconds, skip ?? pass);
             }
             return next(c, t);
         };
@@ -128,8 +132,10 @@ public sealed class InferencePipeline
         }
         else
         {
-            ctx.Trace(stageName, TraceStates.Passed, watch.Elapsed.TotalMilliseconds,
-                ctx.ServedFromCache && stageName == "cache" ? TraceReasons.CacheHit : null);
+            var skip = ctx.TakeStageSkip();
+            var pass = ctx.TakeStagePass();
+            ctx.Trace(stageName, skip is null ? TraceStates.Passed : TraceStates.Skipped, watch.Elapsed.TotalMilliseconds,
+                skip ?? pass ?? (ctx.ServedFromCache && stageName == "cache" ? TraceReasons.CacheHit : null));
         }
     }
 
@@ -144,6 +150,7 @@ public sealed class InferencePipeline
             "Classify" => "classify",
             "RateLimit" => "rate_limit",
             "ProviderCall" => "provider",
+            "WebSearch" => "search",
             _ => name.ToLowerInvariant(),
         };
     }

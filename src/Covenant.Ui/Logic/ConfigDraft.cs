@@ -80,6 +80,8 @@ public static class ChangeSummary
         Section(lines, "profile", before.Profiles, after.Profiles, p => p.Id, p => Json(p));
         if (!string.Equals(Json(before.Settings), Json(after.Settings), StringComparison.Ordinal))
             lines.Add("operational settings changed");
+        if (!string.Equals(Json(before.WebSearch), Json(after.WebSearch), StringComparison.Ordinal))
+            lines.Add("web search settings changed");
         return lines;
     }
 
@@ -119,6 +121,7 @@ public static class ChangeSummary
             case ApplicationDto ap: holder.Applications.Add(ap); break;
             case WorkloadProfileDto pr: holder.Profiles.Add(pr); break;
             case OperationalSettingsDto s: holder.Settings = s; break;
+            case WebSearchSettingsDto w: holder.WebSearch = w; break;
             default: return "";
         }
         return ConfigCopy.Canonical(holder);
@@ -290,6 +293,14 @@ public static class IssueHelp
             "An application's default profile must also be granted to it. Grant it, or choose another default.",
         "profile_not_found" =>
             "A grant, default or policy names a workload profile that does not exist. Create the profile, or remove the reference.",
+        "search_requires_hybrid" =>
+            "Web search is an external call, so it needs Hybrid mode. Local-only means no external calls of any kind — switch the mode on the Policies page, or keep web search off.",
+        "search_unpriced" =>
+            "Enter the price per Tavily credit from your Tavily plan. An unknown price is never treated as $0, so search stays refused until it is set.",
+        "search_egress_not_approved" =>
+            "api.tavily.com:443 is not on the startup egress allow-list. Add it to Providers:ProbeAllowList in the Host's startup configuration and restart; the console cannot widen egress.",
+        "search_profile_not_public" =>
+            "Only a Public-baseline profile may use web search. Turn web search off for this profile, or change its baseline to Public.",
         "missing_global_budget" =>
             "A global budget is required: nothing is unlimited.",
         _ => null,
