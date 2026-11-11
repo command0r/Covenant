@@ -170,22 +170,28 @@ public sealed class PlaygroundState : IDisposable
 
     public async Task PreviewRouteAsync()
     {
-        if (Running || string.IsNullOrWhiteSpace(Form.ApplicationId) || string.IsNullOrWhiteSpace(Form.Prompt)) return;
+        if (Running || !RoutePreview.CanPreview(Form)) return;
         var key = RoutePreview.KeyOf(Form);
-        Preview = new RoutePreview(key, null, null, Loading: true);
+        var pending = new RoutePreview(key, null, null, Loading: true);
+        Preview = pending;
         Notify();
+        RoutePreview done;
         try
         {
             var result = await _admin.SimulateAsync(new SimulateRequestDto
             {
                 ApplicationId = Form.ApplicationId!, ProfileId = Form.ProfileId, Prompt = Form.Prompt, Model = Form.RequestedModel,
             });
-            Preview = new RoutePreview(key, result, null, Loading: false);
+            done = new RoutePreview(key, result, null, Loading: false);
         }
         catch (Exception ex)
         {
-            Preview = new RoutePreview(key, null, "Route preview unavailable: " + ex.Message, Loading: false);
+            done = new RoutePreview(key, null, "Route preview unavailable: " + ex.Message, Loading: false);
         }
+        // Latest request wins: a quick second workload switch starts a newer dry run, and this older answer must not
+        // replace it (it would show the previous workload's route as "stale").
+        if (!ReferenceEquals(Preview, pending)) return;
+        Preview = done;
         Notify();
     }
     public bool CanRun => !Running && Problem is null;
@@ -275,6 +281,15 @@ public sealed class PlaygroundState : IDisposable
         PresetNote = null;
         Notify();
         return ok;
+    }
+
+    /// <summary>The composer's workload switch: the prompt is kept and the Expected route follows the switch at once, so the
+    /// same request visibly changes outcome (e.g. Internal → served locally, Public → rejected at Classify). The preview is
+    /// the Host's dry run for the NEW workload — nothing is sent to a model and nothing runs until Run.</summary>
+    public async Task SelectProfileAndPreviewAsync(string? profileId)
+    {
+        if (!SelectProfile(profileId)) return;
+        if (RoutePreview.CanPreview(Form)) await PreviewRouteAsync();
     }
 
     /// <summary>After a manual edit: a preset-specific note is dropped once the form no longer holds that preset.</summary>
