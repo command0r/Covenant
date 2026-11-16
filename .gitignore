@@ -40,3 +40,6 @@ secrets.json
 __pycache__/
 *.pfx
 *.key
+
+# Editor backup files
+*.bkp

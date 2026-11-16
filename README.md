@@ -28,6 +28,17 @@ The numbered flow shows the checks in execution order. A matching cache entry av
 
 To update either diagram, edit its draw.io source and export a PNG with the same filename in `docs/diagrams/`.
 
+## Run locally
+
+On macOS or Linux, install the .NET 10 SDK, Python 3 and Ollama. The launcher also uses Bash, curl, OpenSSL and lsof. Start Ollama (open the app or run `ollama serve`), then run these commands from the repository root:
+
+```bash
+ollama pull qwen2.5-coder:7b
+./scripts/run-local-demo.sh
+```
+
+The launcher builds Covenant and opens the connected console at `http://localhost:5210/ui/`. A fresh local demo needs no cloud API key. In **Playground**, choose an example, select **Use example**, then **Run**. Press **Ctrl+C** in the launcher terminal to stop. Running the launcher again resumes the saved configuration.
+
 ## Working principles
 
 1. **Fail-closed.** No policy match → deny. Unclassified defaults to the most restrictive class. Misconfiguration → the appliance refuses to start. Detected raw PII/PHI is excluded from public provider routes. The one opt-in exception (ADR-0016) sends only a Covenant-built, sanitized payload of a bounded structured record for a dedicated PII workload; PHI and free text never qualify.
