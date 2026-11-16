@@ -85,10 +85,7 @@
 
     private void OnChanged() => _ = InvokeAsync(StateHasChanged);
 
-    private async Task SwitchAndPreviewAsync(string profileId)
-    {
-        if (Pg.SelectProfile(profileId)) await Pg.PreviewRouteAsync();
-    }
+    private Task SwitchAndPreviewAsync(string profileId) => Pg.SelectProfileAndPreviewAsync(profileId);
 
     public void Dispose()
     {

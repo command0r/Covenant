@@ -155,7 +155,7 @@
                 </span>
                 @if (ready.SwitchToProfile is { } alt)
                 {
-                    <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="() => Pg.SelectProfile(alt)">Switch to @(ComposerRules.Profile(Ws.Profiles, alt)?.Name ?? alt)</button>
+                    <button type="button" class="btn sm" disabled="@Pg.Running" @onclick="() => Pg.SelectProfileAndPreviewAsync(alt)">Switch to @(ComposerRules.Profile(Ws.Profiles, alt)?.Name ?? alt)</button>
                 }
             }
             else
@@ -334,7 +334,7 @@
 
     private void OnProfile(ChangeEventArgs e) => Pg.SelectProfile(e.Value?.ToString());
 
-    private void OnWorkload(string? profileId) => Pg.SelectProfile(profileId);
+    private Task OnWorkload(string? profileId) => Pg.SelectProfileAndPreviewAsync(profileId);
 
     private void OnCatalogModel(ChangeEventArgs e)
     {

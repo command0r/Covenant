@@ -44,7 +44,9 @@ send externally. If inspection cannot finish within its bounds, the request is r
 ## Reading a result
 
 Before Run, **Expected route** shows three boxes: **Sender → Covenant → Destination**. It comes only from the server's
-current preview. When you change the inputs or the configuration, it says *stale* instead of showing an old answer. A
+current preview. Switching the workload keeps the prompt and previews again at once, so the scheme shows the new
+workload's outcome for the same request. When you change other inputs or the configuration, it says *stale* instead of
+showing an old answer. A
 blocked preview says the destination would not be contacted. Web search adds a separate *external retrieval (Tavily)*
 badge, even when inference is local.
 

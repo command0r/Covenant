@@ -9,6 +9,11 @@ public sealed record RoutePreview(string Key, SimulateResponseDto? Result, strin
     public static string KeyOf(PlaygroundForm f)
         => string.Join("\u001f", f.ApplicationId ?? "", f.ProfileId ?? "", f.RequestedModel ?? "", f.Prompt);
 
+    /// <summary>The form holds enough for a Host dry run: a sender and a prompt. The workload switch uses this to decide
+    /// whether the Expected route can follow it at once (dry run only — no model call, no record, no spend).</summary>
+    public static bool CanPreview(PlaygroundForm f)
+        => !string.IsNullOrWhiteSpace(f.ApplicationId) && !string.IsNullOrWhiteSpace(f.Prompt);
+
     public bool IsCurrent(PlaygroundForm f, int? activeVersion = null)
         => string.Equals(Key, KeyOf(f), StringComparison.Ordinal)
            && (activeVersion is null || Result?.ConfigVersion == activeVersion);
