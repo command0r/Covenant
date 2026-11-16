@@ -30,7 +30,7 @@ To update either diagram, edit its draw.io source and export a PNG with the same
 
 ## Run locally
 
-On macOS or Linux, install the .NET 10 SDK, Python 3 and Ollama. The launcher also uses Bash, curl, OpenSSL and lsof. Start Ollama (open the app or run `ollama serve`), then run these commands from the repository root:
+On macOS or Linux, install the .NET 10 SDK (verified with 10.0.400), Python 3 and Ollama. The launcher also uses Bash, curl, OpenSSL and lsof. Start Ollama (open the app or run `ollama serve`), then run these commands from the repository root:
 
 ```bash
 ollama pull qwen2.5-coder:7b
