@@ -10,7 +10,7 @@ Research artifact: can inference governance be an architecturally separable cont
 
 Applications send AI requests through Covenant. It checks the caller, data, policy and budget before selecting an approved model. Local processing stays inside the organization. Cloud inference and web search cross the boundary only when permitted. Every outcome has an audit record and cost attribution.
 
-![Covenant system overview](docs/diagrams/covenant-overview.svg)
+![Covenant system overview](docs/diagrams/covenant-overview.png)
 
 [Edit the overview in Draw.io](docs/diagrams/covenant-overview.drawio)
 
@@ -18,7 +18,7 @@ Applications send AI requests through Covenant. It checks the caller, data, poli
 
 The numbered flow shows the checks in execution order. A matching cache entry avoids a model call. A refusal stops further work, but earlier calls can still have a cost. The final record identifies the application, team, route, outcome and charges.
 
-![Covenant request processing flow](docs/diagrams/covenant-architecture.svg)
+![Covenant request processing flow](docs/diagrams/covenant-architecture.png)
 
 [Edit the detailed diagram in Draw.io](docs/diagrams/covenant-architecture.drawio)
 
@@ -26,7 +26,7 @@ The numbered flow shows the checks in execution order. A matching cache entry av
 
 **Scope:** traffic must pass through Covenant to be governed. Direct chatbot access needs network or endpoint controls. Sensitive-data inspection is heuristic, not comprehensive DLP. The optional sanitized route accepts a narrow structured schema; it does not anonymize arbitrary prose or PHI.
 
-Both diagrams use editable Draw.io shapes and connectors. The matching SVG images are generated from [the diagram source](docs/diagrams/gen_diagram.py).
+To update either diagram, edit its draw.io source and export a PNG with the same filename in `docs/diagrams/`.
 
 ## Working principles
 
